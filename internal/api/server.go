@@ -40,7 +40,16 @@ type Server struct {
 	conns map[string]*entry
 	// cursorOwner 把游标 id 映射到所属连接，供 /results/{cid} 路由。
 	cursorOwner map[string]*entry
-	seq         int
+	// plans 按 id 保管变更预案。
+	// 只存服务端生成的预案：客户端不能回传预案，否则等于绕过风险分级。
+	plans map[string]*storedPlan
+	seq   int
+}
+
+type storedPlan struct {
+	plan *service.ChangePlan
+	exec *service.Executor
+	exp  time.Time
 }
 
 type entry struct {
@@ -55,7 +64,7 @@ func New(token string, opener Opener, audit service.AuditSink) *Server {
 		token = randomToken()
 	}
 	return &Server{token: token, opener: opener, audit: audit,
-		conns: map[string]*entry{}, cursorOwner: map[string]*entry{}}
+		conns: map[string]*entry{}, cursorOwner: map[string]*entry{}, plans: map[string]*storedPlan{}}
 }
 
 // Token 返回本次进程使用的访问令牌。
@@ -94,6 +103,8 @@ func (s *Server) routes() []route {
 		{http.MethodGet, "/api/v1/connections/{id}/tables", false, s.handleTables},
 		{http.MethodGet, "/api/v1/connections/{id}/tables/{name}/rows", false, s.handleTableRows},
 		{http.MethodPost, "/api/v1/connections/{id}/exec", false, s.handleExec},
+		{http.MethodPost, "/api/v1/connections/{id}/changes/plan", false, s.handleChangePlan},
+		{http.MethodPost, "/api/v1/changes/{pid}/apply", false, s.handleChangeApply},
 		{http.MethodPost, "/api/v1/connections/{id}/query", false, s.handleQuery},
 		{http.MethodGet, "/api/v1/results/{cid}/page", false, s.handlePage},
 		{http.MethodDelete, "/api/v1/results/{cid}", false, s.handleCloseCursor},
@@ -653,6 +664,122 @@ func atoiDefault(s string, def int) int {
 		return def
 	}
 	return n
+}
+
+type changePlanRequest struct {
+	Table   model.ObjectRef     `json:"table"`
+	Changes []service.RowChange `json:"changes"`
+}
+
+type changeApplyRequest struct {
+	ApprovalToken string `json:"approval_token"`
+}
+
+func (s *Server) handleChangePlan(w http.ResponseWriter, r *http.Request) {
+	e, ok := s.lookup(r)
+	if !ok {
+		writeError(w, http.StatusNotFound, "CONNECTION_NOT_FOUND", "connection", "连接不存在", "", false)
+		return
+	}
+	var req changePlanRequest
+	if err := decode(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, "REQUEST_INVALID", "internal", err.Error(), "", false)
+		return
+	}
+
+	plan, err := e.exec.BuildChangePlan(r.Context(), service.ChangeSetRequest{
+		Table: req.Table, Changes: req.Changes,
+	})
+	if errors.Is(err, service.ErrNoPrimaryKeyForEdit) {
+		writeError(w, http.StatusNotImplemented, "CAPABILITY_UNSUPPORTED", "internal",
+			err.Error(), "无主键表只能通过原始 SQL 修改，无法保证定位准确", false)
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "CHANGE_PLAN_FAILED", "internal", err.Error(), "", false)
+		return
+	}
+
+	// 预案由服务端保管：客户端只能拿 id 回来执行，不能自造预案。
+	s.mu.Lock()
+	s.plans[plan.ID] = &storedPlan{plan: plan, exec: e.exec, exp: plan.ExpiresAt}
+	s.mu.Unlock()
+
+	writeJSON(w, http.StatusCreated, plan)
+}
+
+func (s *Server) handleChangeApply(w http.ResponseWriter, r *http.Request) {
+	pid := r.PathValue("pid")
+
+	s.mu.RLock()
+	sp, ok := s.plans[pid]
+	s.mu.RUnlock()
+	if !ok {
+		writeError(w, http.StatusNotFound, "CHANGE_PLAN_NOT_FOUND", "resource",
+			"变更预案不存在或已被清理", "", false)
+		return
+	}
+
+	var req changeApplyRequest
+	if err := decode(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, "REQUEST_INVALID", "internal", err.Error(), "", false)
+		return
+	}
+
+	approved := false
+	if req.ApprovalToken != "" {
+		if !s.verifyApproval(req.ApprovalToken, sp.plan.ID) {
+			writeError(w, http.StatusConflict, "POLICY_APPROVAL_MISMATCH", "policy",
+				"审批凭证无效、已过期，或与当前预案不匹配", "重新生成预案", false)
+			return
+		}
+		approved = true
+	}
+
+	out, err := sp.exec.ApplyChangePlan(r.Context(), sp.plan, service.Request{
+		Approval: approved, StatementHash: sp.plan.ID, Actor: "human:http",
+	})
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "CHANGE_APPLY_FAILED", "internal", err.Error(), "", false)
+		return
+	}
+
+	if out.Blocked {
+		if out.ApprovalRequired {
+			exp := time.Now().Add(approvalTTL)
+			writeJSON(w, http.StatusPreconditionRequired, errorBody{Error: errorDetail{
+				Code: "POLICY_APPROVAL_REQUIRED", Category: "policy",
+				Message: out.Reason,
+				Hint:    "确认预案里的语句后，用返回的 token 重新提交",
+				Approval: &approvalInfo{
+					StatementHash: sp.plan.ID,
+					ExpiresAt:     exp.UTC().Format(time.RFC3339),
+					Token:         s.approvalToken(sp.plan.ID, exp),
+				},
+			}})
+			return
+		}
+		code, status, hint := classifyBlock(out)
+		writeError(w, status, code, "policy", out.Reason, hint, false)
+		return
+	}
+	if out.Err != nil {
+		writeError(w, out.Err.HTTPStatus(), out.Err.Code, out.Err.Category,
+			out.Err.Message, out.Err.Hint, out.Err.Retryable)
+		return
+	}
+
+	// 执行成功后预案作废，避免重复应用。
+	s.mu.Lock()
+	delete(s.plans, pid)
+	s.mu.Unlock()
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"execution_id": out.ExecutionID,
+		"risk":         out.Risk.String(),
+		"friction":     out.Friction.String(),
+		"duration_ms":  out.Duration.Milliseconds(),
+	})
 }
 
 func (s *Server) handleAudit(w http.ResponseWriter, r *http.Request) {

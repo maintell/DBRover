@@ -206,6 +206,9 @@ func buildDSN(cfg driver.ConnectConfig) string {
 		"timeout=10s",
 		"readTimeout=0", // 长查询由 ctx 控制
 		"interpolateParams=false",
+		// clientFoundRows：让 UPDATE 的 RowsAffected 返回「匹配行数」而不是「实际改动行数」。
+		// 否则把一行改成相同值会返回 0，被乐观并发校验误判成冲突。
+		"clientFoundRows=true",
 	}
 	for k, v := range cfg.Params {
 		params = append(params, k+"="+v)

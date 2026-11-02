@@ -344,6 +344,78 @@
         "responses": { "204": { "description": "已关闭" } }
       }
     },
+    "/api/v1/connections/{id}/changes/plan": {
+      "post": {
+        "summary": "生成数据变更预案（不执行）",
+        "description": "预案由服务端保管，客户端只能用 id 回来执行。无主键表返回 501。",
+        "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "string" } }],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["table", "changes"],
+                "properties": {
+                  "table": {
+                    "type": "object",
+                    "properties": {
+                      "kind": { "type": "string" },
+                      "schema": { "type": "string" },
+                      "name": { "type": "string" }
+                    }
+                  },
+                  "changes": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "required": ["op"],
+                      "properties": {
+                        "op": { "type": "string", "enum": ["insert", "update", "delete"] },
+                        "key": { "type": "object" },
+                        "before": { "type": "object", "description": "原值，用于乐观并发校验与回滚" },
+                        "after": { "type": "object" }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": { "description": "预案已生成（含 statements / rollback / risk / friction）" },
+          "400": { "description": "变更集非法" },
+          "501": { "description": "无主键表不支持（CAPABILITY_UNSUPPORTED）" }
+        }
+      }
+    },
+    "/api/v1/changes/{pid}/apply": {
+      "post": {
+        "summary": "执行数据变更预案",
+        "description": "单事务执行；任一条影响行数不符即整体回滚并返回 409。",
+        "parameters": [{ "name": "pid", "in": "path", "required": true, "schema": { "type": "string" } }],
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "approval_token": { "type": "string" }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": { "description": "已应用" },
+          "404": { "description": "预案不存在或已清理" },
+          "409": { "description": "行冲突（CHANGE_ROW_CONFLICT）或审批凭证不匹配" },
+          "428": { "description": "需要确认（POLICY_APPROVAL_REQUIRED）" }
+        }
+      }
+    },
     "/api/v1/audit": {
       "get": {
         "summary": "审计事件",
