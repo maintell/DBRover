@@ -288,3 +288,27 @@ label.field { display: block; margin: 10px 0 4px; color: var(--muted); font-size
 }
 .cell-menu button:hover { background: #262b35; }
 td.null.editable { cursor: text; }
+
+/* 结构面板：加列表单 + DDL 预览 + 列清单。 */
+.schema { display: flex; flex-direction: column; gap: 10px; padding: 6px 0; }
+.schema .preview {
+  margin: 0;
+  padding: 10px;
+  background: #0e1016;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  overflow: auto;
+  max-height: 170px;
+  font-family: var(--mono);
+  font-size: 12px;
+  white-space: pre-wrap;
+  color: var(--muted);
+}
+label.inline {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--muted);
+  font-size: 12px;
+}
+.card p.warn { color: var(--warn); }

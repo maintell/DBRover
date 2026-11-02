@@ -103,6 +103,8 @@ func (s *Server) routes() []route {
 		{http.MethodGet, "/api/v1/connections/{id}/tables/{name}/rows", false, s.handleTableRows},
 		{http.MethodPost, "/api/v1/connections/{id}/exec", false, s.handleExec},
 		{http.MethodPost, "/api/v1/connections/{id}/changes/plan", false, s.handleChangePlan},
+		{http.MethodGet, "/api/v1/connections/{id}/tables/{name}/schema", false, s.handleTableSchema},
+		{http.MethodPost, "/api/v1/connections/{id}/schema/plan", false, s.handleSchemaPlan},
 		{http.MethodPost, "/api/v1/changes/{pid}/apply", false, s.handleChangeApply},
 		{http.MethodPost, "/api/v1/connections/{id}/query", false, s.handleQuery},
 		{http.MethodGet, "/api/v1/results/{cid}/page", false, s.handlePage},
@@ -705,6 +707,86 @@ type changeApplyRequest struct {
 	ApprovalToken string `json:"approval_token"`
 }
 
+// handleTableSchema 返回表结构与定义原文，供结构页渲染与 DDL 预览。
+func (s *Server) handleTableSchema(w http.ResponseWriter, r *http.Request) {
+	e, ok := s.lookup(r)
+	if !ok {
+		writeError(w, http.StatusNotFound, "CONNECTION_NOT_FOUND", "connection", "连接不存在", "", false)
+		return
+	}
+	ref := model.ObjectRef{Kind: model.KindTable, Name: r.PathValue("name"), Schema: r.URL.Query().Get("schema")}
+
+	detail, err := e.exec.DescribeTable(r.Context(), ref)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "SCHEMA_READ_FAILED", "internal", err.Error(), "", false)
+		return
+	}
+	ddlText, derr := e.exec.TableDDL(r.Context(), ref)
+
+	body := map[string]any{
+		"table":        detail.Ref,
+		"columns":      detail.Columns,
+		"indexes":      detail.Indexes,
+		"foreign_keys": detail.ForeignKeys,
+		"row_estimate": detail.RowEstimate,
+		"primary_key":  detail.PrimaryKeyColumns(),
+		"ddl":          ddlText,
+	}
+	if derr != nil {
+		// DDL 还原失败不该让整个结构页打不开：结构本身仍然可用。
+		body["ddl"] = ""
+		body["ddl_error"] = derr.Error()
+	}
+	writeJSON(w, http.StatusOK, body)
+}
+
+type schemaPlanRequest struct {
+	Table  model.ObjectRef    `json:"table"`
+	Action service.DDLAction  `json:"action"`
+	Column service.ColumnSpec `json:"column"`
+}
+
+// handleSchemaPlan 生成结构变更预案。执行走同一个 /changes/{pid}/apply。
+func (s *Server) handleSchemaPlan(w http.ResponseWriter, r *http.Request) {
+	e, ok := s.lookup(r)
+	if !ok {
+		writeError(w, http.StatusNotFound, "CONNECTION_NOT_FOUND", "connection", "连接不存在", "", false)
+		return
+	}
+	var req schemaPlanRequest
+	if err := decode(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, "REQUEST_INVALID", "internal", err.Error(), "", false)
+		return
+	}
+
+	plan, err := e.exec.BuildDDLPlan(r.Context(), service.DDLRequest{
+		Table: req.Table, Action: req.Action, Column: req.Column,
+	})
+	if errors.Is(err, service.ErrInvalidDDL) {
+		writeError(w, http.StatusBadRequest, "INVALID_COLUMN", "internal",
+			err.Error(), "列名、类型与默认值都有白名单约束，见 docs/07 §6", false)
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "SCHEMA_PLAN_FAILED", "internal", err.Error(), "", false)
+		return
+	}
+
+	// preview=1 只算语句不保管预案：结构面板要边填边看 DDL，
+	// 不该为每一次按键在服务端留一张可执行的预案。
+	if r.URL.Query().Get("preview") == "1" {
+		writeJSON(w, http.StatusOK, plan)
+		return
+	}
+
+	s.mu.Lock()
+	s.purgeExpiredPlansLocked()
+	s.plans[plan.ID] = &storedPlan{plan: plan, exec: e.exec, exp: plan.ExpiresAt}
+	s.mu.Unlock()
+
+	writeJSON(w, http.StatusCreated, plan)
+}
+
 func (s *Server) handleChangePlan(w http.ResponseWriter, r *http.Request) {
 	e, ok := s.lookup(r)
 	if !ok {
@@ -755,8 +837,8 @@ func (s *Server) purgeExpiredPlansLocked() {
 //
 // 撤销不开后门：它就是一张普通预案，走同一套风险分级、摩擦与审批，
 // 只是 ID 带 undo- 前缀且不能再被撤销。不可逆的变更（如 delete 缺整行原值、
-// insert 缺自增主键回填）根本没有反向语句，此时返回 nil，前端据此不显示撤销。
-func (s *Server) buildUndoPlan(sp *storedPlan) *service.ChangePlan {
+// insert 缺自增主键回填、删列）根本没有反向语句，此时返回 nil，前端据此不显示撤销。
+func (s *Server) buildUndoPlan(ctx context.Context, sp *storedPlan) *service.ChangePlan {
 	if sp.plan.Undo || sp.plan.Irreversible || len(sp.plan.Rollback) == 0 {
 		return nil
 	}
@@ -768,8 +850,17 @@ func (s *Server) buildUndoPlan(sp *storedPlan) *service.ChangePlan {
 		Risk:       sp.plan.Risk,
 		Friction:   sp.plan.Friction,
 		Undo:       true,
-		CreatedAt:  now,
-		ExpiresAt:  now.Add(undoTTL),
+		DDL:        sp.plan.DDL,
+		// 结构变更的撤销同样要带前置条件，只是基准换成「刚执行完」的那一版定义。
+		RollsBackAsCompensation: sp.plan.RollsBackAsCompensation,
+		AffectedRows:            -1,
+		CreatedAt:               now,
+		ExpiresAt:               now.Add(undoTTL),
+	}
+	if sp.plan.DDL {
+		if cur, err := sp.exec.TableDDL(ctx, sp.plan.Table); err == nil {
+			undo.ExpectDDLHash = service.DDLHash(cur)
+		}
 	}
 	s.mu.Lock()
 	s.purgeExpiredPlansLocked()
@@ -852,7 +943,7 @@ func (s *Server) handleChangeApply(w http.ResponseWriter, r *http.Request) {
 	}
 	// 撤销预案：反向语句申请时就算好了，这里只是登记成可执行预案。
 	// 没有反向语句时显式给 null，让前端知道「这次改不了回来」而不是留空猜。
-	if undo := s.buildUndoPlan(sp); undo != nil {
+	if undo := s.buildUndoPlan(r.Context(), sp); undo != nil {
 		body["undo"] = map[string]any{
 			"id":         undo.ID,
 			"expires_at": undo.ExpiresAt.UTC().Format(time.RFC3339),

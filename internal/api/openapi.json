@@ -200,6 +200,59 @@
         }
       }
     },
+    "/api/v1/connections/{id}/tables/{name}/schema": {
+      "get": {
+        "summary": "表结构详情与 DDL 原文",
+        "description": "DDL 还原失败时仍返回结构，另给 ddl_error，不让整页打不开。",
+        "parameters": [
+          { "name": "id", "in": "path", "required": true, "schema": { "type": "string" } },
+          { "name": "name", "in": "path", "required": true, "schema": { "type": "string" } },
+          { "name": "schema", "in": "query", "schema": { "type": "string" } }
+        ],
+        "responses": {
+          "200": { "description": "ok" },
+          "400": { "description": "读取结构失败（SCHEMA_READ_FAILED）" },
+          "404": { "description": "连接不存在" }
+        }
+      }
+    },
+    "/api/v1/connections/{id}/schema/plan": {
+      "post": {
+        "summary": "生成结构变更预案",
+        "description": "v1 只支持 add_column / drop_column。执行走同一个 /changes/{pid}/apply；预案带表定义哈希，执行前比对，变了就返回 409 SCHEMA_CHANGED。",
+        "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "string" } }],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["table", "action", "column"],
+                "properties": {
+                  "table": { "type": "object" },
+                  "action": { "type": "string", "enum": ["add_column", "drop_column"] },
+                  "column": {
+                    "type": "object",
+                    "required": ["name"],
+                    "properties": {
+                      "name": { "type": "string" },
+                      "type": { "type": "string", "description": "原始类型文本，白名单约束" },
+                      "nullable": { "type": "boolean" },
+                      "default": { "type": "string", "description": "只接受字面量" }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": { "description": "预案已生成（语句 / 回滚 / 风险 / 摩擦 / 不可逆标记）" },
+          "400": { "description": "参数不合法（INVALID_COLUMN）或生成失败（SCHEMA_PLAN_FAILED）" },
+          "404": { "description": "连接不存在" }
+        }
+      }
+    },
     "/api/v1/connections/{id}/exec": {
       "post": {
         "summary": "执行 SQL（一次性，行数有上限）",

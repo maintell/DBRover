@@ -64,6 +64,16 @@ type ChangePlan struct {
 	// Undo 表示这是一张撤销预案（由刚执行成功的预案反向生成）。
 	// 用它挡住「撤销的撤销」——否则同一个变更可以被无限来回翻。
 	Undo bool `json:"undo,omitempty"`
+	// DDL 表示这是一次结构变更，而不是行数据变更。
+	DDL bool `json:"ddl,omitempty"`
+	// RollsBackAsCompensation 为 true 时 Rollback 只是补偿语句，不是真正的撤销：
+	// 引擎的 DDL 隐式提交（MySQL / Oracle），已经发生的结构变化撤不回来。
+	RollsBackAsCompensation bool `json:"rolls_back_as_compensation,omitempty"`
+	// AffectedRows 是影响行数；-1 表示未知（不假装是 0）。
+	AffectedRows int64 `json:"affected_rows"`
+	// ExpectDDLHash 是生成预案时看到的表定义哈希，执行前比对。
+	// 只在服务端保管，不对外暴露（客户端不需要，也不该能改）。
+	ExpectDDLHash string `json:"-"`
 }
 
 // ChangeSetRequest 是构建预案的输入。
@@ -303,6 +313,22 @@ func (e *Executor) ApplyChangePlan(ctx context.Context, plan *ChangePlan, req Re
 	out.Risk = plan.Risk
 	out.Friction = plan.Friction
 	out.StatementHash = plan.ID
+
+	// 结构变更的前置条件：表定义在生成预案后被动过，就不能再按旧结构执行。
+	// 数据变更靠乐观并发校验行，DDL 没有行可供校验，只能比对整表定义。
+	if plan.ExpectDDLHash != "" {
+		cur, err := e.conn.Meta().DDL(ctx, plan.Table)
+		if err == nil && ddlHash(cur) != plan.ExpectDDLHash {
+			out.Err = &ExecError{
+				Code: "SCHEMA_CHANGED", Category: "constraint",
+				Message: ErrSchemaChanged.Error(),
+				Hint:    "重新打开结构页生成新的预案",
+			}
+			out.Duration = time.Since(started)
+			e.record(actor, req, out, "error", plan.Table.Name, out.Err.Message)
+			return out, nil
+		}
+	}
 
 	if plan.Friction >= policy.F2 && !req.Approval {
 		out.ApprovalRequired = true

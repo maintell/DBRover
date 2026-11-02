@@ -17,6 +17,9 @@ const state = {
   pending: [],
   // 刚应用成功的变更对应的撤销预案（10 分钟窗口，服务端保管）
   undo: null,
+  // 视图：data = 行数据，schema = 表结构
+  view: 'data',
+  schema: null,
 };
 
 const $ = (id) => document.getElementById(id);
@@ -28,6 +31,8 @@ const API = {
   health: '/api/v1/connections/:id/health',
   tables: '/api/v1/connections/:id/tables',
   rows: '/api/v1/connections/:id/tables/:name/rows',
+  schema: '/api/v1/connections/:id/tables/:name/schema',
+  schemaPlan: '/api/v1/connections/:id/schema/plan',
   exec: '/api/v1/connections/:id/exec',
   changePlan: '/api/v1/connections/:id/changes/plan',
   changeApply: '/api/v1/changes/:pid/apply',
@@ -297,6 +302,7 @@ async function browseTable(name) {
   state.columns = [];
   state.filter = [];
   state.order = null;
+  state.view = 'data';
   // 换表就不该再提示上一张表的撤销入口（预案本身仍在服务端有效期内）。
   state.undo = null;
   $('sql').value = 'SELECT * FROM ' + name + ' LIMIT 100';
@@ -398,6 +404,13 @@ function renderToolbar() {
   };
 
   bar.append(sortSel, dirBtn, fCol, fOp, fVal, addBtn, sizeSel);
+
+  const schemaBtn = document.createElement('button');
+  schemaBtn.id = 'btn-schema';
+  schemaBtn.textContent = '结构';
+  schemaBtn.title = '查看表结构并做结构变更';
+  schemaBtn.onclick = () => showSchema();
+  bar.appendChild(schemaBtn);
 
   state.filter.forEach((f, i) => {
     const chip = document.createElement('span');
@@ -520,7 +533,7 @@ function updatePendingBar() {
         const u = state.undo;
         state.undo = null;
         updatePendingBar();
-        applyPlan(u.id);
+        applyPlan(u.id, undefined, u.after);
       };
       const close = document.createElement('button');
       close.textContent = '知道了';
@@ -582,23 +595,47 @@ async function submitChanges() {
     return;
   }
 
-  const stmts = (plan.statements || []).map((s) => s.sql).join(';\n');
-  const html =
-    '<div class="meta">' +
-    '<span class="badge ' + String(plan.risk).toLowerCase() + '">风险 ' + plan.risk + '</span>' +
-    '<span class="badge">打扰 ' + plan.friction + '</span>' +
-    (plan.irreversible ? '<span class="badge r4">不可逆</span>' : '') +
-    '</div>' +
-    '<p>将执行 ' + (plan.statements || []).length + ' 条语句：</p>' +
-    '<pre>' + escapeHTML(stmts) + '</pre>' +
-    (plan.irreversible ? '<p>该变更无法生成回滚语句。</p>' : '<p>已生成回滚语句，可在需要时手动执行。</p>');
-  const ok = await dialog('确认变更', html, '执行');
+  const ok = await confirmPlan(plan);
   if (!ok) return;
 
   await applyPlan(plan.id);
 }
 
-async function applyPlan(pid, token) {
+// confirmPlan 把预案讲清楚再让人点执行。
+// 三件事必须出现在弹窗里：会执行什么、能不能回来、影响多少行。
+async function confirmPlan(plan) {
+  const list = plan.statements || [];
+  const html =
+    '<div class="meta">' +
+    '<span class="badge ' + String(plan.risk).toLowerCase() + '">风险 ' + plan.risk + '</span>' +
+    '<span class="badge">打扰 ' + plan.friction + '</span>' +
+    (plan.ddl ? '<span class="badge">结构变更</span>' : '') +
+    (plan.irreversible ? '<span class="badge r4">不可逆</span>' : '') +
+    '</div>' +
+    '<p>将执行 ' + list.length + ' 条语句：</p>' +
+    '<pre>' + escapeHTML(list.map((s) => s.sql).join(';\n')) + '</pre>' +
+    (plan.affected_rows > 0 ? '<p>影响 ' + plan.affected_rows + ' 行。</p>' : '') +
+    rollbackNote(plan);
+  return dialog('确认变更', html, '执行');
+}
+
+// rollbackNote 说明「这次改动能不能回来」。
+// 回滚语句存在 ≠ 数据能回来，这两件事必须分开讲。
+function rollbackNote(plan) {
+  const lost = plan.ddl && plan.irreversible ? '，且列里的数据会丢失' : '';
+  if (plan.rolls_back_as_compensation) {
+    return '<p class="warn">该引擎的 DDL 隐式提交，回滚语句只是补偿：已经发生的结构变化撤不回来' +
+      lost + '。</p>';
+  }
+  if (plan.irreversible) {
+    return '<p class="warn">该变更不可逆：回滚语句只能恢复结构，数据不会回来' + lost + '。</p>';
+  }
+  return '<p>已生成回滚语句，可在需要时手动执行。</p>';
+}
+
+async function applyPlan(pid, token, after) {
+  // after 决定应用完回到哪个视图：数据变更回数据页，结构变更回结构页。
+  const refresh = after || (() => loadTablePage(true));
   try {
     const body = {};
     if (token) body.approval_token = token;
@@ -609,15 +646,22 @@ async function applyPlan(pid, token) {
     showRisk(out.risk, out.friction);
     state.pending = [];
     // 服务端在应用成功后返回撤销预案；不可逆变更时是 null。
-    state.undo = out.undo && out.undo.id ? { id: out.undo.id, expiresAt: out.undo.expires_at } : null;
+    state.undo = out.undo && out.undo.id
+      ? { id: out.undo.id, expiresAt: out.undo.expires_at, after: refresh }
+      : null;
     updatePendingBar();
     setStatus('变更已应用 · ' + out.duration_ms + ' ms');
-    await loadTablePage(true);
+    await refresh();
   } catch (e) {
     if (e.code === 'POLICY_APPROVAL_REQUIRED') {
       const t = e.detail && e.detail.approval && e.detail.approval.token;
       if (!t) { showNotice('服务端未返回审批凭证', 'error'); return; }
-      return applyPlan(pid, t);
+      return applyPlan(pid, t, after);
+    }
+    if (e.code === 'SCHEMA_CHANGED') {
+      showNotice('表结构已被改动，本次未执行。已重新读取结构，请再生成一次预案。', 'warn');
+      await refresh();
+      return;
     }
     if (e.code === 'CHANGE_ROW_CONFLICT') {
       showNotice('有行已被其他会话修改，整批未生效。已刷新数据，请重试。', 'warn');
@@ -628,6 +672,182 @@ async function applyPlan(pid, token) {
     }
     showNotice('应用变更失败：' + e.message, 'error');
   }
+}
+
+// ---------- 结构 ----------
+
+// TYPES 是常见类型的快捷项。类型仍可手填：白名单在服务端，
+// 前端给列表只是省打字，不是权威。
+const TYPES = [
+  'TEXT', 'INTEGER', 'BIGINT', 'BOOLEAN', 'NUMERIC(10,2)',
+  'VARCHAR(64)', 'TIMESTAMP', 'DATE', 'JSON',
+];
+
+async function showSchema() {
+  if (!state.current || !state.tableName) return;
+  state.view = 'schema';
+  await refreshSchema();
+}
+
+async function refreshSchema() {
+  try {
+    const out = await api(path(API.schema, { id: state.current.id, name: state.tableName }));
+    state.schema = out;
+    renderSchema(out);
+  } catch (e) {
+    showNotice('读取结构失败：' + e.message, 'error');
+  }
+}
+
+function renderSchema(out) {
+  const cols = out.columns || [];
+  const pk = out.primary_key || [];
+
+  const wrap = document.createElement('div');
+  wrap.className = 'schema';
+
+  // 加列表单：改动即预览，避免「填完点保存才发现要执行什么」。
+  const form = document.createElement('div');
+  form.className = 'toolbar';
+  form.innerHTML =
+    '<input id="sch-name" class="narrow" placeholder="列名" autocomplete="off" spellcheck="false">' +
+    '<input id="sch-type" class="narrow" placeholder="类型" list="sch-types" autocomplete="off" spellcheck="false">' +
+    '<datalist id="sch-types">' + TYPES.map((t) => '<option value="' + t + '"></option>').join('') + '</datalist>' +
+    '<label class="inline"><input type="checkbox" id="sch-nullable" checked> 可空</label>' +
+    '<input id="sch-default" class="narrow" placeholder="默认值（字面量）" autocomplete="off" spellcheck="false">' +
+    '<button id="sch-add" class="primary">加列</button>';
+  wrap.appendChild(form);
+
+  const preview = document.createElement('pre');
+  preview.id = 'ddl-preview';
+  preview.className = 'preview';
+  preview.textContent = '填列名与类型后显示将执行的语句。';
+  wrap.appendChild(preview);
+
+  const table = document.createElement('table');
+  const thead = document.createElement('thead');
+  const htr = document.createElement('tr');
+  for (const label of ['列', '类型', '可空', '默认', '主键', '']) {
+    const th = document.createElement('th');
+    th.textContent = label;
+    htr.appendChild(th);
+  }
+  thead.appendChild(htr);
+  table.appendChild(thead);
+
+  const tbody = document.createElement('tbody');
+  for (const c of cols) {
+    const tr = document.createElement('tr');
+    tr.appendChild(cell(c.name));
+    tr.appendChild(cell(c.type && c.type.raw ? c.type.raw : String(c.type.kind)));
+    tr.appendChild(cell(c.nullable ? '是' : '否'));
+    tr.appendChild(cell(c.default !== undefined && c.default !== null ? c.default : '—'));
+    tr.appendChild(cell(c.is_primary ? '✓' : ''));
+    const actions = document.createElement('td');
+    if (!c.is_primary) {
+      const drop = document.createElement('button');
+      drop.textContent = '删列';
+      drop.onclick = () => planDropColumn(c.name);
+      actions.appendChild(drop);
+    }
+    tr.appendChild(actions);
+    tbody.appendChild(tr);
+  }
+  table.appendChild(tbody);
+  wrap.appendChild(table);
+
+  if (out.ddl) {
+    const ddl = document.createElement('pre');
+    ddl.className = 'preview';
+    ddl.textContent = out.ddl;
+    wrap.appendChild(ddl);
+  }
+
+  $('results').replaceChildren(wrap);
+
+  const onInput = () => schedulePreview();
+  $('sch-name').oninput = onInput;
+  $('sch-type').oninput = onInput;
+  $('sch-default').oninput = onInput;
+  $('sch-nullable').onchange = onInput;
+  $('sch-add').onclick = () => planAddColumn();
+  setStatus(state.tableName + ' · ' + cols.length + ' 列' +
+    (pk.length ? '（主键 ' + pk.join(', ') + '）' : '（无主键）'));
+}
+
+let previewTimer = null;
+
+function schedulePreview() {
+  clearTimeout(previewTimer);
+  previewTimer = setTimeout(previewAddColumn, 250);
+}
+
+function columnInput() {
+  const column = {
+    name: $('sch-name').value.trim(),
+    type: $('sch-type').value.trim(),
+    nullable: $('sch-nullable').checked,
+  };
+  const def = $('sch-default').value.trim();
+  if (def) column.default = def;
+  return column;
+}
+
+async function fetchSchemaPlan(action, column, preview) {
+  const url = path(API.schemaPlan, { id: state.current.id }) + (preview ? '?preview=1' : '');
+  return api(url, {
+    method: 'POST',
+    body: JSON.stringify({
+      table: { kind: 'table', name: state.tableName },
+      action,
+      column,
+    }),
+  });
+}
+
+async function previewAddColumn() {
+  const box = $('ddl-preview');
+  if (!box) return;
+  const column = columnInput();
+  if (!column.name || !column.type) {
+    box.textContent = '填列名与类型后显示将执行的语句。';
+    return;
+  }
+  try {
+    const plan = await fetchSchemaPlan('add_column', column, true);
+    box.textContent = (plan.statements || []).map((s) => s.sql).join(';\n');
+  } catch (e) {
+    box.textContent = '参数不合法：' + e.message;
+  }
+}
+
+async function planAddColumn() {
+  const column = columnInput();
+  if (!column.name || !column.type) {
+    showNotice('列名与类型都要填。', 'warn');
+    return;
+  }
+  let plan;
+  try {
+    plan = await fetchSchemaPlan('add_column', column, false);
+  } catch (e) {
+    showNotice('生成结构预案失败：' + e.message, 'error');
+    return;
+  }
+  if (!(await confirmPlan(plan))) return;
+  await applyPlan(plan.id, undefined, refreshSchema);
+}
+
+async function planDropColumn(name) {
+  let plan;
+  try {
+    plan = await fetchSchemaPlan('drop_column', { name }, false);
+  } catch (e) {
+    showNotice('生成结构预案失败：' + e.message, 'error');
+    return;
+  }
+  if (!(await confirmPlan(plan))) return;
+  await applyPlan(plan.id, undefined, refreshSchema);
 }
 
 // ---------- 渲染 ----------
