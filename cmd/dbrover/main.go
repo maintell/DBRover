@@ -16,6 +16,7 @@ import (
 
 	"github.com/maintell/DBRover/internal/api"
 	"github.com/maintell/DBRover/internal/driver"
+	"github.com/maintell/DBRover/internal/driver/mysql"
 	"github.com/maintell/DBRover/internal/driver/sqlite"
 	"github.com/maintell/DBRover/internal/infra/tunnel"
 	"github.com/maintell/DBRover/internal/model"
@@ -85,28 +86,41 @@ func usage() {
 `)
 }
 
+// connFlags 是各子命令共用的连接参数。
+// SQLite 用 -db 指文件路径；网络引擎用 -host/-port/-user，-db 指库名。
 type connFlags struct {
-	dsn string
-	env string
-	ro  bool
-	rw  bool
+	engine    string
+	db        string
+	host      string
+	port      int
+	user      string
+	passStdin bool
+	passFile  string
+	env       string
+	ro        bool
+	rw        bool
 }
 
 func (c *connFlags) bind(fs *flag.FlagSet) {
-	fs.StringVar(&c.dsn, "db", "", "SQLite 数据库文件路径（必填）")
+	fs.StringVar(&c.engine, "engine", "sqlite", "引擎: sqlite|mysql")
+	fs.StringVar(&c.db, "db", "", "SQLite 数据库文件路径；MySQL 为库名")
+	fs.StringVar(&c.host, "host", "", "主机地址（网络引擎必填）")
+	fs.IntVar(&c.port, "port", 0, "端口（默认按引擎取）")
+	fs.StringVar(&c.user, "user", "", "登录用户名（网络引擎必填）")
+	fs.BoolVar(&c.passStdin, "password-stdin", false, "从标准输入读取密码")
+	fs.StringVar(&c.passFile, "password-file", "", "从文件读取密码（比管道更可靠，适合脚本）")
 	fs.StringVar(&c.env, "env", "unknown", "环境: local|test|staging|production|unknown")
 	fs.BoolVar(&c.ro, "ro", false, "强制只读（优先于环境默认值）")
 	fs.BoolVar(&c.rw, "rw", false, "显式声明读写：生产/预发默认只读，需写操作时用本开关")
 }
 
-func (c *connFlags) open() (*sqlite.Connector, model.Environment, model.AccessMode, error) {
-	if c.dsn == "" {
-		return nil, "", "", errors.New("-db 必填")
-	}
+func (c *connFlags) open() (driver.Connector, model.Environment, model.AccessMode, error) {
 	if c.ro && c.rw {
 		return nil, "", "", errors.New("-ro 与 -rw 不能同时使用")
 	}
+	engine := model.Engine(strings.ToLower(c.engine))
 	env := model.ParseEnvironment(c.env)
+
 	// 默认跟随环境：生产/预发/未声明 → 只读；测试/本地 → 读写。
 	// 需要写生产时必须显式 -rw，这是刻意抬高摩擦。
 	mode := model.DefaultAccessMode(env)
@@ -116,15 +130,48 @@ func (c *connFlags) open() (*sqlite.Connector, model.Environment, model.AccessMo
 	if c.rw {
 		mode = model.AccessReadWrite
 	}
-	conn := sqlite.New()
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	if err := conn.Open(ctx, driver.ConnectConfig{
+
+	cfg := driver.ConnectConfig{
 		Name:        "cli",
-		Host:        c.dsn,
+		Host:        c.host,
+		Port:        c.port,
+		Catalog:     c.db,
+		Schema:      c.db,
+		User:        c.user,
 		AccessMode:  mode,
 		Environment: env,
-	}); err != nil {
+	}
+
+	switch engine {
+	case model.EngineSQLite:
+		if c.db == "" {
+			return nil, "", "", errors.New("SQLite 需要 -db 指定文件路径")
+		}
+		cfg.Host = c.db
+	default:
+		if c.host == "" {
+			return nil, "", "", fmt.Errorf("%s 需要 -host", engine)
+		}
+		if c.user == "" {
+			return nil, "", "", fmt.Errorf("%s 需要 -user", engine)
+		}
+		if c.passFile != "" {
+			b, err := os.ReadFile(c.passFile)
+			if err != nil {
+				return nil, "", "", fmt.Errorf("读取密码文件: %w", err)
+			}
+			cfg.Password = strings.TrimRight(string(b), "\r\n")
+		} else if c.passStdin {
+			pw, err := readSecretLine("密码: ")
+			if err != nil {
+				return nil, "", "", err
+			}
+			cfg.Password = string(pw)
+		}
+	}
+
+	conn, err := openConnector(engine, cfg)
+	if err != nil {
 		return nil, "", "", err
 	}
 	return conn, env, mode, nil
@@ -240,10 +287,12 @@ func cmdExec(args []string) error {
 		return errBlocked
 	}
 
+	failed := false
 	for _, r := range out.Results {
 		fmt.Printf("-- #%d %s 风险=%s 耗时=%dms\n", r.Index, firstLine(r.SQL), r.Grade.Level, r.DurationMS)
 		if r.Err != "" {
 			fmt.Printf("错误: %s\n", r.Err)
+			failed = true
 			continue
 		}
 		if len(r.Columns) > 0 {
@@ -255,16 +304,32 @@ func cmdExec(args []string) error {
 
 	fmt.Printf("执行完成: 风险=%s 打扰=%s 耗时=%s 审计=%d 条\n",
 		out.Risk, out.Friction, out.Duration.Round(time.Millisecond), len(audit.Events))
+
+	// 语句失败必须体现为退出码：脚本靠退出码判断，不能只看 stdout。
+	if failed {
+		code := "SQL_EXEC_FAILED"
+		if out.Err != nil {
+			code = out.Err.Code
+		}
+		return fmt.Errorf("执行失败（%s）", code)
+	}
 	return nil
 }
 
 // openConnector 是按引擎分发的连接器工厂。api 层只接受函数，不认识具体驱动。
 func openConnector(engine model.Engine, cfg driver.ConnectConfig) (driver.Connector, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
 	switch engine {
 	case model.EngineSQLite:
 		c := sqlite.New()
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
+		if err := c.Open(ctx, cfg); err != nil {
+			return nil, err
+		}
+		return c, nil
+	case model.EngineMySQL, model.EngineMariaDB:
+		c := mysql.New()
 		if err := c.Open(ctx, cfg); err != nil {
 			return nil, err
 		}

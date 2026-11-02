@@ -185,9 +185,14 @@ func (s *Server) handleSpec(w http.ResponseWriter, r *http.Request) {
 // ---- DTO ----
 
 type createConnectionRequest struct {
-	Name        string `json:"name"`
-	Engine      string `json:"engine"`
-	Host        string `json:"host"`
+	Name    string `json:"name"`
+	Engine  string `json:"engine"`
+	Host    string `json:"host"`
+	Port    int    `json:"port"`
+	Catalog string `json:"catalog"`
+	User    string `json:"user"`
+	// Password 只进不出：请求里出现一次，之后任何响应都不回显。
+	Password    string `json:"password"`
 	Environment string `json:"environment"`
 	AccessMode  string `json:"access_mode"`
 }
@@ -299,8 +304,17 @@ func (s *Server) handleCreateConnection(w http.ResponseWriter, r *http.Request) 
 	cfg := driver.ConnectConfig{
 		Name:        req.Name,
 		Host:        req.Host,
+		Port:        req.Port,
+		Catalog:     req.Catalog,
+		Schema:      req.Catalog,
+		User:        req.User,
+		Password:    req.Password,
 		AccessMode:  mode,
 		Environment: env,
+	}
+	if req.Engine == string(model.EngineSQLite) {
+		// SQLite 的 Host 就是文件路径，以 -db 语义传入。
+		cfg.Host = req.Host
 	}
 	engine := model.Engine(req.Engine)
 

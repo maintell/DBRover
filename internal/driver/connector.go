@@ -12,14 +12,23 @@ import (
 	"github.com/maintell/DBRover/internal/model"
 )
 
-// ConnectConfig 是建立连接所需的最小信息。凭据由 infra/secret 注入，不在此结构内。
+// ConnectConfig 是建立连接所需的最小信息。
+//
+// User/Password 由 infranet 的凭据库注入；当前阶段直接随配置传入，
+// 但绝不序列化、绝不写日志。infra/secret 完成后这两个字段会被 CredentialRef 取代。
 type ConnectConfig struct {
-	Name        string
-	Host        string
-	Port        int
-	Catalog     string
-	Schema      string
-	Params      map[string]string
+	Name    string
+	Host    string
+	Port    int
+	Catalog string
+	Schema  string
+	Params  map[string]string
+
+	// User 是登录用户名。SQLite 不使用。
+	User string
+	// Password 是登录口令，仅在内存中存在。SQLite 不使用。
+	Password string
+
 	AccessMode  model.AccessMode
 	Environment model.Environment
 }
