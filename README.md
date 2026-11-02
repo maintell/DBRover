@@ -16,14 +16,16 @@ DBRover 面向同时维护多种数据库的工程师：一个人可能上午在
 | 引擎覆盖 | 关系库做深（PG/MySQL/SQLServer/Oracle/SQLite），NoSQL 做「够用的运维视角」 | 每种库都浅尝辄止 |
 | AI 定位 | Agent 是一等公民：直接调用与人工操作**走同一套受控 API** | 聊天框里吐出 SQL 让你自己复制粘贴 |
 | 安全基线 | **默认只读**，写操作按风险分级审批，全链路审计 | 连上就有全部权限 |
+| 环境感知 | 区分 `production`/`staging`/`test`/`local`，**确认强度随环境分级**：测试库改数据不打扰，生产库逐步加摩擦 | 所有库一视同仁，要么处处弹窗、要么处处裸奔 |
 | 变更安全 | DDL/DML 变更先出 `plan`（含影响行数预估与回滚语句），确认后执行 | 点一下「保存」直接 ALTER |
 | 技术形态 | Go 单二进制核心（免 CGO 交叉编译）+ Web 技术栈 UI | JVM/.NET 重运行时 |
 
-三条不可妥协的原则，写进所有后续设计：
+四条不可妥协的原则，写进所有后续设计：
 
 1. **单一能力源**：UI 和 Agent 不允许绕过 `service` 层直连数据库。任何能力先有 API，再有界面，再有工具。
-2. **默认最小权限**：连接创建时即声明 `read-only` / `read-write` / `admin`，只读连接在协议层和 SQL 分析层双重拦截写操作。
+2. **默认最小权限**：连接创建时即声明环境（生产/预发/测试）与访问模式（`read-only` / `read-write` / `admin`），默认按最严处理，只读连接在协议层和 SQL 分析层双重拦截写操作。
 3. **可回放**：每一次执行（人发起的、Agent 发起的）都落一条审计事件，包含 SQL、参数、耗时、影响行数、连接、发起者、审批记录。
+4. **放宽需显式声明，收紧可自动推断**：任何降低保护的动作（把生产改标成测试、把只读改成读写）必须由人显式操作并留痕；任何提高保护的判断（检测到可能是生产）可以自动生效。默认值的代价必须落在「麻烦」一侧，不能落在「事故」一侧。
 
 ---
 
@@ -106,20 +108,56 @@ DBRover 面向同时维护多种数据库的工程师：一个人可能上午在
 
 ## 5. 当前状态
 
-**阶段：文档基线（M0）**。尚无代码。
+**阶段：M1 进行中**。安全内核与首个引擎闭环已可运行。
 
-接下来按 [`docs/13-roadmap.md`](docs/13-roadmap.md) 的 M1 里程碑推进：先打通「PostgreSQL + MySQL 的连接、元数据、查询、结果集」最小闭环，再叠加写入与 AI。
+| 模块 | 状态 |
+|---|---|
+| `internal/model` | 领域模型、能力声明、环境严格度、元数据模型 |
+| `internal/driver/dialect` | 5 种 SQL 方言：词法、语句切分、指纹、分类、条件分析、标识符引用 |
+| `internal/policy` | 风险分级 `R0`–`R4`、摩擦分级 `F0`–`F5` |
+| `internal/driver` | Connector 契约 + `drivertest` 一致性套件 |
+| `internal/driver/sqlite` | SQLite 完整实现（元数据 / 查询 / 事务 / 只读强制） |
+| `internal/service` | 执行门：切分 → 分级 → 摩擦 → 审批 → 审计，整批原子拦截 |
+| `internal/api` | 回环 HTTP 服务：token 鉴权、连接管理、`exec`、流式游标、键集分页、审计查询、OpenAPI 契约 |
+| `internal/infra/tunnel` | SSH 隧道与跳板链：多跳、密码/私钥/agent 认证、主机密钥 TOFU |
+| `internal/webui` | **临时界面**：免构建的内嵌 Web UI（连接、对象树、SQL、结果网格、审批弹窗） |
+| `cmd/dbrover` | CLI：`version` / `health` / `tables` / `exec` / `serve` / `tunnel` |
 
----
+> `internal/webui` 是为了「能点着验收」而做的最小实现，**不是最终前端**。最终前端仍是 [ADR-0001](docs/adr/0001-tech-stack.md) 规定的 React + TypeScript + Vite 栈；先做无构建版本是因为本机磁盘紧张，不装 node_modules。
 
-## 6. 开发约定
+**尚未实现**：React 前端、PostgreSQL/MySQL/MSSQL/Oracle/NoSQL 连接器、AI Agent。
 
-见 [`AGENTS.md`](AGENTS.md)。要点：
+## 6. 快速开始
 
-- 文档先行：任何新能力先在对应 `docs/` 里写清契约与验收，再写代码。
-- 破坏性设计变更必须落 ADR。
-- 跨平台产物走 CI（GitHub Actions tag 触发），本地只跑静态检查与单测，不做重型构建。
+```powershell
+go build -o bin/dbrover.exe ./cmd/dbrover
 
-## 7. 许可证
+bin/dbrover.exe version
+bin/dbrover.exe exec -db demo.db -env local -sql "CREATE TABLE t (id INTEGER PRIMARY KEY, v TEXT)"
+bin/dbrover.exe exec -db demo.db -env local -sql "INSERT INTO t (id, v) VALUES (1, 'a')"
+
+# 生产环境：批量更新需要确认，退出码 2
+bin/dbrover.exe exec -db demo.db -env production -sql "UPDATE t SET v='b' WHERE id > 0"
+bin/dbrover.exe exec -db demo.db -env production -approve -sql "UPDATE t SET v='b' WHERE id > 0"
+
+# 只读连接：写入被双层拦截
+bin/dbrover.exe exec -db demo.db -ro -env test -sql "DELETE FROM t"
+
+# 起服务（浏览器界面 + HTTP API），审计落盘
+bin/dbrover.exe serve -addr 127.0.0.1:7788 -audit ./audit.jsonl
+# 打开它打印的 http://127.0.0.1:7788/#t=<token> 即可操作
+```
+
+## 7. 开发与验证
+
+```powershell
+pwsh -File scripts/check.ps1     # gofmt + vet + build + test + test -race
+```
+
+要求 Go 1.26+（`modernc.org/sqlite` 的最低版本）。`CGO_ENABLED=0`，全部依赖纯 Go。
+
+约定见 [`AGENTS.md`](AGENTS.md)：文档先行、破坏性变更落 ADR、跨平台产物走 CI。
+
+## 8. 许可证
 
 待定（预计 Apache-2.0）。

@@ -40,7 +40,11 @@ MetadataSnapshot ── Catalog[] ── Schema[] ── Object[]
 | `params` | map[string]string | 引擎特有：`sslmode`、`charset`、`service_name`、`auth_source`、`replica_set` 等 |
 | `tunnel` | TunnelConfig? | 见 2.3 |
 | `credential` | CredentialRef | 见 2.2 |
-| `access_mode` | enum | **创建时默认 `read-only`** |
+| `environment` | enum | `local` / `test` / `staging` / `production` / `unknown`。**新连接默认 `unknown`，策略等同生产** |
+| `environment_source` | enum | `declared`（人工声明）/ `detected`（自动推断）/ `inherited`（团队下发） |
+| `environment_declared_at` `environment_declared_by` | time / string | 放宽到更低严格度时必填，用于审计 |
+| `server_identity` | ServerIdentity | 连接后采集的真实服务器指纹（主机名 + 实例标识），用于防误连；不持久化敏感信息 |
+| `access_mode` | enum | 创建时默认**随环境**：生产/预发 `read-only`，测试/本地 `read-write` |
 | `pool` | PoolConfig | 最大连接数、空闲回收、超时 |
 | `init_sql` | []string | 连接建立后执行的会话级语句（如 `SET search_path`） |
 | `color` / `tags` | — | 视觉分组 |
@@ -51,6 +55,8 @@ MetadataSnapshot ── Catalog[] ── Schema[] ── Object[]
 - `access_mode = read-only` 时，`Guard` 必须在协议层拒绝对话级写（见 10 号文档）。
 - `credential` 只存句柄；序列化到磁盘时不含任何密文以外的内容（密文本身也不落盘）。
 - `sqlite` 引擎的 `tunnel` 必须为空（本地文件）。
+- `environment` 只能由人放宽（`local`/`test`），自动检测只能收紧。
+- `environment_source = detected` 时，其严格度**不得低于**当前声明值（检测只能抬高）。
 
 ### 2.2 Credential
 
@@ -458,6 +464,10 @@ CREATE VIRTUAL TABLE object_search USING fts5(
 | I6 | 迁移断点必须幂等（按主键区间 + 批哈希） | `service/migration` |
 | I7 | 审计事件只追加 | 存储层仅暴露 `Insert` / `Query` |
 | I8 | `Capabilities()` 为唯一能力判断源 | 代码评审 + 测试（禁止 `switch engine`） |
+| I9 | `environment = unknown` 时策略严格度等同 `production` | `policy.Friction` |
+| I10 | 环境只能由人放宽；自动检测只能收紧 | `policy.Friction` + 存储层校验 |
+| I11 | 摩擦等级是纯函数 `Friction(env, risk, modifiers)`，不读外部状态 | `policy` 单测穷举 |
+| I12 | 服务器身份变化必须阻断并重新确认环境 | `service/connection` |
 
 ---
 

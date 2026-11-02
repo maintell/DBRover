@@ -185,16 +185,16 @@ ChangePlan
 
 ### 5.2 危险操作的门槛
 
-| 操作 | 风险 | 额外要求 |
-|---|:--:|---|
-| `DROP TABLE` | R4 | 输入表名确认 + 展示行数 + 建议先备份 |
-| `DROP DATABASE/SCHEMA` | R4 | 输入库名确认 + 二次密码 |
-| `TRUNCATE` | R4 | 输入表名确认（MySQL 上 `TRUNCATE` 不可回滚） |
-| `DROP COLUMN` | R3 | 展示该列非空行数 + 明确「数据将丢失」 |
-| 改列类型（收窄） | R3 | 预检是否有越界数据（`SELECT COUNT(*) WHERE 不满足新类型`） |
-| 加外键 | R3 | 预检孤儿数据 |
-| 加唯一索引 | R3 | 预检重复值 |
-| `ALTER TABLE ... ENGINE=` | R3 | MySQL 上等价于整表重建 |
+| 操作 | 风险 | 额外要求 | 测试环境 | 生产环境 |
+|---|:--:|---|:--:|:--:|
+| `DROP TABLE` | R4 | 输入表名确认 + 展示行数 + 建议先备份 | F3 | F4 |
+| `DROP DATABASE/SCHEMA` | R4 | 输入库名确认 + 二次密码 | F3 | F4 + 禁止 Agent 发起 |
+| `TRUNCATE` | R4 | 输入表名确认（MySQL 上不可回滚） | F3 | F4 |
+| `DROP COLUMN` | R3 | 展示该列非空行数 + 明确「数据将丢失」 | F2 | F3 |
+| 改列类型（收窄） | R3 | 预检是否有越界数据（`SELECT COUNT(*) WHERE 不满足新类型`） | F2 | F3 |
+| 加外键 | R3 | 预检孤儿数据 | F2 | F3 |
+| 加唯一索引 | R3 | 预检重复值 | F2 | F3 |
+| `ALTER TABLE ... ENGINE=` | R3 | MySQL 上等价于整表重建 | F2 | F3 |
 
 **收窄类型预检**示例（`bigint` → `int`）：
 

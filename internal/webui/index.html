@@ -1,0 +1,75 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>DBRover</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<div id="app">
+  <header>
+    <span class="title">DBRover</span>
+    <select id="conn"></select>
+    <span id="env" class="badge">未连接</span>
+    <span id="identity" class="badge" title="服务器身份指纹，用于识别是否连错库">—</span>
+    <span id="profile" class="badge">—</span>
+    <span class="grow"></span>
+    <button id="btn-reload" title="重新加载表清单">刷新表</button>
+    <button id="btn-forget" title="清除本页保存的令牌">退出</button>
+  </header>
+
+  <main>
+    <aside>
+      <div class="head">
+        <span>对象</span>
+        <span class="grow"></span>
+        <span id="table-count"></span>
+      </div>
+      <div id="tables"></div>
+    </aside>
+
+    <section class="work">
+      <div class="editor-wrap">
+        <textarea id="sql" spellcheck="false" placeholder="SELECT * FROM ...">SELECT 1 AS ok</textarea>
+        <div class="toolbar">
+          <button id="btn-run" class="primary">执行 (Ctrl+Enter)</button>
+          <span id="risk" class="badge r0" hidden></span>
+          <span id="friction" class="badge" hidden></span>
+          <span class="grow"></span>
+          <span id="status"></span>
+        </div>
+      </div>
+      <div id="results" class="results"></div>
+    </section>
+  </main>
+</div>
+
+<!-- 令牌门 -->
+<div id="gate" class="overlay" hidden>
+  <div class="card">
+    <h2>需要访问令牌</h2>
+    <p>令牌在 <code>dbrover serve</code> 启动时打印。你也可以直接打开它打印的带 <code>#t=</code> 的链接。</p>
+    <label class="field" for="token">令牌</label>
+    <input id="token" style="width:100%" autocomplete="off" spellcheck="false">
+    <div class="row">
+      <button id="btn-token" class="primary">进入</button>
+    </div>
+  </div>
+</div>
+
+<!-- 确认 / 新建连接 -->
+<div id="dialog" class="overlay" hidden>
+  <div class="card">
+    <h2 id="dlg-title"></h2>
+    <div id="dlg-body"></div>
+    <div class="row">
+      <button id="dlg-cancel">取消</button>
+      <button id="dlg-ok" class="primary">确定</button>
+    </div>
+  </div>
+</div>
+
+<script src="/app.js"></script>
+</body>
+</html>

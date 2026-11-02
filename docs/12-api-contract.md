@@ -44,6 +44,53 @@ GET  /tasks/{id}    → {"status":"running","progress":{...}}
 
 ## 2. 资源与端点
 
+### 2.0 M1 已实现子集
+
+当前代码只实现了下表中的一小部分。**未列出的端点仍未实现**，不要按本文其余章节假设它们可用。
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| `GET` | `/api/v1/health` | 存活探测，**不需要 token** |
+| `GET` | `/api/v1/openapi.json` | 契约文件本身，**不需要 token** |
+| `POST` | `/api/v1/connections` | 创建并打开连接 |
+| `GET` | `/api/v1/connections` | 连接列表 |
+| `DELETE` | `/api/v1/connections/{id}` | 关闭并移除连接 |
+| `GET` | `/api/v1/connections/{id}/health` | 版本、只读状态、服务器身份 |
+| `GET` | `/api/v1/connections/{id}/tables` | 表与视图清单 |
+| `GET` | `/api/v1/connections/{id}/tables/{name}/rows` | 表数据浏览，**键集分页**（`limit`、`after`） |
+| `POST` | `/api/v1/connections/{id}/exec` | 执行 SQL（一次性，行数有上限） |
+| `POST` | `/api/v1/connections/{id}/query` | 打开**流式游标**，只接受单条只读语句 |
+| `GET` | `/api/v1/results/{cid}/page` | 按页拉取，`limit` 可调 |
+| `DELETE` | `/api/v1/results/{cid}` | 主动关闭游标 |
+| `GET` | `/api/v1/audit` | 审计事件 |
+
+与下文契约的已知差异（随里程碑收敛）：
+
+| 差异 | 现状 | 计划 |
+|---|---|---|
+| `execute` 未独立 | 写操作走 `/exec`；`/exec` 同时兼容一次性只读查询 | 收敛为 `/execute` 只做写、`/query` 只做读 |
+| 列元数据随响应返回 | `/query` 直接返回 `columns`，不走 WS 事件 | 改为 WS 推送 `result.columns` |
+| 游标按连接隔离在进程内 | 进程重启即失效，无跨实例共享 | 服务化时引入共享存储 |
+| 连接只支持 SQLite | 其他引擎返回 `DB_CONNECT_FAILED` | 按 04 文档逐个补齐 |
+| 契约已落文件但未接代码生成 | 契约在 `internal/api/openapi.json`，由测试保证与路由表一致 | 接 `oapi-codegen` 生成 server 类型与 TS client |
+
+**契约的可信度靠门禁保证，不靠自觉**：
+
+- `TestSpecMatchesRoutes` 双向比对路由表与 `paths`，任一侧多一条即失败；
+- `TestSpecSecurityMatchesPublic` 要求免鉴权端点显式写 `"security": []`，需鉴权端点不得覆盖全局声明；
+- `TestSpecIsWellFormed` 检查每个操作都有 `summary` 与 `responses`。
+
+门禁本身经过变异验证：临时加一条路由会让 `TestSpecMatchesRoutes` 失败。
+
+**键集分页的边界**（`.../tables/{name}/rows`）：只对**有主键的表**生效。无主键表返回 `501 CAPABILITY_UNSUPPORTED`，因为缺少稳定定位键时任何分页都会漏行或重复。`after` 是 JSON 字符串数组（如 `["42"]`），由服务端按列类型还原为非字符串值——用字符串传值是为了避免 JSON 数字在大整数主键上丢精度。
+
+**已实现的两条契约细节**
+
+- **执行期错误走错误模型**：驱动错误经 `service.ClassifyError` 映射为 `code`/`category`/`hint`，HTTP 状态按 §4.2 表返回（语法 400、约束 409、超时 504、取消 499）。不再出现「200 + `results[].err`」。
+- **截断必须显式**：`GET /results/{cid}/page` 返回 `truncated`。到达 `max_rows` 与「读尽」是两件事，前者不能让客户端误判为全量。
+
+---
+
 ### 2.1 连接
 
 | 方法 | 路径 | 说明 |
@@ -67,6 +114,7 @@ POST /connections
 {
   "name": "shop-prod",
   "engine": "mysql",
+  "environment": "production",
   "host": "10.0.0.12",
   "port": 3306,
   "catalog": "shop",
@@ -83,6 +131,13 @@ POST /connections
   "credential": {"kind": "password", "value": "<inline-once>"}
 }
 ```
+
+**环境字段的写入规则**
+
+- 省略 `environment` → 服务端置为 `unknown`（严格度等同 `production`）。
+- **放宽**（新的严格度低于当前值）必须同时传 `"acknowledge_loosening": true`，否则返回 `POLICY_LOOSENING_NOT_ACKNOWLEDGED`（409），并在审计中记录原值与新值。
+- **收紧**（更高严格度）永远允许，无需确认。
+- `environment` 不可通过批量导入静默下发：导入时一律置为 `unknown`，由用户逐个确认（团队模式下由管理员下发除外）。
 
 **凭据写入规则**：`value` 只在**创建/更新请求**中出现一次，服务端立即存入 OS 凭据库，响应与后续查询只返回 `credential_ref`。响应中永不回显。
 

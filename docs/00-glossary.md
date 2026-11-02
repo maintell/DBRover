@@ -68,8 +68,11 @@ Engine (引擎类型)
 
 | 术语 | 定义 |
 |---|---|
+| **Environment** | 连接的目标环境：`local` / `test` / `staging` / `production` / `unknown`（默认） |
 | **Access Mode** | 连接级权限声明：`read-only` / `read-write` / `admin` |
 | **Risk Level** | 单条 statement 的风险分级：`R0` 只读 … `R4` 破坏性 |
+| **Friction Level** | 执行前的打扰强度：`F0` 静默 … `F5` 阻断。由环境 × 风险决定 |
+| **Server Identity** | 连接后取到的真实服务器指纹（主机名 + 实例标识），用于防止误连 |
 | **Guard** | 在协议层与 SQL 分析层双重拦截的执行前检查 |
 | **Approval** | 高风险操作的人工确认记录，含确认人、时间、原始 SQL 摘要 |
 | **Audit Event** | 不可变执行记录，含发起者类型（human / agent / schedule） |
@@ -85,7 +88,37 @@ Engine (引擎类型)
 | `R3` | DDL：`CREATE` / `ALTER` / `DROP INDEX` / `TRUNCATE` | 需确认 + 展示回滚语句 |
 | `R4` | 不可逆或跨对象破坏：`DROP TABLE/DATABASE`、`ALTER SYSTEM`、`FLUSHALL`、`DELETE` 无 `WHERE`、索引重建于生产大表 | 需二次确认 + 输入对象名确认 |
 
-> 分级实现见 [`11-ai-agents.md`](11-ai-agents.md#6-风险分级器) 与 [`10-connection-and-security.md`](10-connection-and-security.md#4-只读守卫)。
+> 分级实现见 [`11-ai-agents.md`](11-ai-agents.md#6-风险分级器) 与 [`10-connection-and-security.md`](10-connection-and-security.md#5-风险分级与审批)。
+
+### 环境分级
+
+`Environment` 与 `Access Mode` **正交**：前者描述「这是什么库」，后者描述「允许做到什么程度」。
+
+| 级别 | 严格度 | 含义 |
+|---|:--:|---|
+| `local` | 0 | 本机文件、内存库、临时实例 |
+| `test` | 1 | 开发/测试/CI 库 |
+| `staging` | 2 | 预发、UAT、灰度 |
+| `production` | 3 | 生产 |
+| `unknown` | **3（同生产）** | 未声明，新连接默认值 |
+
+两条铁律：
+
+1. **放宽必须显式声明，收紧可以自动推断。** 自动检测只能提升严格度，永不降低。
+2. **`unknown` 按 `production` 处理。** 默认值的代价必须落在「麻烦」一侧。
+
+### 摩擦分级
+
+| 级别 | 名称 | 行为 |
+|:--:|---|---|
+| `F0` | 静默 | 无打扰，仅落审计 |
+| `F1` | 内联预览 | 面板展示将执行的语句，点「提交」即确认 |
+| `F2` | 弹窗确认 | 展示 SQL + 影响行数 + 回滚语句 |
+| `F3` | 输入确认 | 必须键入对象名 |
+| `F4` | 输入 + 冷却 | 键入正确且按钮 3 秒后可用 |
+| `F5` | 阻断 | 策略拒绝 |
+
+矩阵、修正规则与影响面见 [ADR-0004](adr/0004-environment-model.md) 与 [`10-connection-and-security.md`](10-connection-and-security.md#52-摩擦分级环境--风险)。
 
 ---
 

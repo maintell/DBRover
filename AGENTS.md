@@ -24,32 +24,48 @@ docs/*.md 契约与验收  →  ADR（若涉及取舍）  →  代码  →  测�
 
 ---
 
-## 3. 目录结构（预期）
+## 3. 目录结构
 
 ```
 DBRover/
 ├─ README.md
 ├─ AGENTS.md
+├─ go.mod                 # Go 1.26+，CGO_ENABLED=0
 ├─ docs/                  # 设计与契约，中文
 │  └─ adr/
 ├─ cmd/
-│  ├─ dbrover/            # CLI / serve 入口
-│  └─ dbrover-desktop/    # 桌面壳入口（Wails）
+│  ├─ dbrover/            # CLI / serve 入口（已实现 version/health/tables/exec）
+│  └─ dbrover-desktop/    # 桌面壳入口（待实现，Wails）
 ├─ internal/
-│  ├─ api/                # HTTP/WS 层，只做协议转换
-│  ├─ service/            # 业务编排，权限判断唯一位置
+│  ├─ api/                # HTTP/WS 层，只做协议转换（待实现）
+│  ├─ service/            # 业务编排，权限判断唯一位置（执行门已实现）
 │  ├─ driver/             # Connector 接口与各引擎实现
-│  │  ├─ pg/ mysql/ mssql/ oracle/ sqlite/ redis/ mongo/ es/
-│  │  └─ dialect/         # 方言：标识符、分页、类型映射
-│  ├─ agent/              # Agent 运行时、工具注册表、权限分级
-│  ├─ infra/              # SSH 隧道、凭据库、元数据存储、日志
+│  │  ├─ connector.go     # 接口契约
+│  │  ├─ drivertest/      # 一致性测试套件
+│  │  ├─ dialect/         # 方言：词法、切分、指纹、分类、引用
+│  │  ├─ sqlite/          # 已实现
+│  │  └─ pg/ mysql/ mssql/ oracle/ redis/ mongo/ es/   # 待实现
+│  ├─ policy/             # 风险分级 R0–R4、摩擦分级 F0–F5
+│  ├─ agent/              # Agent 运行时（待实现）
+│  ├─ infra/              # SSH 隧道、凭据库、元数据存储（待实现）
 │  └─ model/              # 领域模型与 DTO
-├─ web/                   # 前端（React + TS + Vite）
+├─ web/                   # 前端（待实现）
+├─ scripts/check.ps1      # 本地质量检查
 ├─ testdata/              # 各引擎的 docker-compose 与 fixture
 └─ .github/workflows/     # CI，仅 tag 触发打包
 ```
 
 **分层铁律**：`api → service → driver → 物理连接`，禁止越层与反向依赖。`driver` 不得 import `service`，`agent` 只能通过 `service` 触达数据。
+
+**当前依赖方向**（可被 `go list` 验证）：
+
+```
+cmd/dbrover → service → {driver, driver/sqlite, policy}
+driver/sqlite → {driver, driver/dialect, model}
+policy → {driver/dialect, model}
+dialect → model
+model → （无）
+```
 
 ---
 
@@ -87,6 +103,14 @@ DBRover/
 
 **本地只跑静态检查与单测**；完整矩阵与产物构建交给 CI。
 
+本地检查入口（发版前必须全绿）：
+
+```powershell
+pwsh -File scripts/check.ps1     # gofmt + vet + build + test + test -race
+```
+
+要求 Go 1.26+、`CGO_ENABLED=0`。新增依赖前先确认它是纯 Go。
+
 ---
 
 ## 6. CI / 发版
@@ -95,6 +119,24 @@ DBRover/
 - 一条 tag 只应产生一条发布流水线，并发组固定不按事件区分。
 - 发版前的质量检查（格式、vet、单测、README/文档与代码一致性、CHANGELOG）**在本地完成**，不塞进 release job。
 - 产物：`dbrover`（多平台 CLI/serve）、`dbrover-desktop`（安装包）、容器镜像。
+
+**对应文件**
+
+| 文件 | 触发 | 职责 |
+|---|---|---|
+| `.github/workflows/ci.yml` | `pull_request`、push `main` | 只跑 gofmt / vet / build / test / test -race + 前端脚本文法检查 |
+| `.github/workflows/release.yml` | push tag `v*` | 只做 `CGO_ENABLED=0` 交叉编译（5 个平台）与发布 |
+
+版本号通过 `-ldflags "-X main.version=<tag>"` 注入，因此 `cmd/dbrover` 里的 `version` 必须是 `var` 而不是 `const`。
+
+**这些规则由测试强制**：`internal/ci` 会检查
+
+- `release.yml` 不含 `pull_request` / `branches:`；
+- 并发组固定为 `release`，不引用 `github.event_name`；
+- `release.yml` 里不出现 `go test` / `gofmt` / `go vet`；
+- 全仓库只有一条发版路径（含 `action-gh-release` 或 `goreleaser` 的文件只能有一个）。
+
+违规会让 `go test ./...` 直接失败，不依赖人肉 review YAML。
 
 ---
 

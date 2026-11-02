@@ -1,0 +1,382 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "DBRover Local API",
+    "version": "0.1.0-dev",
+    "description": "回环 HTTP 契约。除标注 public 的端点外均需 X-DBRover-Token。本文件是唯一真相，由 TestSpecMatchesRoutes 与路由表逐条比对。"
+  },
+  "servers": [
+    { "url": "http://127.0.0.1:7788", "description": "默认仅监听回环" }
+  ],
+  "security": [{ "TokenAuth": [] }],
+  "components": {
+    "securitySchemes": {
+      "TokenAuth": { "type": "apiKey", "in": "header", "name": "X-DBRover-Token" }
+    },
+    "schemas": {
+      "Error": {
+        "type": "object",
+        "required": ["error"],
+        "properties": {
+          "error": {
+            "type": "object",
+            "required": ["code", "category", "message", "retryable"],
+            "properties": {
+              "code": { "type": "string" },
+              "category": {
+                "type": "string",
+                "enum": ["connection", "auth", "permission", "syntax", "constraint", "timeout", "canceled", "resource", "policy", "internal"]
+              },
+              "message": { "type": "string" },
+              "hint": { "type": "string" },
+              "retryable": { "type": "boolean" },
+              "request_id": { "type": "string" }
+            }
+          }
+        }
+      },
+      "Connection": {
+        "type": "object",
+        "required": ["id", "engine", "environment", "access_mode"],
+        "properties": {
+          "id": { "type": "string" },
+          "name": { "type": "string" },
+          "engine": { "type": "string" },
+          "environment": { "type": "string", "enum": ["local", "test", "staging", "production", "unknown"] },
+          "access_mode": { "type": "string", "enum": ["read-only", "read-write", "admin"] }
+        }
+      },
+      "Column": {
+        "type": "object",
+        "required": ["name", "type"],
+        "properties": {
+          "name": { "type": "string" },
+          "type": {
+            "type": "object",
+            "properties": {
+              "kind": { "type": "string" },
+              "raw": { "type": "string" }
+            }
+          },
+          "nullable": { "type": "boolean" },
+          "is_primary": { "type": "boolean" }
+        }
+      },
+      "StatementResult": {
+        "type": "object",
+        "properties": {
+          "index": { "type": "integer" },
+          "sql": { "type": "string" },
+          "grade": {
+            "type": "object",
+            "properties": {
+              "level": { "type": "string", "enum": ["R0", "R1", "R2", "R3", "R4"] },
+              "reason": { "type": "string" },
+              "writes": { "type": "boolean" }
+            }
+          },
+          "columns": { "type": "array", "items": { "$ref": "#/components/schemas/Column" } },
+          "rows": { "type": "array", "items": { "type": "array" } },
+          "affected": { "type": "integer" },
+          "duration_ms": { "type": "integer" },
+          "err": { "type": "string" }
+        }
+      }
+    }
+  },
+  "paths": {
+    "/api/v1/health": {
+      "get": {
+        "summary": "存活探测",
+        "security": [],
+        "responses": { "200": { "description": "ok" } }
+      }
+    },
+    "/api/v1/openapi.json": {
+      "get": {
+        "summary": "本契约文件",
+        "security": [],
+        "responses": { "200": { "description": "OpenAPI 文档" } }
+      }
+    },
+    "/api/v1/connections": {
+      "get": {
+        "summary": "连接列表",
+        "responses": {
+          "200": {
+            "description": "ok",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": { "items": { "type": "array", "items": { "$ref": "#/components/schemas/Connection" } } }
+                }
+              }
+            }
+          },
+          "401": { "description": "缺少或错误的令牌", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } }
+        }
+      },
+      "post": {
+        "summary": "创建并打开连接",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["engine", "host"],
+                "properties": {
+                  "name": { "type": "string" },
+                  "engine": { "type": "string", "enum": ["sqlite"] },
+                  "host": { "type": "string" },
+                  "environment": { "type": "string", "enum": ["local", "test", "staging", "production", "unknown"] },
+                  "access_mode": { "type": "string", "enum": ["read-only", "read-write", "admin"] }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": { "description": "已创建", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Connection" } } } },
+          "400": { "description": "请求非法" },
+          "502": { "description": "连接失败" }
+        }
+      }
+    },
+    "/api/v1/connections/{id}": {
+      "delete": {
+        "summary": "关闭并移除连接",
+        "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "string" } }],
+        "responses": { "204": { "description": "已删除" }, "404": { "description": "不存在" } }
+      }
+    },
+    "/api/v1/connections/{id}/health": {
+      "get": {
+        "summary": "连接健康与服务器身份",
+        "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "string" } }],
+        "responses": { "200": { "description": "ok" }, "404": { "description": "不存在" } }
+      }
+    },
+    "/api/v1/connections/{id}/tables": {
+      "get": {
+        "summary": "表与视图清单",
+        "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "string" } }],
+        "responses": { "200": { "description": "ok" }, "404": { "description": "不存在" } }
+      }
+    },
+    "/api/v1/connections/{id}/tables/{name}/rows": {
+      "get": {
+        "summary": "表数据浏览（键集分页）",
+        "parameters": [
+          { "name": "id", "in": "path", "required": true, "schema": { "type": "string" } },
+          { "name": "name", "in": "path", "required": true, "schema": { "type": "string" } },
+          { "name": "limit", "in": "query", "schema": { "type": "integer", "default": 100, "maximum": 1000 } },
+          { "name": "after", "in": "query", "description": "上一页最后一行主键值，JSON 字符串数组，如 [\"42\"]", "schema": { "type": "string" } }
+        ],
+        "responses": {
+          "200": {
+            "description": "ok",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "columns": { "type": "array", "items": { "$ref": "#/components/schemas/Column" } },
+                    "rows": { "type": "array", "items": { "type": "array" } },
+                    "next": { "type": "array", "items": { "type": "string" } },
+                    "has_more": { "type": "boolean" }
+                  }
+                }
+              }
+            }
+          },
+          "501": { "description": "无主键表不支持键集分页（CAPABILITY_UNSUPPORTED）" }
+        }
+      }
+    },
+    "/api/v1/connections/{id}/exec": {
+      "post": {
+        "summary": "执行 SQL（一次性，行数有上限）",
+        "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "string" } }],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["sql"],
+                "properties": {
+                  "sql": { "type": "string" },
+                  "approval_token": {
+                    "type": "string",
+                    "description": "服务端在 428 响应里签发的审批凭证，绑定语句指纹与 10 分钟有效期。不接受布尔值。"
+                  },
+                  "max_rows": { "type": "integer" }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "ok",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "execution_id": { "type": "string" },
+                    "risk": { "type": "string" },
+                    "friction": { "type": "string" },
+                    "duration_ms": { "type": "integer" },
+                    "results": { "type": "array", "items": { "$ref": "#/components/schemas/StatementResult" } }
+                  }
+                }
+              }
+            }
+          },
+          "400": { "description": "请求非法" },
+          "403": { "description": "只读连接拒绝写入（POLICY_READ_ONLY）" },
+          "409": { "description": "审批凭证无效、过期或与语句不匹配（POLICY_APPROVAL_MISMATCH）" },
+          "428": {
+            "description": "需要确认（POLICY_APPROVAL_REQUIRED），错误体携带 approval.token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "object",
+                      "properties": {
+                        "code": { "type": "string" },
+                        "approval": {
+                          "type": "object",
+                          "properties": {
+                            "statement_hash": { "type": "string" },
+                            "expires_at": { "type": "string", "format": "date-time" },
+                            "token": { "type": "string" }
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/connections/{id}/query": {
+      "post": {
+        "summary": "打开流式游标（仅单条只读语句）",
+        "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "string" } }],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["sql"],
+                "properties": {
+                  "sql": { "type": "string" },
+                  "fetch_size": { "type": "integer", "description": "驱动侧批大小，默认 200" },
+                  "max_rows": { "type": "integer" }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "游标已打开",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "execution_id": { "type": "string" },
+                    "cursor_id": { "type": "string" },
+                    "columns": { "type": "array", "items": { "$ref": "#/components/schemas/Column" } },
+                    "risk": { "type": "string" },
+                    "friction": { "type": "string" }
+                  }
+                }
+              }
+            }
+          },
+          "400": { "description": "写语句或多语句被拒绝" }
+        }
+      }
+    },
+    "/api/v1/results/{cid}/page": {
+      "get": {
+        "summary": "拉取一页结果",
+        "parameters": [
+          { "name": "cid", "in": "path", "required": true, "schema": { "type": "string" } },
+          { "name": "limit", "in": "query", "schema": { "type": "integer", "default": 200 } }
+        ],
+        "responses": {
+          "200": {
+            "description": "ok",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "rows": { "type": "array", "items": { "type": "array" } },
+                    "has_more": { "type": "boolean" }
+                  }
+                }
+              }
+            }
+          },
+          "409": { "description": "游标正被读取（CURSOR_BUSY）" },
+          "410": { "description": "游标已关闭或过期（CURSOR_CLOSED）" }
+        }
+      }
+    },
+    "/api/v1/results/{cid}": {
+      "delete": {
+        "summary": "主动关闭游标",
+        "parameters": [{ "name": "cid", "in": "path", "required": true, "schema": { "type": "string" } }],
+        "responses": { "204": { "description": "已关闭" } }
+      }
+    },
+    "/api/v1/audit": {
+      "get": {
+        "summary": "审计事件",
+        "responses": {
+          "200": {
+            "description": "ok",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "items": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "id": { "type": "string" },
+                          "at": { "type": "string", "format": "date-time" },
+                          "actor": { "type": "string" },
+                          "risk": { "type": "string" },
+                          "friction": { "type": "string" },
+                          "outcome": { "type": "string", "enum": ["ok", "denied", "error"] },
+                          "duration_ms": { "type": "integer" }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

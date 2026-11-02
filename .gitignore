@@ -1,0 +1,12 @@
+# 构建产物
+/bin/
+*.exe
+*.test
+
+# 本地临时数据（验收用的 SQLite 文件等）
+/.tmp/
+
+# 编辑器
+.idea/
+.vscode/
+*.swp

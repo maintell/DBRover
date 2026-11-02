@@ -180,15 +180,25 @@ DBRover 的做法是把 Agent 接进**执行闭环**：
 
 ### 5.1 三种模式（按连接配置）
 
-| 模式 | 允许的工具 | 写操作 | 适用 |
-|---|---|---|---|
-| `read-only` | 仅 `R0` 工具 | 全部拒绝 | 生产库默认 |
-| `write-with-approval` | 全部工具 | 必须人工审批每次 `change.apply` | 开发/测试库默认 |
-| `autonomous` | 全部工具 | 按策略自动放行（仅限非生产连接） | 本地库、CI |
+| 模式 | 允许的工具 | 写操作 | 适用 | 环境上限 |
+|---|---|---|---|---|
+| `read-only` | 仅 `R0` 工具 | 全部拒绝 | 生产/预发默认 | 任意 |
+| `write-with-approval` | 全部工具 | 必须人工审批每次 `change.apply` | 测试/预发 | 任意 |
+| `autonomous` | 全部工具 | 按策略自动放行 | 本地、CI | **`local` / `test` / `staging`** |
+
+**环境决定上限**（见 [ADR-0004](adr/0004-environment-model.md)）：
+
+| 连接环境 | Agent 可达的最高模式 | Agent 可否自主发起 DDL |
+|---|---|:--:|
+| `local` | `autonomous` | ✅ |
+| `test` | `autonomous` | ✅ |
+| `staging` | `write-with-approval` | ❌ |
+| `production` | `write-with-approval` | ❌ |
+| `unknown` | `write-with-approval` | ❌ |
 
 **硬约束**
 
-1. `autonomous` **不可用于标记为「生产」的连接**（配置层校验，UI 置灰并说明）。
+1. `autonomous` **不可用于 `production` / `staging` / `unknown` 的连接**（配置层校验，UI 置灰并说明）。
 2. `read-only` 模式下 `change.plan` 仍可调用（生成预案供人带走），但 `change.apply` 直接拒绝。
 3. Agent 无法修改自己的权限模式——这是人类设置项。
 
@@ -254,7 +264,11 @@ func (p *Policy) Authorize(ctx context.Context, call ToolCall) error {
    ├─ 跨 catalog/schema 写 → +1
    ├─ 语句数 > 5 的脚本 → +1（封顶 R4）
    └─ 目标表无备份记录（本地）→ +1
+7. 映射为摩擦等级：`Friction(connection.Environment, risk, modifiers)`（见 10 文档 §5.2）
+   └─ `F5` 且由 Agent 发起 → 拒绝，并把拒绝原因回传给模型（让它换方案，而不是重试）
 ```
+
+**Agent 与摩擦的关系**：Agent 不能降低摩擦。它生成 `plan` 后，`apply` 的摩擦由环境与风险决定，与「谁发起的」无关。唯一的区别是 `F2` 以上会转成 `approval_request` 推给人——**人看到的始终是最终 SQL**。
 
 ### 6.2 为什么要解析条件而不是字符串匹配
 

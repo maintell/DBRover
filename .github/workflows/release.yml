@@ -1,0 +1,87 @@
+name: Release
+
+# 发版只由 tag 触发。PR 与普通分支推送不会进入本流水线。
+on:
+  push:
+    tags:
+      - 'v*'
+
+# 一次发版只应产生一条流水线：并发组固定，不按事件区分。
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+# 这里只做「编译 + 发布」。
+# 格式、vet、单测、文档一致性等检查都在打 tag 之前于本地完成（scripts/check.ps1）。
+jobs:
+  build:
+    name: build ${{ matrix.goos }}/${{ matrix.goarch }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - goos: windows
+            goarch: amd64
+          - goos: linux
+            goarch: amd64
+          - goos: linux
+            goarch: arm64
+          - goos: darwin
+            goarch: amd64
+          - goos: darwin
+            goarch: arm64
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Build
+        env:
+          CGO_ENABLED: '0'
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+        run: |
+          set -euo pipefail
+          bin=dbrover
+          if [ "$GOOS" = "windows" ]; then bin=dbrover.exe; fi
+          mkdir -p out
+          go build -trimpath \
+            -ldflags "-s -w -X main.version=${GITHUB_REF_NAME}" \
+            -o "out/$bin" ./cmd/dbrover
+          if [ "$GOOS" = "windows" ]; then
+            (cd out && zip -q "../dbrover_${GITHUB_REF_NAME}_${GOOS}_${GOARCH}.zip" "$bin")
+          else
+            tar -C out -czf "dbrover_${GITHUB_REF_NAME}_${GOOS}_${GOARCH}.tar.gz" "$bin"
+          fi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dbrover-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: |
+            dbrover_*.zip
+            dbrover_*.tar.gz
+          if-no-files-found: error
+
+  publish:
+    name: publish release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Publish
+        uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/*
+          generate_release_notes: true
+          fail_on_unmatched_files: true
