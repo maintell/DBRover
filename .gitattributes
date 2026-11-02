@@ -1,0 +1,3 @@
+# 换行统一为 LF：AGENTS.md「代码规范 / 通用」要求保留原有换行风格，新文件用 LF。
+# 不设置时 Windows 上 core.autocrlf=true 会在检出时改写成 CRLF。
+* text=auto eol=lf
