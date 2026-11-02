@@ -21,6 +21,15 @@ type Config struct {
 	// New 返回一个已打开的连接器。readOnly 为 true 时必须返回只读连接。
 	// 每次调用应返回一个新的、空的数据库，便于做 DDL 回放验证。
 	New func(readOnly bool) (driver.Connector, error)
+	// BinaryType 是二进制列的类型名。默认 BLOB；PostgreSQL 需要设为 BYTEA。
+	BinaryType string
+}
+
+func (c Config) binaryType() string {
+	if c.BinaryType == "" {
+		return "BLOB"
+	}
+	return c.BinaryType
 }
 
 // Run 执行全部适用用例。
@@ -180,14 +189,14 @@ func testTypeFidelity(t *testing.T, cfg Config) {
 	c := open(t, cfg, false)
 	s := session(t, c)
 
-	mustExec(t, s, `CREATE TABLE t_types (
+	mustExec(t, s, fmt.Sprintf(`CREATE TABLE t_types (
 		id INTEGER PRIMARY KEY,
 		big BIGINT,
 		txt TEXT,
 		real_n REAL,
-		blob_n BLOB,
+		blob_n %s,
 		nul TEXT
-	)`)
+	)`, cfg.binaryType()))
 	mustExec(t, s,
 		`INSERT INTO t_types (id, big, txt, real_n, blob_n, nul) VALUES (?, ?, ?, ?, ?, ?)`,
 		int64(1), int64(9007199254740993), "hello 世界 🚀", 3.5, []byte{0xDE, 0xAD, 0xBE, 0xEF}, nil)

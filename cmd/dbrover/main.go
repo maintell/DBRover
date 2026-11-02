@@ -17,6 +17,7 @@ import (
 	"github.com/maintell/DBRover/internal/api"
 	"github.com/maintell/DBRover/internal/driver"
 	"github.com/maintell/DBRover/internal/driver/mysql"
+	"github.com/maintell/DBRover/internal/driver/pg"
 	"github.com/maintell/DBRover/internal/driver/sqlite"
 	"github.com/maintell/DBRover/internal/infra/tunnel"
 	"github.com/maintell/DBRover/internal/model"
@@ -86,6 +87,20 @@ func usage() {
 `)
 }
 
+// normalizeEngine 接受常见别名，避免用户记错写法。
+func normalizeEngine(s string) model.Engine {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "pg", "postgres", "postgresql":
+		return model.EnginePostgres
+	case "maria", "mariadb":
+		return model.EngineMariaDB
+	case "sqlite3":
+		return model.EngineSQLite
+	default:
+		return model.Engine(strings.ToLower(strings.TrimSpace(s)))
+	}
+}
+
 // connFlags 是各子命令共用的连接参数。
 // SQLite 用 -db 指文件路径；网络引擎用 -host/-port/-user，-db 指库名。
 type connFlags struct {
@@ -102,7 +117,7 @@ type connFlags struct {
 }
 
 func (c *connFlags) bind(fs *flag.FlagSet) {
-	fs.StringVar(&c.engine, "engine", "sqlite", "引擎: sqlite|mysql")
+	fs.StringVar(&c.engine, "engine", "sqlite", "引擎: sqlite|mysql|postgres")
 	fs.StringVar(&c.db, "db", "", "SQLite 数据库文件路径；MySQL 为库名")
 	fs.StringVar(&c.host, "host", "", "主机地址（网络引擎必填）")
 	fs.IntVar(&c.port, "port", 0, "端口（默认按引擎取）")
@@ -118,7 +133,7 @@ func (c *connFlags) open() (driver.Connector, model.Environment, model.AccessMod
 	if c.ro && c.rw {
 		return nil, "", "", errors.New("-ro 与 -rw 不能同时使用")
 	}
-	engine := model.Engine(strings.ToLower(c.engine))
+	engine := normalizeEngine(c.engine)
 	env := model.ParseEnvironment(c.env)
 
 	// 默认跟随环境：生产/预发/未声明 → 只读；测试/本地 → 读写。
@@ -330,6 +345,12 @@ func openConnector(engine model.Engine, cfg driver.ConnectConfig) (driver.Connec
 		return c, nil
 	case model.EngineMySQL, model.EngineMariaDB:
 		c := mysql.New()
+		if err := c.Open(ctx, cfg); err != nil {
+			return nil, err
+		}
+		return c, nil
+	case model.EnginePostgres:
+		c := pg.New()
 		if err := c.Open(ctx, cfg); err != nil {
 			return nil, err
 		}

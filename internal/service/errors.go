@@ -66,6 +66,11 @@ func ClassifyError(err error) *ExecError {
 			Code: "SQL_OBJECT_NOT_FOUND", Category: "syntax",
 			Message: msg, Hint: "检查对象名与当前库/模式是否正确", Retryable: false,
 		}
+	case has("there is no parameter", "missing parameter", "parameter not set"):
+		return &ExecError{
+			Code: "SQL_PARAMETER_MISSING", Category: "syntax",
+			Message: msg, Hint: "SQL 里有占位符但没有提供参数；检查参数个数与顺序", Retryable: false,
+		}
 	case has("syntax error", "near \"", "unrecognized token", "incomplete input"):
 		return &ExecError{
 			Code: "SQL_SYNTAX_ERROR", Category: "syntax",

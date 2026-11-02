@@ -22,6 +22,7 @@ func TestClassifyError(t *testing.T) {
 		{"表不存在", errors.New("SQL logic error: no such table: t (1)"), "SQL_OBJECT_NOT_FOUND", "syntax", 400, false},
 		{"列不存在", errors.New("no such column: nope"), "SQL_OBJECT_NOT_FOUND", "syntax", 400, false},
 		{"语法错", errors.New(`near "FORM": syntax error`), "SQL_SYNTAX_ERROR", "syntax", 400, false},
+		{"缺参数", errors.New("ERROR: there is no parameter $1 (SQLSTATE 42P02)"), "SQL_PARAMETER_MISSING", "syntax", 400, false},
 		{"唯一约束", errors.New("UNIQUE constraint failed: t.id"), "SQL_CONSTRAINT_VIOLATION", "constraint", 409, false},
 		{"外键", errors.New("FOREIGN KEY constraint failed"), "SQL_CONSTRAINT_VIOLATION", "constraint", 409, false},
 		{"只读库", errors.New("attempt to write a readonly database"), "POLICY_READ_ONLY", "policy", 403, false},
