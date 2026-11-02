@@ -636,10 +636,12 @@ func (s *Server) handleTableRows(w http.ResponseWriter, r *http.Request) {
 		res.Rows = [][]any{}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"columns":  res.Columns,
-		"rows":     res.Rows,
-		"next":     next,
-		"has_more": res.HasMore,
+		"columns":     res.Columns,
+		"rows":        res.Rows,
+		"next":        next,
+		"has_more":    res.HasMore,
+		"primary_key": res.PrimaryKey,
+		"editable":    res.Editable,
 	})
 }
 

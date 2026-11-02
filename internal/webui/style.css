@@ -166,6 +166,28 @@ th {
 td.null { color: #5d6577; font-style: italic; }
 td.empty { color: #5d6577; }
 
+/* 可编辑单元格与待提交状态 */
+td.editable { cursor: text; }
+td.editable:focus {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+  background: #0f131b;
+  white-space: pre-wrap;
+}
+td.dirty {
+  background: #2b2610;
+  box-shadow: inset 0 -2px 0 var(--warn);
+}
+
+#pending-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0 12px 8px;
+}
+/* id 选择器的 display 会盖过 [hidden]，必须显式声明。 */
+#pending-bar[hidden] { display: none; }
+
 tr:hover td { background: #1e222c; }
 
 .notice {

@@ -326,6 +326,10 @@ type TableRowsResult struct {
 	Next    []any
 	HasMore bool
 	SQL     string
+	// PrimaryKey 是主键列名。前端据此构造行定位条件。
+	PrimaryKey []string
+	// Editable 表示这张表能否安全地行级编辑（必须有主键）。
+	Editable bool
 }
 
 // TableRows 用键集分页浏览表数据。
@@ -407,7 +411,13 @@ func (e *Executor) TableRows(ctx context.Context, req TableRowsRequest) (*TableR
 		}
 	}
 
-	out := &TableRowsResult{Columns: cur.Columns(), SQL: q}
+	out := &TableRowsResult{
+		Columns:    cur.Columns(),
+		SQL:        q,
+		PrimaryKey: pk,
+		// 只读连接上不该出现可编辑单元格：否则用户改了一堆才发现提交被拒。
+		Editable: e.mode.AllowsWrite(),
+	}
 	if len(rows) > limit {
 		out.HasMore = true
 		rows = rows[:limit]

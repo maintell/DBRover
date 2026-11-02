@@ -6,6 +6,10 @@ const state = {
   current: null,
   tableNext: null,
   tableName: '',
+  // 行级编辑：是否允许、主键列、待提交的改动
+  editable: false,
+  pkCols: [],
+  pending: [],
 };
 
 const $ = (id) => document.getElementById(id);
@@ -18,6 +22,8 @@ const API = {
   tables: '/api/v1/connections/:id/tables',
   rows: '/api/v1/connections/:id/tables/:name/rows',
   exec: '/api/v1/connections/:id/exec',
+  changePlan: '/api/v1/connections/:id/changes/plan',
+  changeApply: '/api/v1/changes/:pid/apply',
 };
 
 // path 把 :param 占位符替换为实际值。
@@ -290,7 +296,12 @@ async function loadTablePage(first) {
     const out = await api(url);
     if (first) {
       $('results').replaceChildren();
-      setStatus(state.tableName + ' · ' + out.rows.length + ' 行');
+      state.pending = [];
+      state.editable = !!out.editable;
+      state.pkCols = out.primary_key || [];
+      updatePendingBar();
+      setStatus(state.tableName + ' · ' + out.rows.length + ' 行' +
+        (state.editable ? '' : '（无主键，只读）'));
     }
     renderTable($('results'), out.columns, out.rows, !first);
     state.tableNext = out.has_more ? out.next : null;
@@ -306,6 +317,132 @@ async function loadTablePage(first) {
     showRisk('R0', 'F0');
   } catch (e) {
     showNotice(e.message + (e.hint ? '（' + e.hint + '）' : ''), 'error');
+  }
+}
+
+// ---------- 行级编辑 ----------
+
+// coerce 把输入框里的字符串还原成列类型对应的值。
+// 不还原的话，整数列会拿字符串去比较，定位条件永远匹配不到。
+function coerce(kind, text) {
+  if (text === '') return '';
+  switch (kind) {
+    case 'integer': {
+      const n = Number(text);
+      return Number.isFinite(n) ? n : text;
+    }
+    case 'float': {
+      const f = Number(text);
+      return Number.isFinite(f) ? f : text;
+    }
+    default:
+      return text; // decimal 保持字符串以免丢精度
+  }
+}
+
+function cellKind(column) {
+  const t = column && column.type ? column.type : {};
+  return t.kind || '';
+}
+
+function updatePendingBar() {
+  const bar = $('pending-bar');
+  bar.replaceChildren();
+  if (!state.pending.length) {
+    bar.hidden = true;
+    return;
+  }
+  bar.hidden = false;
+  const text = document.createElement('span');
+  text.textContent = '待提交 ' + state.pending.length + ' 处修改';
+  const submit = document.createElement('button');
+  submit.className = 'primary';
+  submit.textContent = '提交变更';
+  submit.onclick = () => submitChanges();
+  const discard = document.createElement('button');
+  discard.textContent = '丢弃';
+  discard.onclick = () => { state.pending = []; loadTablePage(true); };
+  bar.appendChild(text);
+  bar.appendChild(submit);
+  bar.appendChild(discard);
+}
+
+async function submitChanges() {
+  if (!state.pending.length || !state.current) return;
+
+  // 同一行可能改了多列：按主键聚合成一条 update。
+  const byRow = new Map();
+  for (const ch of state.pending) {
+    const k = JSON.stringify(ch.key);
+    if (!byRow.has(k)) {
+      byRow.set(k, { op: 'update', key: ch.key, before: { ...ch.key }, after: {} });
+    }
+    const row = byRow.get(k);
+    row.before[ch.col] = ch.oldValue;
+    row.after[ch.col] = ch.newValue;
+  }
+
+  let plan;
+  try {
+    plan = await api(path(API.changePlan, { id: state.current.id }), {
+      method: 'POST',
+      body: JSON.stringify({
+        table: { kind: 'table', name: state.tableName },
+        changes: [...byRow.values()],
+      }),
+    });
+  } catch (e) {
+    if (e.code === 'CAPABILITY_UNSUPPORTED') {
+      showNotice('该表没有主键，无法安全定位行：' + e.message, 'warn');
+    } else {
+      showNotice('生成变更预案失败：' + e.message, 'error');
+    }
+    return;
+  }
+
+  const stmts = (plan.statements || []).map((s) => s.sql).join(';\n');
+  const html =
+    '<div class="meta">' +
+    '<span class="badge ' + String(plan.risk).toLowerCase() + '">风险 ' + plan.risk + '</span>' +
+    '<span class="badge">打扰 ' + plan.friction + '</span>' +
+    (plan.irreversible ? '<span class="badge r4">不可逆</span>' : '') +
+    '</div>' +
+    '<p>将执行 ' + (plan.statements || []).length + ' 条语句：</p>' +
+    '<pre>' + escapeHTML(stmts) + '</pre>' +
+    (plan.irreversible ? '<p>该变更无法生成回滚语句。</p>' : '<p>已生成回滚语句，可在需要时手动执行。</p>');
+  const ok = await dialog('确认变更', html, '执行');
+  if (!ok) return;
+
+  await applyPlan(plan.id);
+}
+
+async function applyPlan(pid, token) {
+  try {
+    const body = {};
+    if (token) body.approval_token = token;
+    const out = await api(path(API.changeApply, { pid }), {
+      method: 'POST',
+      body: JSON.stringify(body),
+    });
+    showRisk(out.risk, out.friction);
+    state.pending = [];
+    updatePendingBar();
+    setStatus('变更已应用 · ' + out.duration_ms + ' ms');
+    await loadTablePage(true);
+  } catch (e) {
+    if (e.code === 'POLICY_APPROVAL_REQUIRED') {
+      const t = e.detail && e.detail.approval && e.detail.approval.token;
+      if (!t) { showNotice('服务端未返回审批凭证', 'error'); return; }
+      return applyPlan(pid, t);
+    }
+    if (e.code === 'CHANGE_ROW_CONFLICT') {
+      showNotice('有行已被其他会话修改，整批未生效。已刷新数据，请重试。', 'warn');
+      state.pending = [];
+      updatePendingBar();
+      await loadTablePage(true);
+      return;
+    }
+    showNotice('应用变更失败：' + e.message, 'error');
   }
 }
 
@@ -339,15 +476,77 @@ function renderTable(container, columns, rows, append) {
   const tbody = table.querySelector('tbody');
   for (const r of rows) {
     const tr = document.createElement('tr');
+
+    // 行定位键：只取主键列的值。没有主键就不可编辑。
+    let key = null;
+    if (state.editable && state.pkCols && state.pkCols.length) {
+      key = {};
+      for (const pk of state.pkCols) {
+        const idx = columns.findIndex((c) => c.name.toLowerCase() === pk.toLowerCase());
+        if (idx >= 0) key[pk] = r[idx];
+      }
+      if (Object.keys(key).length !== state.pkCols.length) key = null;
+      else tr.dataset.key = JSON.stringify(key);
+    }
+
     for (let i = 0; i < columns.length; i++) {
       const v = r[i];
-      if (v === null || v === undefined) tr.appendChild(cell('NULL', 'null'));
-      else if (v === '') tr.appendChild(cell("''", 'empty'));
-      else tr.appendChild(cell(String(v)));
+      if (v === null || v === undefined) {
+        // NULL 单元格不做行内编辑：「清空」与「设为 NULL」是两件事，
+        // 让两者共用一个输入框必然产生误操作。
+        tr.appendChild(cell('NULL', 'null'));
+      } else if (v === '') {
+        const td = cell("''", 'empty');
+        attachEdit(td, key, columns[i], r[i]);
+        tr.appendChild(td);
+      } else {
+        const td = cell(String(v));
+        attachEdit(td, key, columns[i], v);
+        tr.appendChild(td);
+      }
     }
     tbody.appendChild(tr);
   }
 }
+
+// attachEdit 让单元格可编辑，并在失焦时把改动记进待提交列表。
+function attachEdit(td, key, column, origValue) {
+  if (!state.editable || !key) return;
+  td.contentEditable = 'true';
+  td.dataset.col = column.name;
+  td.dataset.kind = cellKind(column);
+  td.dataset.orig = String(origValue);
+  td.classList.add('editable');
+}
+
+// 事件委托：只挂一次，避免每格一个监听器。
+document.addEventListener('focusout', (ev) => {
+  const td = ev.target;
+  if (!td || td.tagName !== 'TD' || !td.isContentEditable) return;
+
+  const tr = td.closest('tr');
+  if (!tr || !tr.dataset.key) return;
+
+  const col = td.dataset.col;
+  const kind = td.dataset.kind || '';
+  const origText = td.dataset.orig || '';
+  const newText = td.textContent;
+  if (newText === origText) {
+    td.classList.remove('dirty');
+    return;
+  }
+
+  const key = JSON.parse(tr.dataset.key);
+  state.pending = state.pending.filter((c) => !(c.col === col && JSON.stringify(c.key) === JSON.stringify(key)));
+  state.pending.push({
+    key,
+    col,
+    oldValue: coerce(kind, origText),
+    newValue: coerce(kind, newText),
+  });
+  td.classList.add('dirty');
+  updatePendingBar();
+});
 
 function renderExec(out) {
   $('results').replaceChildren();

@@ -227,6 +227,38 @@ func TestTableRowsNoPrimaryKey(t *testing.T) {
 	}
 }
 
+// TestTableRowsEditableFollowsAccessMode 验证「可编辑」不只是有主键，
+// 还要连接真的可写：只读连接上返回 Editable=true 会让用户在界面上改一片，
+// 提交时才被拒，属于把人往坑里带。
+func TestTableRowsEditableFollowsAccessMode(t *testing.T) {
+	e := setup(t)
+	seed(t, e, 2, 2)
+	ctx := context.Background()
+
+	ro := service.NewExecutor(e.rw, model.EnvTest, model.AccessReadOnly, nil)
+	defer ro.Close()
+	res, err := ro.TableRows(ctx, service.TableRowsRequest{Table: "t", Limit: 10})
+	if err != nil {
+		t.Fatalf("TableRows(只读): %v", err)
+	}
+	if res.Editable {
+		t.Error("只读连接上 Editable 应为 false")
+	}
+	if len(res.PrimaryKey) != 1 || res.PrimaryKey[0] != "id" {
+		t.Errorf("PrimaryKey = %v, 期望 [id]", res.PrimaryKey)
+	}
+
+	rw := service.NewExecutor(e.rw, model.EnvTest, model.AccessReadWrite, nil)
+	defer rw.Close()
+	res, err = rw.TableRows(ctx, service.TableRowsRequest{Table: "t", Limit: 10})
+	if err != nil {
+		t.Fatalf("TableRows(可写): %v", err)
+	}
+	if !res.Editable {
+		t.Error("可写连接上有主键时 Editable 应为 true")
+	}
+}
+
 // TestTableRowsCoercesKey 验证游标值按列类型还原：
 // 传字符串 "9" 时对 INTEGER 主键必须按数字比较，否则 SQLite 会因类型序导致漏行。
 func TestTableRowsCoercesKey(t *testing.T) {

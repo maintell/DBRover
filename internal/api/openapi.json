@@ -185,7 +185,9 @@
                     "columns": { "type": "array", "items": { "$ref": "#/components/schemas/Column" } },
                     "rows": { "type": "array", "items": { "type": "array" } },
                     "next": { "type": "array", "items": { "type": "string" } },
-                    "has_more": { "type": "boolean" }
+                    "has_more": { "type": "boolean" },
+                    "primary_key": { "type": "array", "items": { "type": "string" }, "description": "主键列名；为空表示该表不可编辑" },
+                    "editable": { "type": "boolean", "description": "是否允许行内编辑（需有主键且连接可写）" }
                   }
                 }
               }
