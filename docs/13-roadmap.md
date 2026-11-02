@@ -25,7 +25,8 @@
 | 里程碑 | 状态 | 说明 |
 |---|---|---|
 | M0 文档基线 | ✅ 完成 | 14 份设计文档 + 4 份 ADR |
-| M1 最小闭环 | 🚧 进行中 | 安全内核 + 首个引擎端到端已通；API / 前端 / 其余引擎未开始 |
+| M1 最小闭环 | 🚧 进行中 | SQLite / MySQL / PostgreSQL 三引擎端到端已通；API、临时前端、CLI 已可用；**SQL Server 未做**（验收机磁盘不足，待环境） |
+| M2 写入与变更安全 | 🚧 部分完成 | 变更集、乐观并发、Plan/Apply、界面行内编辑、筛选排序已通；结构设计器、批量修改、一键撤销未做 |
 
 M1 已完成并有测试覆盖的部分：
 
@@ -36,14 +37,17 @@ M1 已完成并有测试覆盖的部分：
 | 摩擦分级 `F0`–`F5` | `internal/policy` | 5 环境 × 5 风险矩阵穷举 + 修正项 + 放宽方向断言 |
 | 连接器契约 + 一致性套件 | `internal/driver`、`internal/driver/drivertest` | 套件 8 项 |
 | SQLite 连接器 | `internal/driver/sqlite` | 套件全绿（元数据 / 类型保真 / NULL vs 空串 / keyset / 事务 / 只读拒绝 / DDL 往返） |
-| 执行门 | `internal/service` | 11 项集成用例，含整批原子拦截与审计 |
-| 回环 HTTP 服务 | `internal/api` | 16 项用例：鉴权、连接生命周期、查询、审批拒绝、只读拒绝、审计、非回环地址拒绝、游标分页、键集分页 |
-| 结果游标与分页 | `internal/service` | 流式游标（5 分钟 TTL、续期、占用互斥）+ 键集分页（无主键表显式拒绝） |
+| MySQL 连接器 | `internal/driver/mysql` | 套件全绿（真实 MySQL 5.7.38 实例）；`clientFoundRows=true` 修掉「改成相同值被判冲突」 |
+| PostgreSQL 连接器 | `internal/driver/pg` | 套件全绿（真实 PostgreSQL 17.11 实例）；占位符 `?`→`$n` 词法级改写 |
+| 执行门 | `internal/service` | 集成用例，含整批原子拦截与审计 |
+| 回环 HTTP 服务 | `internal/api` | 鉴权、连接生命周期、查询、审批拒绝、只读拒绝、审计、非回环地址拒绝、游标分页、键集分页、筛选排序、OpenAPI 契约门禁 |
+| 结果游标与分页 | `internal/service` | 流式游标（5 分钟 TTL、续期、占用互斥）+ 键集分页（无主键表显式拒绝）+ 筛选排序下的稳定翻页 |
+| 数据变更集与预案 | `internal/service`、`internal/api` | 乐观并发、冲突整体回滚、预案服务端保管、审批绑定指纹 |
 | SSH 隧道 | `internal/infra/tunnel` | 8 项用例：单跳、双跳、私钥认证、错误密码、主机密钥不匹配拒绝、缺少信任库拒绝、跳数上限、TOFU 固定 |
-| 临时 Web 界面 | `internal/webui` | 免构建、随二进制内嵌；连接、对象树、SQL 执行、结果网格、审批弹窗（浏览器实测） |
+| 临时 Web 界面 | `internal/webui` | 免构建、随二进制内嵌；连接、对象树、SQL 执行、结果网格、审批弹窗、行内编辑、筛选排序（浏览器实测） |
 | CLI | `cmd/dbrover` | `version` / `health` / `tables` / `exec` / `serve` / `tunnel`，退出码 0/1/2 |
 
-**M1 剩余**：正式前端（React 栈）、PostgreSQL / MySQL / MSSQL 连接器、OpenAPI 代码生成。
+**M1 剩余**：SQL Server 连接器（阻塞在验收环境磁盘）、正式前端（React 栈）、OpenAPI 代码生成。
 
 > `internal/webui` 是临时界面，目标是让能力可被点击验收，不替代 ADR-0001 规定的正式前端。
 

@@ -281,3 +281,134 @@ func TestTableRowsCoercesKey(t *testing.T) {
 		t.Errorf("id = %d, 期望 10", got)
 	}
 }
+
+func TestTableRowsFilter(t *testing.T) {
+	e := setup(t)
+	seed(t, e, 2, 9) // id 1..10，v 全为 'x'
+	ctx := context.Background()
+
+	ex := service.NewExecutor(e.rw, model.EnvTest, model.AccessReadWrite, nil)
+	defer ex.Close()
+
+	// 整型列的比较必须按数字走：传字符串 "3" 若被当成文本，>= 会命中错误集合。
+	res, err := ex.TableRows(ctx, service.TableRowsRequest{
+		Table: "t", Limit: 100,
+		Filter: []service.FilterCond{{Column: "id", Op: service.FilterGe, Value: "8"}},
+	})
+	if err != nil {
+		t.Fatalf("TableRows: %v", err)
+	}
+	if len(res.Rows) != 3 {
+		t.Fatalf("id>=8 应有 3 行, 实际 %d", len(res.Rows))
+	}
+	if got := res.Rows[0][0].(int64); got != 8 {
+		t.Errorf("首行 id = %d, 期望 8", got)
+	}
+
+	// LIKE 只对文本有意义，不能被类型还原吃掉。
+	res, err = ex.TableRows(ctx, service.TableRowsRequest{
+		Table: "t", Limit: 100,
+		Filter: []service.FilterCond{{Column: "v", Op: service.FilterLike, Value: "x%"}},
+	})
+	if err != nil {
+		t.Fatalf("TableRows(like): %v", err)
+	}
+	if len(res.Rows) != 9 {
+		t.Errorf("v LIKE 'x%%' 应有 9 行（seed 写入的 2..10）, 实际 %d", len(res.Rows))
+	}
+
+	res, err = ex.TableRows(ctx, service.TableRowsRequest{
+		Table: "t", Limit: 100,
+		Filter: []service.FilterCond{{Column: "v", Op: service.FilterLike, Value: "y%"}},
+	})
+	if err != nil {
+		t.Fatalf("TableRows(like 无命中): %v", err)
+	}
+	if len(res.Rows) != 0 {
+		t.Errorf("v LIKE 'y%%' 应 0 行, 实际 %d", len(res.Rows))
+	}
+}
+
+func TestTableRowsFilterRejectsUnknownColumnAndOp(t *testing.T) {
+	e := setup(t)
+	ex := service.NewExecutor(e.rw, model.EnvTest, model.AccessReadWrite, nil)
+	defer ex.Close()
+
+	_, err := ex.TableRows(context.Background(), service.TableRowsRequest{
+		Table: "t", Limit: 10,
+		Filter: []service.FilterCond{{Column: "nope", Op: service.FilterEq, Value: "1"}},
+	})
+	if !errors.Is(err, service.ErrInvalidFilter) {
+		t.Fatalf("未知列应返回 ErrInvalidFilter, 实际 %v", err)
+	}
+
+	_, err = ex.TableRows(context.Background(), service.TableRowsRequest{
+		Table: "t", Limit: 10,
+		Filter: []service.FilterCond{{Column: "id", Op: service.FilterOp("regexp"), Value: "1"}},
+	})
+	if !errors.Is(err, service.ErrInvalidFilter) {
+		t.Fatalf("未知操作符应返回 ErrInvalidFilter, 实际 %v", err)
+	}
+
+	_, err = ex.TableRows(context.Background(), service.TableRowsRequest{
+		Table: "t", Limit: 10, Order: &service.OrderSpec{Column: "nope"},
+	})
+	if !errors.Is(err, service.ErrInvalidFilter) {
+		t.Fatalf("未知排序列应返回 ErrInvalidFilter, 实际 %v", err)
+	}
+}
+
+// TestTableRowsSortPaginatesWithoutLoss 是本组最关键的一条：
+// 按「非唯一列」排序时，若排序键里不带主键，键集分页会漏行或原地打转。
+func TestTableRowsSortPaginatesWithoutLoss(t *testing.T) {
+	e := setup(t)
+	ctx := context.Background()
+
+	s, err := e.rw.Acquire(ctx)
+	if err != nil {
+		t.Fatalf("Acquire: %v", err)
+	}
+	// 12 行只有 3 个不同的 v 值，必然出现重复排序键。
+	for i := 2; i <= 12; i++ {
+		v := []string{"aa", "bb", "cc"}[(i-1)%3]
+		if _, err := s.Execute(ctx, `INSERT INTO t (id, v) VALUES (?, ?)`, []any{i, v}); err != nil {
+			t.Fatalf("插入 id=%d: %v", i, err)
+		}
+	}
+	_ = s.Close()
+
+	ex := service.NewExecutor(e.rw, model.EnvTest, model.AccessReadWrite, nil)
+	defer ex.Close()
+
+	for _, desc := range []bool{false, true} {
+		order := &service.OrderSpec{Column: "v", Desc: desc}
+		seen := map[int64]int{}
+		var after []any
+		for page := 0; ; page++ {
+			res, err := ex.TableRows(ctx, service.TableRowsRequest{
+				Table: "t", Limit: 5, After: after, Order: order,
+			})
+			if err != nil {
+				t.Fatalf("desc=%v 第 %d 页: %v", desc, page, err)
+			}
+			for _, r := range res.Rows {
+				seen[r[0].(int64)]++
+			}
+			if !res.HasMore {
+				break
+			}
+			after = res.Next
+			if page > 10 {
+				t.Fatalf("desc=%v 翻页未终止", desc)
+			}
+		}
+		if len(seen) != 12 {
+			t.Fatalf("desc=%v 只翻到 %d 行, 期望 12", desc, len(seen))
+		}
+		for id, n := range seen {
+			if n != 1 {
+				t.Fatalf("desc=%v id=%d 出现 %d 次", desc, id, n)
+			}
+		}
+	}
+}

@@ -237,3 +237,29 @@ tr:hover td { background: #1e222c; }
 .card .meta { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 10px; }
 
 label.field { display: block; margin: 10px 0 4px; color: var(--muted); font-size: 12px; }
+
+/* 视图工具条：筛选与排序。
+   #table-toolbar 同时带 .toolbar（display:flex），必须显式压回 [hidden]，
+   否则隐藏属性会被 id 选择器的布局声明盖过。 */
+#table-toolbar[hidden] { display: none; }
+.filters select, .filters input { max-width: 160px; }
+.filters input.narrow { width: 110px; }
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  padding: 2px 4px 2px 10px;
+  border: 1px solid #3d4453;
+  border-radius: 999px;
+  font-size: 12px;
+  color: var(--muted);
+}
+.chip button {
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+  padding: 0 4px;
+  font-size: 14px;
+  line-height: 1;
+}
+.chip button:hover { color: var(--danger); }

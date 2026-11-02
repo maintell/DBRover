@@ -613,11 +613,37 @@ func (s *Server) handleTableRows(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	var filter []service.FilterCond
+	if raw := q.Get("where"); raw != "" {
+		if err := json.Unmarshal([]byte(raw), &filter); err != nil {
+			writeError(w, http.StatusBadRequest, "REQUEST_INVALID", "internal",
+				"where 需要是 JSON 数组", `例如 where=[{"column":"status","op":"eq","value":"paid"}]`, false)
+			return
+		}
+	}
+	var order *service.OrderSpec
+	if raw := q.Get("order"); raw != "" {
+		var spec service.OrderSpec
+		if err := json.Unmarshal([]byte(raw), &spec); err != nil {
+			writeError(w, http.StatusBadRequest, "REQUEST_INVALID", "internal",
+				"order 需要是 JSON 对象", `例如 order={"column":"id","desc":true}`, false)
+			return
+		}
+		order = &spec
+	}
+
 	res, err := e.exec.TableRows(r.Context(), service.TableRowsRequest{
-		Table: r.PathValue("name"),
-		Limit: limit,
-		After: after,
+		Table:  r.PathValue("name"),
+		Limit:  limit,
+		After:  after,
+		Filter: filter,
+		Order:  order,
 	})
+	if errors.Is(err, service.ErrInvalidFilter) {
+		writeError(w, http.StatusBadRequest, "FILTER_INVALID", "internal",
+			err.Error(), `where 只接受出现在表定义中的列与白名单操作符`, false)
+		return
+	}
 	if errors.Is(err, service.ErrNoPrimaryKey) {
 		writeError(w, http.StatusNotImplemented, "CAPABILITY_UNSUPPORTED", "internal",
 			err.Error(), "无主键表只能整表浏览，无法做稳定的分页定位", false)

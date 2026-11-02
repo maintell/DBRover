@@ -310,25 +310,74 @@ func (e *Executor) CloseCursor(cursorID string) bool { return e.cursors.close(cu
 // Close 释放执行器持有的全部资源（游标与会话）。
 func (e *Executor) Close() { e.cursors.closeAll() }
 
+// ErrInvalidFilter 表示筛选或排序参数不合法（列不存在 / 操作符不支持）。
+// 单独成类型是为了让 API 层给出 400 而不是笼统的 500。
+var ErrInvalidFilter = errors.New("筛选或排序参数不合法")
+
+// FilterOp 是筛选操作符白名单。只接受这里列出的取值。
+type FilterOp string
+
+const (
+	FilterEq      FilterOp = "eq"
+	FilterNe      FilterOp = "ne"
+	FilterGt      FilterOp = "gt"
+	FilterGe      FilterOp = "ge"
+	FilterLt      FilterOp = "lt"
+	FilterLe      FilterOp = "le"
+	FilterLike    FilterOp = "like"
+	FilterIsNull  FilterOp = "is_null"
+	FilterNotNull FilterOp = "is_not_null"
+)
+
+// filterSQL 把操作符映射到 SQL 记号。写法固定，不接受调用方传入的符号，
+// 避免把 WHERE 片段当成字符串拼进去。
+var filterSQL = map[FilterOp]string{
+	FilterEq:   "=",
+	FilterNe:   "<>",
+	FilterGt:   ">",
+	FilterGe:   ">=",
+	FilterLt:   "<",
+	FilterLe:   "<=",
+	FilterLike: "LIKE",
+}
+
+// FilterCond 是一个筛选条件。Value 对 is_null / is_not_null 无意义。
+type FilterCond struct {
+	Column string   `json:"column"`
+	Op     FilterOp `json:"op"`
+	Value  string   `json:"value"`
+}
+
+// OrderSpec 是单列排序。未指定时按主键排序。
+type OrderSpec struct {
+	Column string `json:"column"`
+	Desc   bool   `json:"desc"`
+}
+
 // TableRowsRequest 是表数据浏览请求。
 type TableRowsRequest struct {
 	Table string
 	Limit int
-	// After 是上一页最后一行的主键值，空表示第一页。
+	// After 是上一页最后一行的定位值，顺序与「排序列…, 主键…」一致；空表示第一页。
 	After []any
+	// Filter 是 AND 组合的筛选条件。不支持 OR 与分组（见 docs/06 §4.3）。
+	Filter []FilterCond
+	// Order 非空时按该列排序；主键仍会追加在排序键末尾，否则键集分页会在
+	// 重复值上漏行或原地打转。
+	Order *OrderSpec
 }
 
 // TableRowsResult 是表数据浏览结果。
 type TableRowsResult struct {
 	Columns []model.Column
 	Rows    [][]any
-	// Next 是下一页的起点（本页最后一行的主键值）。HasMore 为 false 时无意义。
+	// Next 是下一页的起点（本页最后一行的「排序列…, 主键…」取值）。HasMore 为 false 时无意义。
 	Next    []any
 	HasMore bool
 	SQL     string
 	// PrimaryKey 是主键列名。前端据此构造行定位条件。
 	PrimaryKey []string
-	// Editable 表示这张表能否安全地行级编辑（必须有主键）。
+	// Editable 表示这张表能否安全地行级编辑（必须有主键且连接可写）。
 	Editable bool
 }
 
@@ -345,11 +394,16 @@ func (e *Executor) TableRows(ctx context.Context, req TableRowsRequest) (*TableR
 	if len(pk) == 0 {
 		return nil, ErrNoPrimaryKey
 	}
-	pkType := make(map[string]model.ColumnType, len(pk))
-	for _, c := range td.Columns {
-		if c.IsPrimary {
-			pkType[strings.ToLower(c.Name)] = c.Type
-		}
+	// 列名 → 结果集下标 / 真实写法 / 类型。筛选与排序都只允许命中这里的列，
+	// 因此不存在把调用方字符串直接拼进 SQL 的路径。
+	type colInfo struct {
+		name  string
+		index int
+		typ   model.ColumnType
+	}
+	known := make(map[string]colInfo, len(td.Columns))
+	for i, c := range td.Columns {
+		known[strings.ToLower(c.Name)] = colInfo{name: c.Name, index: i, typ: c.Type}
 	}
 
 	limit := req.Limit
@@ -364,28 +418,90 @@ func (e *Executor) TableRows(ctx context.Context, req TableRowsRequest) (*TableR
 	for i, c := range td.Columns {
 		cols[i] = e.dialect.QuoteIdent(c.Name)
 	}
-	order := make([]string, len(pk))
-	for i, c := range pk {
-		order[i] = e.dialect.QuoteIdent(c)
+
+	// 排序键 = 用户指定列（可选）+ 全部主键。主键必须在内，否则重复值上分页会漏行。
+	desc := req.Order != nil && req.Order.Desc
+	keyIdx := make([]colInfo, 0, len(pk)+1)
+	if req.Order != nil && strings.TrimSpace(req.Order.Column) != "" {
+		ci, ok := known[strings.ToLower(strings.TrimSpace(req.Order.Column))]
+		if !ok {
+			return nil, fmt.Errorf("%w: 排序列 %q 不存在", ErrInvalidFilter, req.Order.Column)
+		}
+		keyIdx = append(keyIdx, ci)
+	}
+	for _, c := range pk {
+		if len(keyIdx) > 0 && strings.EqualFold(keyIdx[0].name, c) {
+			continue // 排序列就是主键本身，不重复追加
+		}
+		ci, ok := known[strings.ToLower(c)]
+		if !ok {
+			return nil, fmt.Errorf("主键列 %s 不在表定义中", c)
+		}
+		keyIdx = append(keyIdx, ci)
+	}
+
+	orderParts := make([]string, len(keyIdx))
+	keyCols := make([]string, len(keyIdx))
+	for i, ci := range keyIdx {
+		ident := e.dialect.QuoteIdent(ci.name)
+		keyCols[i] = ident
+		orderParts[i] = ident
+		if desc {
+			orderParts[i] += " DESC"
+		}
+	}
+
+	where := make([]string, 0, len(req.Filter)+1)
+	args := make([]any, 0, len(req.Filter)+len(keyIdx))
+	for _, f := range req.Filter {
+		ci, ok := known[strings.ToLower(strings.TrimSpace(f.Column))]
+		if !ok {
+			return nil, fmt.Errorf("%w: 筛选列 %q 不存在", ErrInvalidFilter, f.Column)
+		}
+		ident := e.dialect.QuoteIdent(ci.name)
+		switch f.Op {
+		case FilterIsNull:
+			where = append(where, ident+" IS NULL")
+		case FilterNotNull:
+			where = append(where, ident+" IS NOT NULL")
+		default:
+			sym, ok := filterSQL[f.Op]
+			if !ok {
+				return nil, fmt.Errorf("%w: 不支持的操作符 %q", ErrInvalidFilter, f.Op)
+			}
+			where = append(where, ident+" "+sym+" ?")
+			if f.Op == FilterLike {
+				// LIKE 只对文本有意义，不做类型还原，否则 "a%" 会被数字列解析掉。
+				args = append(args, f.Value)
+			} else {
+				args = append(args, coerceKey(f.Value, ci.typ))
+			}
+		}
+	}
+	if len(req.After) == len(keyIdx) {
+		cmp := ">"
+		if desc {
+			cmp = "<"
+		}
+		if len(keyIdx) == 1 {
+			where = append(where, keyCols[0]+" "+cmp+" ?")
+		} else {
+			marks := make([]string, len(keyIdx))
+			for i := range keyIdx {
+				marks[i] = "?"
+			}
+			where = append(where, "("+strings.Join(keyCols, ", ")+") "+cmp+" ("+strings.Join(marks, ", ")+")")
+		}
+		for i, v := range req.After {
+			args = append(args, coerceKey(v, keyIdx[i].typ))
+		}
 	}
 
 	q := "SELECT " + strings.Join(cols, ", ") + " FROM " + quotePath(e, req.Table)
-	args := []any{}
-	if len(req.After) == len(pk) {
-		if len(pk) == 1 {
-			q += " WHERE " + order[0] + " > ?"
-		} else {
-			marks := make([]string, len(pk))
-			for i := range pk {
-				marks[i] = "?"
-			}
-			q += " WHERE (" + strings.Join(order, ", ") + ") > (" + strings.Join(marks, ", ") + ")"
-		}
-		for i, v := range req.After {
-			args = append(args, coerceKey(v, pkType[strings.ToLower(pk[i])]))
-		}
+	if len(where) > 0 {
+		q += " WHERE " + strings.Join(where, " AND ")
 	}
-	q += " ORDER BY " + strings.Join(order, ", ") + " LIMIT " + strconv.Itoa(limit+1)
+	q += " ORDER BY " + strings.Join(orderParts, ", ") + " LIMIT " + strconv.Itoa(limit+1)
 
 	sess, err := e.conn.Acquire(ctx)
 	if err != nil {
@@ -424,18 +540,13 @@ func (e *Executor) TableRows(ctx context.Context, req TableRowsRequest) (*TableR
 	}
 	out.Rows = rows
 	if out.HasMore && len(rows) > 0 {
-		idx := map[string]int{}
-		for i, c := range td.Columns {
-			idx[strings.ToLower(c.Name)] = i
-		}
 		last := rows[len(rows)-1]
-		next := make([]any, len(pk))
-		for i, c := range pk {
-			j, ok := idx[strings.ToLower(c)]
-			if !ok || j >= len(last) {
-				return nil, fmt.Errorf("主键列 %s 不在结果集中", c)
+		next := make([]any, len(keyIdx))
+		for i, ci := range keyIdx {
+			if ci.index >= len(last) {
+				return nil, fmt.Errorf("定位列 %s 不在结果集中", ci.name)
 			}
-			next[i] = last[j]
+			next[i] = last[ci.index]
 		}
 		out.Next = next
 	}

@@ -172,7 +172,9 @@
           { "name": "id", "in": "path", "required": true, "schema": { "type": "string" } },
           { "name": "name", "in": "path", "required": true, "schema": { "type": "string" } },
           { "name": "limit", "in": "query", "schema": { "type": "integer", "default": 100, "maximum": 1000 } },
-          { "name": "after", "in": "query", "description": "上一页最后一行主键值，JSON 字符串数组，如 [\"42\"]", "schema": { "type": "string" } }
+          { "name": "after", "in": "query", "description": "上一页最后一行定位值，JSON 字符串数组，顺序与「排序列…, 主键…」一致", "schema": { "type": "string" } },
+          { "name": "where", "in": "query", "description": "AND 组合的筛选条件，JSON 数组；列名必须在表定义中，操作符取值 eq/ne/gt/ge/lt/le/like/is_null/is_not_null", "schema": { "type": "string" } },
+          { "name": "order", "in": "query", "description": "单列排序，JSON 对象，如 {\"column\":\"id\",\"desc\":true}；主键始终追加在排序键末尾", "schema": { "type": "string" } }
         ],
         "responses": {
           "200": {
@@ -193,6 +195,7 @@
               }
             }
           },
+          "400": { "description": "筛选或排序参数不合法（FILTER_INVALID / REQUEST_INVALID）" },
           "501": { "description": "无主键表不支持键集分页（CAPABILITY_UNSUPPORTED）" }
         }
       }

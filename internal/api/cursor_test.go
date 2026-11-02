@@ -169,6 +169,49 @@ func TestTableRowsEndpointKeyset(t *testing.T) {
 	}
 }
 
+// TestTableRowsEndpointFilterAndOrder 验证筛选与排序参数能透传到服务层，
+// 并且非法列名返回 400 而不是 500 —— 客户端拼错列名属于请求问题。
+func TestTableRowsEndpointFilterAndOrder(t *testing.T) {
+	_, ts, dir := newServer(t)
+	id := createConn(t, ts, dir, "local", "read-write")
+	seedRows(t, ts, id, 25)
+
+	base := "/api/v1/connections/" + id + "/tables/s/rows"
+
+	where := `[{"column":"id","op":"ge","value":"20"}]`
+	code, body := do(t, ts, http.MethodGet, base+"?limit=100&where="+url.QueryEscape(where), nil, true)
+	if code != http.StatusOK {
+		t.Fatalf("where status = %d, body=%v", code, body)
+	}
+	rows, _ := body["rows"].([]any)
+	if len(rows) != 6 {
+		t.Errorf("id>=20 应为 6 行, 实际 %d", len(rows))
+	}
+
+	order := `{"column":"id","desc":true}`
+	code, body = do(t, ts, http.MethodGet, base+"?limit=3&order="+url.QueryEscape(order), nil, true)
+	if code != http.StatusOK {
+		t.Fatalf("order status = %d, body=%v", code, body)
+	}
+	rows, _ = body["rows"].([]any)
+	if len(rows) != 3 {
+		t.Fatalf("limit=3 应返回 3 行, 实际 %d", len(rows))
+	}
+	if got := rows[0].([]any)[0].(float64); got != 25 {
+		t.Errorf("倒序首行 id = %v, 期望 25", got)
+	}
+
+	bad := `[{"column":"nope","op":"eq","value":"1"}]`
+	code, body = do(t, ts, http.MethodGet, base+"?where="+url.QueryEscape(bad), nil, true)
+	if code != http.StatusBadRequest {
+		t.Fatalf("未知列应 400, 实际 %d, body=%v", code, body)
+	}
+	errObj, _ := body["error"].(map[string]any)
+	if errObj["code"] != "FILTER_INVALID" {
+		t.Errorf("code = %v, 期望 FILTER_INVALID", errObj["code"])
+	}
+}
+
 func TestTableRowsEndpointNoPrimaryKey(t *testing.T) {
 	_, ts, dir := newServer(t)
 	id := createConn(t, ts, dir, "local", "read-write")

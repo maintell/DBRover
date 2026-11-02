@@ -17,6 +17,7 @@
 - **结果游标与分页**：流式游标（5 分钟 TTL、独立清理协程、占用互斥）+ 键集分页（无主键表显式拒绝）。
 - **数据变更集与变更预案**（`internal/service/change.go`）：行级 insert/update/delete 编译成参数化语句 + 自动生成回滚语句；乐观并发按「主键 + 被改列原值」定位；`RowsAffected` 与预期不符即整批回滚；无主键表拒绝编辑；预案只由服务端保管并按指纹与有效期校验。
 - **界面行内编辑**（`internal/webui`）：有主键且连接可写的表可直接改单元格，脏单元格高亮 + 顶部「待提交 N 处修改」，提交先出确认弹窗（风险、打扰、将执行的语句、回滚语句），确认后才 `apply`。
+- **表数据筛选与排序**（`service.TableRows` + 界面工具条）：`where` 条件 AND 组合、单列排序（主键恒为末位排序键以保证键集分页不漏行）、页大小 100–1000；列名与操作符走白名单，写错列名返回 `400 FILTER_INVALID`。改视图前若有未提交改动会先确认。
 - **回环 HTTP 服务**（`internal/api`）：token 鉴权、Origin 校验、连接管理、`exec`、`query`、`results/{id}/page`、`tables/{name}/rows`、审计查询、OpenAPI 契约（`/api/v1/openapi.json`）。
 - **审计落盘**：JSONL 追加写（0600）+ 内存热区，`serve -audit <path>` 开启。
 - **SSH 隧道**（`internal/infra/tunnel`）：多跳、密码/私钥/agent 认证、主机密钥失败关闭 + 信任落盘、拨号与握手超时。

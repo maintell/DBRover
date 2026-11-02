@@ -6,6 +6,11 @@ const state = {
   current: null,
   tableNext: null,
   tableName: '',
+  // 视图：当前列的元数据、筛选条件、排序、页大小
+  columns: [],
+  filter: [],
+  order: null,
+  limit: 100,
   // 行级编辑：是否允许、主键列、待提交的改动
   editable: false,
   pkCols: [],
@@ -192,6 +197,10 @@ async function selectConnection(id) {
   // 切连接后必须清掉上一个连接留下的结果与提示。
   state.tableNext = null;
   state.tableName = '';
+  state.columns = [];
+  state.filter = [];
+  state.order = null;
+  $('table-toolbar').hidden = true;
   const hint = document.createElement('div');
   hint.className = 'notice';
   hint.textContent = '点左侧对象查看数据，或直接在上方执行 SQL。';
@@ -282,16 +291,157 @@ async function loadTables() {
 async function browseTable(name) {
   state.tableName = name;
   state.tableNext = null;
+  state.columns = [];
+  state.filter = [];
+  state.order = null;
   $('sql').value = 'SELECT * FROM ' + name + ' LIMIT 100';
   await loadTablePage(true);
 }
 
+// ---------- 视图工具条：筛选与排序 ----------
+
+const OPS = [
+  ['eq', '='],
+  ['ne', '≠'],
+  ['gt', '>'],
+  ['ge', '≥'],
+  ['lt', '<'],
+  ['le', '≤'],
+  ['like', '匹配'],
+  ['is_null', '为空'],
+  ['is_not_null', '不为空'],
+];
+
+function opLabel(op) {
+  const hit = OPS.find((x) => x[0] === op);
+  return hit ? hit[1] : op;
+}
+
+// renderToolbar 重建工具条。列清单来自服务端返回的 columns，
+// 因此「能筛什么列」永远等于「这张表有哪些列」，不在前端猜。
+function renderToolbar() {
+  const bar = $('table-toolbar');
+  bar.replaceChildren();
+  if (!state.tableName || !state.columns.length) {
+    bar.hidden = true;
+    return;
+  }
+  bar.hidden = false;
+
+  const fill = (sel, items, pick) => {
+    for (const it of items) {
+      const o = document.createElement('option');
+      o.value = it[0];
+      o.textContent = it[1];
+      sel.appendChild(o);
+    }
+    if (pick !== undefined) sel.value = pick;
+  };
+  const colPairs = state.columns.map((c) => [c.name, c.name]);
+
+  const sortSel = document.createElement('select');
+  sortSel.id = 'sort-col';
+  fill(sortSel, [['', '默认顺序']].concat(colPairs), state.order ? state.order.column : '');
+  sortSel.title = '排序依据';
+  sortSel.onchange = () => {
+    state.order = sortSel.value
+      ? { column: sortSel.value, desc: state.order ? state.order.desc : false }
+      : null;
+    loadTablePage(true);
+  };
+
+  const dirBtn = document.createElement('button');
+  dirBtn.id = 'sort-dir';
+  dirBtn.textContent = state.order && state.order.desc ? '降序' : '升序';
+  dirBtn.disabled = !state.order;
+  dirBtn.onclick = () => {
+    if (!state.order) return;
+    state.order.desc = !state.order.desc;
+    loadTablePage(true);
+  };
+
+  const fCol = document.createElement('select');
+  fCol.id = 'filter-col';
+  fill(fCol, colPairs);
+  const fOp = document.createElement('select');
+  fOp.id = 'filter-op';
+  fill(fOp, OPS, 'eq');
+  const fVal = document.createElement('input');
+  fVal.id = 'filter-val';
+  fVal.placeholder = '值';
+  fVal.className = 'narrow';
+  fOp.onchange = () => {
+    fVal.hidden = fOp.value === 'is_null' || fOp.value === 'is_not_null';
+  };
+  const addBtn = document.createElement('button');
+  addBtn.id = 'filter-add';
+  addBtn.textContent = '添加条件';
+  addBtn.onclick = () => {
+    const op = fOp.value;
+    const needVal = op !== 'is_null' && op !== 'is_not_null';
+    state.filter.push({ column: fCol.value, op: op, value: needVal ? fVal.value : '' });
+    loadTablePage(true);
+  };
+
+  const sizeSel = document.createElement('select');
+  sizeSel.id = 'page-size';
+  fill(sizeSel, [['100', '100 行'], ['200', '200 行'], ['500', '500 行'], ['1000', '1000 行']], String(state.limit));
+  sizeSel.title = '每页行数';
+  sizeSel.onchange = () => {
+    state.limit = Number(sizeSel.value) || 100;
+    loadTablePage(true);
+  };
+
+  bar.append(sortSel, dirBtn, fCol, fOp, fVal, addBtn, sizeSel);
+
+  state.filter.forEach((f, i) => {
+    const chip = document.createElement('span');
+    chip.className = 'chip';
+    chip.textContent = f.column + ' ' + opLabel(f.op) + (f.value ? ' ' + f.value : '');
+    const x = document.createElement('button');
+    x.textContent = '×';
+    x.title = '移除该条件';
+    x.onclick = () => {
+      state.filter.splice(i, 1);
+      loadTablePage(true);
+    };
+    chip.appendChild(x);
+    bar.appendChild(chip);
+  });
+  if (state.filter.length) {
+    const clear = document.createElement('button');
+    clear.id = 'filter-clear';
+    clear.textContent = '清空条件';
+    clear.onclick = () => {
+      state.filter = [];
+      loadTablePage(true);
+    };
+    bar.appendChild(clear);
+  }
+}
+
 async function loadTablePage(first) {
   if (!state.current) return;
+
+  // 换视图会丢改动，先问一句。截断在提交前丢改动比让人以为还在更糟。
+  if (first && state.pending.length) {
+    const ok = await dialog('有未提交的修改',
+      '<p>继续会丢弃这 ' + state.pending.length + ' 处修改。</p>', '丢弃并继续');
+    if (!ok) return;
+    state.pending = [];
+    updatePendingBar();
+  }
+
   try {
-    let url = path(API.rows, { id: state.current.id, name: state.tableName }) + '?limit=100';
+    let url = path(API.rows, { id: state.current.id, name: state.tableName }) + '?limit=' + state.limit;
     if (!first && state.tableNext) {
       url += '&after=' + encodeURIComponent(JSON.stringify(state.tableNext));
+    }
+    if (state.filter.length) {
+      url += '&where=' + encodeURIComponent(JSON.stringify(state.filter));
+    }
+    if (state.order) {
+      url += '&order=' + encodeURIComponent(JSON.stringify(state.order));
     }
     const out = await api(url);
     if (first) {
@@ -299,7 +449,9 @@ async function loadTablePage(first) {
       state.pending = [];
       state.editable = !!out.editable;
       state.pkCols = out.primary_key || [];
+      state.columns = out.columns || [];
       updatePendingBar();
+      renderToolbar();
       setStatus(state.tableName + ' · ' + out.rows.length + ' 行' +
         (state.editable ? '' : '（无主键，只读）'));
     }
