@@ -72,9 +72,9 @@ func usage() {
 
 用法:
   dbrover version
-  dbrover health -db <file> [-env local|test|staging|production|unknown] [-ro]
-  dbrover tables -db <file>
-  dbrover exec   -db <file> (-sql "..." | -file <path>) [-env ...] [-ro] [-approve]
+  dbrover health -db <file> [-env ...] [-ro|-rw]
+  dbrover tables -db <file> [-env ...] [-ro|-rw]
+  dbrover exec   -db <file> (-sql "..." | -file <path>) [-env ...] [-ro|-rw] [-approve]
   dbrover serve  [-addr 127.0.0.1:7788] [-token <token>] [-allow-remote]
   dbrover tunnel -via user@hop1:22[,user@hop2:22] -to host:port (-password-stdin | -key <path>)
 
@@ -89,23 +89,32 @@ type connFlags struct {
 	dsn string
 	env string
 	ro  bool
+	rw  bool
 }
 
 func (c *connFlags) bind(fs *flag.FlagSet) {
 	fs.StringVar(&c.dsn, "db", "", "SQLite 数据库文件路径（必填）")
 	fs.StringVar(&c.env, "env", "unknown", "环境: local|test|staging|production|unknown")
-	fs.BoolVar(&c.ro, "ro", false, "以只读模式连接")
+	fs.BoolVar(&c.ro, "ro", false, "强制只读（优先于环境默认值）")
+	fs.BoolVar(&c.rw, "rw", false, "显式声明读写：生产/预发默认只读，需写操作时用本开关")
 }
 
 func (c *connFlags) open() (*sqlite.Connector, model.Environment, model.AccessMode, error) {
 	if c.dsn == "" {
 		return nil, "", "", errors.New("-db 必填")
 	}
+	if c.ro && c.rw {
+		return nil, "", "", errors.New("-ro 与 -rw 不能同时使用")
+	}
 	env := model.ParseEnvironment(c.env)
-	// 未显式 -ro 时按环境给默认值：生产/预发/未声明 → 只读。
+	// 默认跟随环境：生产/预发/未声明 → 只读；测试/本地 → 读写。
+	// 需要写生产时必须显式 -rw，这是刻意抬高摩擦。
 	mode := model.DefaultAccessMode(env)
 	if c.ro {
 		mode = model.AccessReadOnly
+	}
+	if c.rw {
+		mode = model.AccessReadWrite
 	}
 	conn := sqlite.New()
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
