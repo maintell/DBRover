@@ -15,6 +15,8 @@ const state = {
   editable: false,
   pkCols: [],
   pending: [],
+  // 刚应用成功的变更对应的撤销预案（10 分钟窗口，服务端保管）
+  undo: null,
 };
 
 const $ = (id) => document.getElementById(id);
@@ -200,6 +202,7 @@ async function selectConnection(id) {
   state.columns = [];
   state.filter = [];
   state.order = null;
+  state.undo = null;
   $('table-toolbar').hidden = true;
   const hint = document.createElement('div');
   hint.className = 'notice';
@@ -294,6 +297,8 @@ async function browseTable(name) {
   state.columns = [];
   state.filter = [];
   state.order = null;
+  // 换表就不该再提示上一张表的撤销入口（预案本身仍在服务端有效期内）。
+  state.undo = null;
   $('sql').value = 'SELECT * FROM ' + name + ' LIMIT 100';
   await loadTablePage(true);
 }
@@ -455,7 +460,7 @@ async function loadTablePage(first) {
       setStatus(state.tableName + ' · ' + out.rows.length + ' 行' +
         (state.editable ? '' : '（无主键，只读）'));
     }
-    renderTable($('results'), out.columns, out.rows, !first);
+    renderTable($('results'), out.columns, out.rows, !first, state.editable);
     state.tableNext = out.has_more ? out.next : null;
     if (out.has_more) {
       const bar = document.createElement('div');
@@ -501,6 +506,31 @@ function updatePendingBar() {
   const bar = $('pending-bar');
   bar.replaceChildren();
   if (!state.pending.length) {
+    // 没有待提交改动时，这条位置留给「刚才那次变更还能撤销」。
+    // 撤销窗口 10 分钟，由服务端持有反向预案，这里只拿 id。
+    if (state.undo) {
+      bar.hidden = false;
+      const text = document.createElement('span');
+      text.textContent = '变更已应用 · 10 分钟内可撤销';
+      const undoBtn = document.createElement('button');
+      undoBtn.id = 'btn-undo';
+      undoBtn.className = 'primary';
+      undoBtn.textContent = '撤销';
+      undoBtn.onclick = () => {
+        const u = state.undo;
+        state.undo = null;
+        updatePendingBar();
+        applyPlan(u.id);
+      };
+      const close = document.createElement('button');
+      close.textContent = '知道了';
+      close.onclick = () => {
+        state.undo = null;
+        updatePendingBar();
+      };
+      bar.append(text, undoBtn, close);
+      return;
+    }
     bar.hidden = true;
     return;
   }
@@ -578,6 +608,8 @@ async function applyPlan(pid, token) {
     });
     showRisk(out.risk, out.friction);
     state.pending = [];
+    // 服务端在应用成功后返回撤销预案；不可逆变更时是 null。
+    state.undo = out.undo && out.undo.id ? { id: out.undo.id, expiresAt: out.undo.expires_at } : null;
     updatePendingBar();
     setStatus('变更已应用 · ' + out.duration_ms + ' ms');
     await loadTablePage(true);
@@ -607,7 +639,10 @@ function cell(text, cls) {
   return td;
 }
 
-function renderTable(container, columns, rows, append) {
+// renderTable 渲染结果网格。
+// allowEdit 必须由调用方显式给：表浏览可以编辑，而原始 SQL 的结果集不行——
+// 后者的列可能来自别的表，拿它拼 UPDATE 会改错表。
+function renderTable(container, columns, rows, append, allowEdit) {
   let table = container.querySelector('table');
   if (!append || !table) {
     table = document.createElement('table');
@@ -631,7 +666,8 @@ function renderTable(container, columns, rows, append) {
 
     // 行定位键：只取主键列的值。没有主键就不可编辑。
     let key = null;
-    if (state.editable && state.pkCols && state.pkCols.length) {
+    const editing = !!(allowEdit && state.pkCols && state.pkCols.length);
+    if (editing) {
       key = {};
       for (const pk of state.pkCols) {
         const idx = columns.findIndex((c) => c.name.toLowerCase() === pk.toLowerCase());
@@ -644,12 +680,14 @@ function renderTable(container, columns, rows, append) {
     for (let i = 0; i < columns.length; i++) {
       const v = r[i];
       if (v === null || v === undefined) {
-        // NULL 单元格不做行内编辑：「清空」与「设为 NULL」是两件事，
-        // 让两者共用一个输入框必然产生误操作。
-        tr.appendChild(cell('NULL', 'null'));
+        // NULL 与空串是两件事：NULL 显示为 NULL，空串显示为 ''。
+        // NULL 单元格允许直接输入来取消 NULL，但「清空输入框」不会把它变成空串。
+        const td = cell('NULL', 'null');
+        attachEdit(td, key, columns[i], null, true);
+        tr.appendChild(td);
       } else if (v === '') {
         const td = cell("''", 'empty');
-        attachEdit(td, key, columns[i], r[i]);
+        attachEdit(td, key, columns[i], '');
         tr.appendChild(td);
       } else {
         const td = cell(String(v));
@@ -662,12 +700,14 @@ function renderTable(container, columns, rows, append) {
 }
 
 // attachEdit 让单元格可编辑，并在失焦时把改动记进待提交列表。
-function attachEdit(td, key, column, origValue) {
-  if (!state.editable || !key) return;
+// isNull 为 true 时额外记住「原值是 NULL」，用于生成 before=null。
+function attachEdit(td, key, column, origValue, isNull) {
+  if (!key) return;
   td.contentEditable = 'true';
   td.dataset.col = column.name;
   td.dataset.kind = cellKind(column);
-  td.dataset.orig = String(origValue);
+  td.dataset.orig = isNull ? '' : String(origValue);
+  if (isNull) td.dataset.orignull = '1';
   td.classList.add('editable');
 }
 
@@ -679,11 +719,27 @@ document.addEventListener('focusout', (ev) => {
   const tr = td.closest('tr');
   if (!tr || !tr.dataset.key) return;
 
+  // 右键菜单已经把改动记下了，别再按输入框内容重算一遍。
+  if (td.dataset.skip === '1') {
+    delete td.dataset.skip;
+    return;
+  }
+
   const col = td.dataset.col;
   const kind = td.dataset.kind || '';
   const origText = td.dataset.orig || '';
+  const wasNull = td.dataset.orignull === '1';
   const newText = td.textContent;
-  if (newText === origText) {
+
+  // 原值是 NULL：清空输入框或原样留 NULL 都视为「没改」，不会被误解成空串。
+  if (wasNull && (newText === '' || newText === 'NULL')) {
+    td.textContent = 'NULL';
+    td.classList.remove('dirty');
+    dropPending(col, tr.dataset.key);
+    updatePendingBar();
+    return;
+  }
+  if (!wasNull && newText === origText) {
     td.classList.remove('dirty');
     return;
   }
@@ -693,11 +749,99 @@ document.addEventListener('focusout', (ev) => {
   state.pending.push({
     key,
     col,
-    oldValue: coerce(kind, origText),
+    oldValue: wasNull ? null : coerce(kind, origText),
     newValue: coerce(kind, newText),
   });
   td.classList.add('dirty');
   updatePendingBar();
+});
+
+// dropPending 丢掉某一格已有的待提交改动。
+function dropPending(col, keyText) {
+  state.pending = state.pending.filter((c) => !(c.col === col && JSON.stringify(c.key) === keyText));
+}
+
+// ---------- NULL 与空串的显式选择 ----------
+
+// 右键菜单：把「设为 NULL」和「设为空串」做成两个动作。
+// 靠「输入框留空」猜意图必然出错——这两件事在数据库里完全不同。
+let cellMenu = null;
+
+function closeCellMenu() {
+  if (cellMenu) {
+    cellMenu.remove();
+    cellMenu = null;
+  }
+}
+
+document.addEventListener('contextmenu', (ev) => {
+  const td = ev.target;
+  if (!td || td.tagName !== 'TD') return;
+  const tr = td.closest('tr');
+  if (!tr || !tr.dataset.key || !td.dataset.col) return;
+
+  ev.preventDefault();
+  closeCellMenu();
+
+  const menu = document.createElement('div');
+  menu.className = 'cell-menu';
+  menu.style.left = ev.clientX + 'px';
+  menu.style.top = ev.clientY + 'px';
+  const actions = [
+    ['设为 NULL', null],
+    ["设为空串 ''", ''],
+  ];
+  for (const [label, value] of actions) {
+    const b = document.createElement('button');
+    b.textContent = label;
+    b.onclick = () => {
+      closeCellMenu();
+      setCellExact(td, value);
+    };
+    menu.appendChild(b);
+  }
+  document.body.appendChild(menu);
+  cellMenu = menu;
+});
+
+document.addEventListener('click', closeCellMenu);
+document.addEventListener('keydown', (ev) => {
+  if (ev.key === 'Escape') closeCellMenu();
+});
+
+function sameValue(a, b) {
+  if (a === null || b === null) return a === b;
+  return String(a) === String(b);
+}
+
+// setCellExact 把单元格直接设为指定值（null 或空串），并入待提交列表。
+function setCellExact(td, value) {
+  const tr = td.closest('tr');
+  if (!tr || !tr.dataset.key) return;
+
+  const col = td.dataset.col;
+  const kind = td.dataset.kind || '';
+  const wasNull = td.dataset.orignull === '1';
+  const oldValue = wasNull ? null : coerce(kind, td.dataset.orig || '');
+  if (sameValue(oldValue, value)) return;
+
+  td.textContent = value === null ? 'NULL' : "''";
+  td.dataset.orignull = value === null ? '1' : '0';
+  td.classList.add('dirty');
+  // 这次改动的 before/after 已经算好，别让紧随其后的失焦再记一遍。
+  td.dataset.skip = '1';
+
+  const key = JSON.parse(tr.dataset.key);
+  dropPending(col, tr.dataset.key);
+  state.pending.push({ key, col, oldValue, newValue: value });
+  updatePendingBar();
+}
+
+// 关闭页面前拦一下：浏览器只允许通用文案，不能自定义内容。
+window.addEventListener('beforeunload', (ev) => {
+  if (!state.pending.length) return;
+  ev.preventDefault();
+  ev.returnValue = '';
 });
 
 function renderExec(out) {
@@ -708,7 +852,8 @@ function renderExec(out) {
       return;
     }
     if (r.columns && r.columns.length) {
-      renderTable($('results'), r.columns, r.rows || [], false);
+      // 原始 SQL 的结果集不给编辑：列可能来自别的表，拼出来的 UPDATE 会打错表。
+      renderTable($('results'), r.columns, r.rows || [], false, false);
     } else {
       const d = document.createElement('div');
       d.className = 'notice';

@@ -414,7 +414,36 @@
           }
         },
         "responses": {
-          "200": { "description": "已应用" },
+          "200": {
+            "description": "已应用",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "execution_id": { "type": "string" },
+                    "risk": { "type": "string" },
+                    "friction": { "type": "string" },
+                    "duration_ms": { "type": "integer" },
+                    "undo": {
+                      "description": "撤销预案（10 分钟内有效）；不可逆变更或撤销本身为 null",
+                      "oneOf": [
+                        { "type": "null" },
+                        {
+                          "type": "object",
+                          "properties": {
+                            "id": { "type": "string", "description": "把它 POST 回 apply 端点即撤销" },
+                            "expires_at": { "type": "string", "format": "date-time" },
+                            "statements": { "type": "array", "items": { "type": "object" } }
+                          }
+                        }
+                      ]
+                    }
+                  }
+                }
+              }
+            }
+          },
           "404": { "description": "预案不存在或已清理" },
           "409": { "description": "行冲突（CHANGE_ROW_CONFLICT）或审批凭证不匹配" },
           "428": { "description": "需要确认（POLICY_APPROVAL_REQUIRED）" }

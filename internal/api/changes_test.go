@@ -2,6 +2,7 @@ package api_test
 
 import (
 	"net/http"
+	"net/http/httptest"
 	"testing"
 )
 
@@ -64,6 +65,127 @@ func TestChangePlanLifecycle(t *testing.T) {
 	if code != http.StatusNotFound {
 		t.Errorf("重复应用 status = %d, 期望 404", code)
 	}
+}
+
+// TestChangePlanUndoRestoresValue 验证「一键撤销」是一条完整闭环：
+// 应用成功 → 拿到撤销预案 → 应用撤销 → 数据回到原值 → 撤销本身不能再被撤销。
+func TestChangePlanUndoRestoresValue(t *testing.T) {
+	_, ts, dir := newServer(t)
+	id := createConn(t, ts, dir, "local", "read-write")
+
+	if code := execApproved(t, ts, id, "CREATE TABLE u (id INTEGER PRIMARY KEY, v TEXT)"); code != http.StatusOK {
+		t.Fatalf("建表 status = %d", code)
+	}
+	if code := execApproved(t, ts, id, "INSERT INTO u (id,v) VALUES (1,'a')"); code != http.StatusOK {
+		t.Fatalf("插数据 status = %d", code)
+	}
+
+	code, body := do(t, ts, http.MethodPost, "/api/v1/connections/"+id+"/changes/plan", map[string]any{
+		"table": map[string]any{"kind": "table", "name": "u"},
+		"changes": []any{map[string]any{
+			"op": "update", "key": map[string]any{"id": 1},
+			"before": map[string]any{"id": 1, "v": "a"},
+			"after":  map[string]any{"v": "a2"},
+		}},
+	}, true)
+	if code != http.StatusCreated {
+		t.Fatalf("plan status = %d, body=%v", code, body)
+	}
+	pid, _ := body["id"].(string)
+
+	code, body = do(t, ts, http.MethodPost, "/api/v1/changes/"+pid+"/apply", map[string]any{}, true)
+	if code != http.StatusOK {
+		t.Fatalf("apply status = %d, body=%v", code, body)
+	}
+	undo, ok := body["undo"].(map[string]any)
+	if !ok || undo == nil {
+		t.Fatalf("应用成功后应返回撤销预案, body=%v", body)
+	}
+	undoID, _ := undo["id"].(string)
+	if undoID == "" {
+		t.Fatalf("撤销预案缺少 id: %v", undo)
+	}
+	if stmts, _ := undo["statements"].([]any); len(stmts) != 1 {
+		t.Errorf("撤销语句数 = %d, 期望 1", len(stmts))
+	}
+
+	if got := valueOf(t, ts, id, "SELECT v FROM u WHERE id = 1"); got != "a2" {
+		t.Fatalf("应用后 v = %v, 期望 a2", got)
+	}
+
+	// 撤销本身是普通预案，走同一套执行门。
+	code, body = do(t, ts, http.MethodPost, "/api/v1/changes/"+undoID+"/apply", map[string]any{}, true)
+	if code != http.StatusOK {
+		t.Fatalf("undo apply status = %d, body=%v", code, body)
+	}
+	if body["undo"] != nil {
+		t.Errorf("撤销不应再产生撤销预案, body=%v", body["undo"])
+	}
+	if got := valueOf(t, ts, id, "SELECT v FROM u WHERE id = 1"); got != "a" {
+		t.Errorf("撤销后 v = %v, 期望 a", got)
+	}
+
+	code, _ = do(t, ts, http.MethodPost, "/api/v1/changes/"+undoID+"/apply", map[string]any{}, true)
+	if code != http.StatusNotFound {
+		t.Errorf("撤销重复应用 status = %d, 期望 404", code)
+	}
+}
+
+// TestChangePlanUndoIsNullWhenIrreversible 验证「改不回来就说改不回来」：
+// delete 没带整行原值时生成不出反向语句，接口明确返回 undo=null，
+// 而不是给一个点了会失败的按钮。
+func TestChangePlanUndoIsNullWhenIrreversible(t *testing.T) {
+	_, ts, dir := newServer(t)
+	id := createConn(t, ts, dir, "local", "read-write")
+
+	if code := execApproved(t, ts, id, "CREATE TABLE u2 (id INTEGER PRIMARY KEY, v TEXT)"); code != http.StatusOK {
+		t.Fatalf("建表 status = %d", code)
+	}
+	if code := execApproved(t, ts, id, "INSERT INTO u2 (id,v) VALUES (1,'a')"); code != http.StatusOK {
+		t.Fatalf("插数据 status = %d", code)
+	}
+
+	code, body := do(t, ts, http.MethodPost, "/api/v1/connections/"+id+"/changes/plan", map[string]any{
+		"table": map[string]any{"kind": "table", "name": "u2"},
+		"changes": []any{map[string]any{
+			"op": "delete", "key": map[string]any{"id": 1},
+		}},
+	}, true)
+	if code != http.StatusCreated {
+		t.Fatalf("plan status = %d, body=%v", code, body)
+	}
+	if body["irreversible"] != true {
+		t.Fatalf("缺整行原值的 delete 应标记不可逆, body=%v", body)
+	}
+	pid, _ := body["id"].(string)
+
+	code, body = do(t, ts, http.MethodPost, "/api/v1/changes/"+pid+"/apply", map[string]any{}, true)
+	if code != http.StatusOK {
+		t.Fatalf("apply status = %d, body=%v", code, body)
+	}
+	if v, ok := body["undo"]; !ok || v != nil {
+		t.Errorf("不可逆变更的 undo 应为 null, 实际 %v", v)
+	}
+}
+
+// valueOf 执行一条单值查询并返回结果。
+func valueOf(t *testing.T, ts *httptest.Server, connID, sqlText string) any {
+	t.Helper()
+	code, body := do(t, ts, http.MethodPost, "/api/v1/connections/"+connID+"/exec", map[string]any{
+		"sql": sqlText,
+	}, true)
+	if code != http.StatusOK {
+		t.Fatalf("查询失败 status = %d, body=%v", code, body)
+	}
+	results, _ := body["results"].([]any)
+	if len(results) == 0 {
+		t.Fatalf("查询无结果: %v", body)
+	}
+	rows, _ := results[0].(map[string]any)["rows"].([]any)
+	if len(rows) != 1 {
+		t.Fatalf("期望 1 行, 实际 %d", len(rows))
+	}
+	return rows[0].([]any)[0]
 }
 
 // TestChangePlanConflictReturns409 是乐观并发的端到端回归。

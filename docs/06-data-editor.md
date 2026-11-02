@@ -155,6 +155,20 @@ UPDATE "order"
 - 生成列、`DEFAULT` 表达式列、`IDENTITY` 列在 delete→insert 回滚中可能无法完全还原。
 - 超过可逆窗口（10 分钟或会话关闭）后按钮消失。
 
+### 2.6.1 撤销的实现口径
+
+**撤销不开后门。** 应用成功后，服务端把预案里已算好的反向语句登记成**另一张普通预案**（ID 前缀 `undo-`），撤销就是把它 POST 回同一个 `apply` 端点。因此：
+
+| 问题 | 答案 |
+|---|---|
+| 撤销要不要过风险分级与审批？ | 要。它是一张普通预案，沿用同样的 `risk` / `friction`，生产库上同样要求审批 |
+| 撤销受 10 分钟限制吗？ | 受。`undoTTL = 10min`，过期后 `apply` 返回 404 |
+| 能撤销「撤销」吗？ | 不能。撤销预案带 `undo: true`，应用后不再生成新的撤销预案 |
+| 不可逆的变更怎么办？ | 应用响应里 `undo` 为 `null`（例如 delete 未带整行原值、insert 缺自增主键回填）。**改不回来就说改不回来**，不给一个点了会失败的按钮 |
+| 页面刷新后还能撤销吗？ | 不能。撤销入口只存在于本次界面状态；预案本身在服务端有效期内仍可被 `apply`，但用户侧看不到入口 |
+
+反向语句的 `expect_rows` 与正向一致（都是 1），所以撤销同样受「影响行数不符即整体回滚」保护——期间别人又改了这行，撤销会报冲突而不是覆盖。
+
 ---
 
 ## 3. 批量修改
@@ -313,6 +327,10 @@ GET /api/v1/connections/{id}/tables/{name}/rows
 | 显式列清单 + 键集分页浏览 | §1.1 | `service.TableRows`：`SELECT <列…> … ORDER BY <主键> LIMIT n`，`after` 续页 | `cursor_test.go` |
 | 筛选与排序（v1 口径见 §4.3） | §4 | `where` 条件 AND 组合 + 单列排序；主键恒为末位排序键；列名与操作符均走白名单 | `TestTableRowsFilter`、`TestTableRowsSortPaginatesWithoutLoss`、`TestTableRowsEndpointFilterAndOrder`、`TestTableRowsFilterAndSortOnRealEngines`（MySQL 5.7 / PostgreSQL 17 真实实例）、浏览器实测 |
 | 切换视图前拦截未提交改动 | §2.2 引申 | 改筛选/排序/页大小时若有待提交改动，弹确认框；取消则保持原视图与原改动 | 浏览器实测（取消与继续两条路径） |
+| 一键撤销（10 分钟窗口） | §2.6 / 验收 5 | 应用成功后服务端登记 `undo-` 预案；撤销复用 `apply` 端点，同风险同摩擦；不可逆时 `undo: null`；撤销不可再撤销 | `TestChangePlanUndoRestoresValue`、`TestChangePlanUndoIsNullWhenIrreversible` |
+| `NULL` 与空串区分 | §1.4 / 验收 7 | NULL 显示为 `NULL`、空串显示为 `''`；右键菜单「设为 NULL」/「设为空串」显式二选一；NULL 单元格可直接输入取消 NULL，但清空输入框不会变成空串 | 浏览器实测 |
+| 关闭页面拦截未提交改动 | §2.2 / 验收 12 | `beforeunload` 在有待提交改动时拦一次（浏览器只给通用文案） | 浏览器实测 |
+| 原始 SQL 结果集不可编辑 | §2.2 引申 | 只有「表浏览」的网格可编辑；`SELECT` 结果的列可能来自别的表，拿它拼 UPDATE 会改错表 | 代码约束（`renderTable` 的 `allowEdit` 由调用方显式给） |
 | 无主键表禁止编辑 | §1.2 | 无主键直接拒绝浏览（`ErrNoPrimaryKey` → 501），编辑入口不会出现 | `TestTableRowsNoPrimaryKey` |
 | 只读连接不出现编辑入口 | §1.2 引申 | `TableRowsResult.Editable = mode.AllowsWrite()`，前端据此决定 `contenteditable` | `TestTableRowsEditableFollowsAccessMode`（含变异验证） |
 | 变更集模型 | §2.2 | `RowChange{op, key, before, after}`；UI 脏单元格 + 顶部变更条「待提交 N 处修改」 | `change_test.go`、浏览器实测 |
@@ -328,10 +346,7 @@ GET /api/v1/connections/{id}/tables/{name}/rows
 | 缺口 | 契约位置 | 影响 | 处置 |
 |---|---|---|---|
 | 大字段/JSON/BLOB/图片/数组/几何/枚举/时间戳专用编辑器 | §1.4 | 一律走统一文本单元格，复杂类型只能看文本形态 | 待实现；届时按列类型分派 |
-| `NULL` 设为 `NULL` | §2.6 / 验收 7 | `NULL` 单元格不进入编辑态（「清空」与「设为 NULL」是两件事，不做含糊处理） | 待实现专用「设为 NULL」动作 |
 | 分批提交与阈值分档（500/2000/5000） | §2.3 | 当前一律单事务，行数很大时持锁时间会变长 | 待实现；需先有影响面估计 |
-| 会话内一键撤销 | §2.6 / 验收 5 | 只生成回滚语句供人工执行，没有撤销按钮 | 待实现；涉及会话内保存反向 ChangeSet |
-| 关闭标签页拦截未提交变更 | §2.2 / 验收 12 | 直接关闭会丢改动，无二次确认 | 待实现（`beforeunload`） |
 | 批量修改两条路径 | §3 | 无多单元格编辑、无条件批量修改入口 | 待实现 |
 | 筛选与排序的完整形态 | §4.1 / §4.2 | 只有 AND；无 `OR`、分组、`IN`、`BETWEEN`、正则、原始 SQL 模式、多列拖拽排序 | 待实现；原始 SQL 模式需先有表达式校验，否则等于开注入面 |
 | 导出与测试数据生成 | §5 / 验收 10 | 无导出入口 | 待实现 |

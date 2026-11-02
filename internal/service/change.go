@@ -61,6 +61,9 @@ type ChangePlan struct {
 	Irreversible bool      `json:"irreversible"`
 	ExpiresAt    time.Time `json:"expires_at"`
 	CreatedAt    time.Time `json:"created_at"`
+	// Undo 表示这是一张撤销预案（由刚执行成功的预案反向生成）。
+	// 用它挡住「撤销的撤销」——否则同一个变更可以被无限来回翻。
+	Undo bool `json:"undo,omitempty"`
 }
 
 // ChangeSetRequest 是构建预案的输入。

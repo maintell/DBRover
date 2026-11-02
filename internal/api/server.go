@@ -40,8 +40,7 @@ type Server struct {
 	conns map[string]*entry
 	// cursorOwner 把游标 id 映射到所属连接，供 /results/{cid} 路由。
 	cursorOwner map[string]*entry
-	// plans 按 id 保管变更预案。
-	// 只存服务端生成的预案：客户端不能回传预案，否则等于绕过风险分级。
+	// plans 按 id 保管变更预案。	// 只存服务端生成的预案：客户端不能回传预案，否则等于绕过风险分级。
 	plans map[string]*storedPlan
 	seq   int
 }
@@ -255,6 +254,9 @@ type approvalInfo struct {
 
 // approvalTTL 是审批凭证有效期，与 docs/10 §5.1 一致。
 const approvalTTL = 10 * time.Minute
+
+// undoTTL 是一键撤销的窗口，与 docs/06 §2.6 的「10 分钟内可撤销」一致。
+const undoTTL = 10 * time.Minute
 
 // approvalToken 用进程令牌做 HMAC，签发「绑定语句指纹 + 过期时间」的凭证。
 // 无状态：不存表，靠签名自证。
@@ -730,10 +732,50 @@ func (s *Server) handleChangePlan(w http.ResponseWriter, r *http.Request) {
 
 	// 预案由服务端保管：客户端只能拿 id 回来执行，不能自造预案。
 	s.mu.Lock()
+	s.purgeExpiredPlansLocked()
 	s.plans[plan.ID] = &storedPlan{plan: plan, exec: e.exec, exp: plan.ExpiresAt}
 	s.mu.Unlock()
 
 	writeJSON(w, http.StatusCreated, plan)
+}
+
+// purgeExpiredPlansLocked 顺手清掉过期预案。
+// 没有后台清理协程，靠每次写入时扫一遍：预案数量和内存都很小，
+// 比常驻 goroutine 更省事，也不会让 map 无限长。
+func (s *Server) purgeExpiredPlansLocked() {
+	now := time.Now()
+	for id, sp := range s.plans {
+		if !sp.exp.IsZero() && now.After(sp.exp) {
+			delete(s.plans, id)
+		}
+	}
+}
+
+// buildUndoPlan 把刚执行成功预案的反向语句登记成一张可执行预案。
+//
+// 撤销不开后门：它就是一张普通预案，走同一套风险分级、摩擦与审批，
+// 只是 ID 带 undo- 前缀且不能再被撤销。不可逆的变更（如 delete 缺整行原值、
+// insert 缺自增主键回填）根本没有反向语句，此时返回 nil，前端据此不显示撤销。
+func (s *Server) buildUndoPlan(sp *storedPlan) *service.ChangePlan {
+	if sp.plan.Undo || sp.plan.Irreversible || len(sp.plan.Rollback) == 0 {
+		return nil
+	}
+	now := time.Now()
+	undo := &service.ChangePlan{
+		ID:         "undo-" + randomToken()[:16],
+		Table:      sp.plan.Table,
+		Statements: sp.plan.Rollback,
+		Risk:       sp.plan.Risk,
+		Friction:   sp.plan.Friction,
+		Undo:       true,
+		CreatedAt:  now,
+		ExpiresAt:  now.Add(undoTTL),
+	}
+	s.mu.Lock()
+	s.purgeExpiredPlansLocked()
+	s.plans[undo.ID] = &storedPlan{plan: undo, exec: sp.exec, exp: undo.ExpiresAt}
+	s.mu.Unlock()
+	return undo
 }
 
 func (s *Server) handleChangeApply(w http.ResponseWriter, r *http.Request) {
@@ -802,12 +844,25 @@ func (s *Server) handleChangeApply(w http.ResponseWriter, r *http.Request) {
 	delete(s.plans, pid)
 	s.mu.Unlock()
 
-	writeJSON(w, http.StatusOK, map[string]any{
+	body := map[string]any{
 		"execution_id": out.ExecutionID,
 		"risk":         out.Risk.String(),
 		"friction":     out.Friction.String(),
 		"duration_ms":  out.Duration.Milliseconds(),
-	})
+	}
+	// 撤销预案：反向语句申请时就算好了，这里只是登记成可执行预案。
+	// 没有反向语句时显式给 null，让前端知道「这次改不了回来」而不是留空猜。
+	if undo := s.buildUndoPlan(sp); undo != nil {
+		body["undo"] = map[string]any{
+			"id":         undo.ID,
+			"expires_at": undo.ExpiresAt.UTC().Format(time.RFC3339),
+			"statements": undo.Statements,
+		}
+	} else {
+		body["undo"] = nil
+	}
+
+	writeJSON(w, http.StatusOK, body)
 }
 
 func (s *Server) handleAudit(w http.ResponseWriter, r *http.Request) {

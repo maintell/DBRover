@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"sort"
+	"strings"
 	"testing"
 
 	"github.com/maintell/DBRover/internal/driver"
@@ -49,6 +50,168 @@ func newTestExecutor(t *testing.T, e *env) *service.Executor {
 	ex := service.NewExecutor(e.rw, model.EnvTest, model.AccessReadWrite, nil)
 	t.Cleanup(func() { ex.Close() })
 	return ex
+}
+
+// TestChangePlanMultiColumnMergesIntoOneStatement 对应验收项 2：
+// 同一行改多列只生成一条 UPDATE，且 SET 里只含被改的列。
+func TestChangePlanMultiColumnMergesIntoOneStatement(t *testing.T) {
+	e := setup(t)
+	ctx := context.Background()
+
+	s, err := e.rw.Acquire(ctx)
+	if err != nil {
+		t.Fatalf("Acquire: %v", err)
+	}
+	for _, q := range []string{
+		`ALTER TABLE t ADD COLUMN w TEXT`,
+		`UPDATE t SET v='a', w='w0' WHERE id=1`,
+	} {
+		if _, err := s.Execute(ctx, q, nil); err != nil {
+			t.Fatalf("准备数据 (%s): %v", q, err)
+		}
+	}
+	_ = s.Close()
+
+	ex := newTestExecutor(t, e)
+	plan, err := ex.BuildChangePlan(ctx, service.ChangeSetRequest{
+		Table: model.ObjectRef{Kind: model.KindTable, Name: "t"},
+		Changes: []service.RowChange{{
+			Op:     service.OpUpdate,
+			Key:    map[string]any{"id": int64(1)},
+			Before: map[string]any{"id": int64(1), "v": "a", "w": "w0"},
+			After:  map[string]any{"v": "b", "w": "w1"},
+		}},
+	})
+	if err != nil {
+		t.Fatalf("BuildChangePlan: %v", err)
+	}
+	if len(plan.Statements) != 1 {
+		t.Fatalf("同一行改两列应合并成 1 条语句, 实际 %d", len(plan.Statements))
+	}
+
+	sqlText := plan.Statements[0].SQL
+	setPart := sqlText
+	if i := strings.Index(setPart, " WHERE "); i > 0 {
+		setPart = setPart[:i]
+	}
+	if strings.Count(setPart, "=") != 2 {
+		t.Errorf("SET 子句应只有 2 个赋值（v 与 w）, 实际: %s", setPart)
+	}
+	if strings.Contains(setPart, `"id"`) {
+		t.Errorf("主键 id 不该出现在 SET 子句里: %s", setPart)
+	}
+	if !strings.Contains(setPart, `"v"`) || !strings.Contains(setPart, `"w"`) {
+		t.Errorf("SET 子句缺被改列: %s", setPart)
+	}
+}
+
+// TestChangePlanSetsNullAndLocatesNullRow 对应验收项 7：
+// ① 把列改成 NULL 是参数绑定；② 原值为 NULL 时定位条件必须是 IS NULL，
+// 用 `= ?` 绑 NULL 永远匹配不到行（SQL 三值逻辑），会误报冲突。
+func TestChangePlanSetsNullAndLocatesNullRow(t *testing.T) {
+	e := setup(t)
+	ctx := context.Background()
+
+	s, err := e.rw.Acquire(ctx)
+	if err != nil {
+		t.Fatalf("Acquire: %v", err)
+	}
+	if _, err := s.Execute(ctx, `UPDATE t SET v=NULL WHERE id=1`, nil); err != nil {
+		t.Fatalf("置 NULL: %v", err)
+	}
+	_ = s.Close()
+
+	ex := newTestExecutor(t, e)
+
+	// 从 NULL 改成有值：定位要用 IS NULL。
+	plan, err := ex.BuildChangePlan(ctx, service.ChangeSetRequest{
+		Table: model.ObjectRef{Kind: model.KindTable, Name: "t"},
+		Changes: []service.RowChange{{
+			Op:     service.OpUpdate,
+			Key:    map[string]any{"id": int64(1)},
+			Before: map[string]any{"id": int64(1), "v": nil},
+			After:  map[string]any{"v": "x"},
+		}},
+	})
+	if err != nil {
+		t.Fatalf("BuildChangePlan: %v", err)
+	}
+	if !strings.Contains(plan.Statements[0].SQL, "IS NULL") {
+		t.Errorf("原值 NULL 应生成 IS NULL 条件, 实际: %s", plan.Statements[0].SQL)
+	}
+	if out, err := ex.ApplyChangePlan(ctx, plan, service.Request{}); err != nil || out.Err != nil || out.Blocked {
+		t.Fatalf("应用失败: err=%v out=%+v", err, out)
+	}
+	if got := rowsOf(t, e)[1]; got != "x" {
+		t.Fatalf("v = %q, 期望 x", got)
+	}
+
+	// 再从有值改成 NULL。
+	plan, err = ex.BuildChangePlan(ctx, service.ChangeSetRequest{
+		Table: model.ObjectRef{Kind: model.KindTable, Name: "t"},
+		Changes: []service.RowChange{{
+			Op:     service.OpUpdate,
+			Key:    map[string]any{"id": int64(1)},
+			Before: map[string]any{"id": int64(1), "v": "x"},
+			After:  map[string]any{"v": nil},
+		}},
+	})
+	if err != nil {
+		t.Fatalf("BuildChangePlan(NULL): %v", err)
+	}
+	if out, err := ex.ApplyChangePlan(ctx, plan, service.Request{}); err != nil || out.Err != nil || out.Blocked {
+		t.Fatalf("应用 NULL 失败: err=%v out=%+v", err, out)
+	}
+	// rowsOf 用 string 承接，NULL 会让它 panic；这里直接数 NULL 行。
+	if n := nullCount(t, e, 1); n != 1 {
+		t.Fatalf("应用后 v IS NULL 的行数 = %d, 期望 1", n)
+	}
+
+	// 空串与 NULL 必须是两个不同的值：再写一次空串，IS NULL 不该命中它。
+	plan, err = ex.BuildChangePlan(ctx, service.ChangeSetRequest{
+		Table: model.ObjectRef{Kind: model.KindTable, Name: "t"},
+		Changes: []service.RowChange{{
+			Op:     service.OpUpdate,
+			Key:    map[string]any{"id": int64(1)},
+			Before: map[string]any{"id": int64(1), "v": nil},
+			After:  map[string]any{"v": ""},
+		}},
+	})
+	if err != nil {
+		t.Fatalf("BuildChangePlan(空串): %v", err)
+	}
+	if out, err := ex.ApplyChangePlan(ctx, plan, service.Request{}); err != nil || out.Err != nil || out.Blocked {
+		t.Fatalf("应用空串失败: err=%v out=%+v", err, out)
+	}
+	if n := nullCount(t, e, 1); n != 0 {
+		t.Fatalf("写入空串后 v IS NULL 的行数 = %d, 期望 0（空串不是 NULL）", n)
+	}
+}
+
+// nullCount 数出 t 表里指定 id 且 v 为 NULL 的行数。
+func nullCount(t *testing.T, e *env, id int64) int64 {
+	t.Helper()
+	ctx := context.Background()
+	s, err := e.rw.Acquire(ctx)
+	if err != nil {
+		t.Fatalf("Acquire: %v", err)
+	}
+	defer func() { _ = s.Close() }()
+
+	cur, err := s.Query(ctx, `SELECT COUNT(*) FROM t WHERE id = ? AND v IS NULL`, []any{id}, driver.QueryOptions{})
+	if err != nil {
+		t.Fatalf("Query: %v", err)
+	}
+	defer func() { _ = cur.Close() }()
+
+	rows, _, err := cur.Next(ctx)
+	if err != nil {
+		t.Fatalf("Next: %v", err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("COUNT 查询返回 %d 行", len(rows))
+	}
+	return rows[0][0].(int64)
 }
 
 func TestChangePlanUpdateApplies(t *testing.T) {
