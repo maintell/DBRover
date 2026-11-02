@@ -110,6 +110,7 @@ func (s *Server) routes() []route {
 		{http.MethodGet, "/api/v1/results/{cid}/page", false, s.handlePage},
 		{http.MethodDelete, "/api/v1/results/{cid}", false, s.handleCloseCursor},
 		{http.MethodGet, "/api/v1/audit", false, s.handleAudit},
+		{http.MethodGet, "/api/v1/connections/{id}/export", false, s.handleExport},
 	}
 }
 
@@ -954,6 +955,135 @@ func (s *Server) handleChangeApply(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, body)
+}
+
+// lazyWriteWriter 把响应头与状态码推迟到「第一次真正写出数据」时才发。
+// 这样导出在开跑前就失败（表不存在、格式不支持、筛选列写错）时，
+// 仍然能返回一个正常的 JSON 错误，而不是一个空文件配 200。
+type lazyWriteWriter struct {
+	w       http.ResponseWriter
+	code    int
+	header  http.Header
+	started bool
+}
+
+func (l *lazyWriteWriter) Write(p []byte) (int, error) {
+	if !l.started {
+		l.started = true
+		for k, vs := range l.header {
+			for _, v := range vs {
+				l.w.Header().Add(k, v)
+			}
+		}
+		l.w.WriteHeader(l.code)
+	}
+	return l.w.Write(p)
+}
+
+func safeFilename(name, ext string) string {
+	var b strings.Builder
+	for _, r := range name {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '-', r == '_', r == '.':
+			b.WriteRune(r)
+		default:
+			b.WriteByte('_')
+		}
+	}
+	out := b.String()
+	if out == "" {
+		out = "export"
+	}
+	return out + "." + ext
+}
+
+// handleExport 流式导出表数据为 CSV 或 NDJSON。
+func (s *Server) handleExport(w http.ResponseWriter, r *http.Request) {
+	e, ok := s.lookup(r)
+	if !ok {
+		writeError(w, http.StatusNotFound, "CONNECTION_NOT_FOUND", "connection", "连接不存在", "", false)
+		return
+	}
+
+	q := r.URL.Query()
+	table := strings.TrimSpace(q.Get("table"))
+	if table == "" {
+		writeError(w, http.StatusBadRequest, "REQUEST_INVALID", "internal",
+			"缺少 table 参数", "导出以表为单位，一次一张表", false)
+		return
+	}
+	format := service.ExportFormat(q.Get("format"))
+	if format == "" {
+		format = service.ExportCSV
+	}
+	if !format.Valid() {
+		writeError(w, http.StatusBadRequest, "EXPORT_FORMAT_UNSUPPORTED", "internal",
+			"不支持的导出格式: "+string(format), "可用 csv / ndjson", false)
+		return
+	}
+
+	var filter []service.FilterCond
+	if raw := q.Get("where"); raw != "" {
+		if err := json.Unmarshal([]byte(raw), &filter); err != nil {
+			writeError(w, http.StatusBadRequest, "REQUEST_INVALID", "internal",
+				"where 需要是 JSON 数组", "", false)
+			return
+		}
+	}
+	var order *service.OrderSpec
+	if raw := q.Get("order"); raw != "" {
+		var spec service.OrderSpec
+		if err := json.Unmarshal([]byte(raw), &spec); err != nil {
+			writeError(w, http.StatusBadRequest, "REQUEST_INVALID", "internal",
+				"order 需要是 JSON 对象", "", false)
+			return
+		}
+		order = &spec
+	}
+
+	ext := "csv"
+	contentType := "text/csv; charset=utf-8"
+	if format == service.ExportNDJSON {
+		ext = "ndjson"
+		contentType = "application/x-ndjson; charset=utf-8"
+	}
+
+	lw := &lazyWriteWriter{
+		w:    w,
+		code: http.StatusOK,
+		header: http.Header{
+			"Content-Type":        []string{contentType},
+			"Content-Disposition": []string{`attachment; filename="` + safeFilename(table, ext) + `"`},
+			"Cache-Control":       []string{"no-store"},
+		},
+	}
+
+	res, err := e.exec.Export(r.Context(), service.ExportRequest{
+		Table:    table,
+		Format:   format,
+		Filter:   filter,
+		Order:    order,
+		Header:   q.Get("header") != "0",
+		PageSize: atoiDefault(q.Get("page_size"), 500),
+	}, lw)
+	if err != nil {
+		// 已经写出过数据就只能留下截断文件；没写过才返回 JSON 错误。
+		if lw.started {
+			return
+		}
+		switch {
+		case errors.Is(err, service.ErrInvalidFilter):
+			writeError(w, http.StatusBadRequest, "FILTER_INVALID", "internal", err.Error(), "", false)
+		case errors.Is(err, service.ErrExportFormat):
+			writeError(w, http.StatusBadRequest, "EXPORT_FORMAT_UNSUPPORTED", "internal", err.Error(), "", false)
+		default:
+			writeError(w, http.StatusBadRequest, "EXPORT_FAILED", "internal", err.Error(), "", false)
+		}
+		return
+	}
+	// 行数只有在流写完才知道，此时响应头早已发出，所以不塞响应头。
+	// 导出行数记在审计里（Export 自己会 record）。
+	_ = res
 }
 
 func (s *Server) handleAudit(w http.ResponseWriter, r *http.Request) {

@@ -381,6 +381,72 @@ type TableRowsResult struct {
 	Editable bool
 }
 
+// columnRef 是一列在结果集中的位置与定义。
+// 筛选与排序只允许命中表定义里存在的列，因此不需要把调用方字符串拼进 SQL。
+type columnRef struct {
+	name  string
+	index int
+	typ   model.ColumnType
+}
+
+// columnCatalog 按小写列名建索引，调用方传什么大小写都能对上。
+func columnCatalog(td *model.TableDetail) map[string]columnRef {
+	out := make(map[string]columnRef, len(td.Columns))
+	for i, c := range td.Columns {
+		out[strings.ToLower(c.Name)] = columnRef{name: c.Name, index: i, typ: c.Type}
+	}
+	return out
+}
+
+// filterClause 把筛选条件编译成 WHERE 片段与参数。
+// 列名走 QuoteIdent、操作符走白名单，值走参数绑定。
+func (e *Executor) filterClause(known map[string]columnRef, filter []FilterCond) ([]string, []any, error) {
+	where := make([]string, 0, len(filter))
+	args := make([]any, 0, len(filter))
+	for _, f := range filter {
+		ci, ok := known[strings.ToLower(strings.TrimSpace(f.Column))]
+		if !ok {
+			return nil, nil, fmt.Errorf("%w: 筛选列 %q 不存在", ErrInvalidFilter, f.Column)
+		}
+		ident := e.dialect.QuoteIdent(ci.name)
+		switch f.Op {
+		case FilterIsNull:
+			where = append(where, ident+" IS NULL")
+		case FilterNotNull:
+			where = append(where, ident+" IS NOT NULL")
+		default:
+			sym, ok := filterSQL[f.Op]
+			if !ok {
+				return nil, nil, fmt.Errorf("%w: 不支持的操作符 %q", ErrInvalidFilter, f.Op)
+			}
+			where = append(where, ident+" "+sym+" ?")
+			if f.Op == FilterLike {
+				// LIKE 只对文本有意义，不做类型还原，否则 "a%" 会被数字列解析掉。
+				args = append(args, f.Value)
+			} else {
+				args = append(args, coerceKey(f.Value, ci.typ))
+			}
+		}
+	}
+	return where, args, nil
+}
+
+// orderClause 生成 ORDER BY 片段。列不存在时返回 ErrInvalidFilter。
+func (e *Executor) orderClause(known map[string]columnRef, order *OrderSpec) ([]string, error) {
+	if order == nil || strings.TrimSpace(order.Column) == "" {
+		return nil, nil
+	}
+	ci, ok := known[strings.ToLower(strings.TrimSpace(order.Column))]
+	if !ok {
+		return nil, fmt.Errorf("%w: 排序列 %q 不存在", ErrInvalidFilter, order.Column)
+	}
+	ident := e.dialect.QuoteIdent(ci.name)
+	if order.Desc {
+		ident += " DESC"
+	}
+	return []string{ident}, nil
+}
+
 // TableRows 用键集分页浏览表数据。
 //
 // 之所以能这么做：查询由本工具生成（单表、显式列清单、按主键排序），
@@ -396,15 +462,7 @@ func (e *Executor) TableRows(ctx context.Context, req TableRowsRequest) (*TableR
 	}
 	// 列名 → 结果集下标 / 真实写法 / 类型。筛选与排序都只允许命中这里的列，
 	// 因此不存在把调用方字符串直接拼进 SQL 的路径。
-	type colInfo struct {
-		name  string
-		index int
-		typ   model.ColumnType
-	}
-	known := make(map[string]colInfo, len(td.Columns))
-	for i, c := range td.Columns {
-		known[strings.ToLower(c.Name)] = colInfo{name: c.Name, index: i, typ: c.Type}
-	}
+	known := columnCatalog(td)
 
 	limit := req.Limit
 	if limit <= 0 {
@@ -421,7 +479,7 @@ func (e *Executor) TableRows(ctx context.Context, req TableRowsRequest) (*TableR
 
 	// 排序键 = 用户指定列（可选）+ 全部主键。主键必须在内，否则重复值上分页会漏行。
 	desc := req.Order != nil && req.Order.Desc
-	keyIdx := make([]colInfo, 0, len(pk)+1)
+	keyIdx := make([]columnRef, 0, len(pk)+1)
 	if req.Order != nil && strings.TrimSpace(req.Order.Column) != "" {
 		ci, ok := known[strings.ToLower(strings.TrimSpace(req.Order.Column))]
 		if !ok {
@@ -451,32 +509,9 @@ func (e *Executor) TableRows(ctx context.Context, req TableRowsRequest) (*TableR
 		}
 	}
 
-	where := make([]string, 0, len(req.Filter)+1)
-	args := make([]any, 0, len(req.Filter)+len(keyIdx))
-	for _, f := range req.Filter {
-		ci, ok := known[strings.ToLower(strings.TrimSpace(f.Column))]
-		if !ok {
-			return nil, fmt.Errorf("%w: 筛选列 %q 不存在", ErrInvalidFilter, f.Column)
-		}
-		ident := e.dialect.QuoteIdent(ci.name)
-		switch f.Op {
-		case FilterIsNull:
-			where = append(where, ident+" IS NULL")
-		case FilterNotNull:
-			where = append(where, ident+" IS NOT NULL")
-		default:
-			sym, ok := filterSQL[f.Op]
-			if !ok {
-				return nil, fmt.Errorf("%w: 不支持的操作符 %q", ErrInvalidFilter, f.Op)
-			}
-			where = append(where, ident+" "+sym+" ?")
-			if f.Op == FilterLike {
-				// LIKE 只对文本有意义，不做类型还原，否则 "a%" 会被数字列解析掉。
-				args = append(args, f.Value)
-			} else {
-				args = append(args, coerceKey(f.Value, ci.typ))
-			}
-		}
+	where, args, err := e.filterClause(known, req.Filter)
+	if err != nil {
+		return nil, err
 	}
 	if len(req.After) == len(keyIdx) {
 		cmp := ">"

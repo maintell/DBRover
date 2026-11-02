@@ -20,6 +20,8 @@ const state = {
   // 视图：data = 行数据，schema = 表结构
   view: 'data',
   schema: null,
+  // 导出格式要跨视图刷新保留，否则改个筛选就被重置回 CSV
+  exportFormat: 'csv',
 };
 
 const $ = (id) => document.getElementById(id);
@@ -33,6 +35,7 @@ const API = {
   rows: '/api/v1/connections/:id/tables/:name/rows',
   schema: '/api/v1/connections/:id/tables/:name/schema',
   schemaPlan: '/api/v1/connections/:id/schema/plan',
+  export: '/api/v1/connections/:id/export',
   exec: '/api/v1/connections/:id/exec',
   changePlan: '/api/v1/connections/:id/changes/plan',
   changeApply: '/api/v1/changes/:pid/apply',
@@ -412,6 +415,18 @@ function renderToolbar() {
   schemaBtn.onclick = () => showSchema();
   bar.appendChild(schemaBtn);
 
+  const exportSel = document.createElement('select');
+  exportSel.id = 'export-format';
+  exportSel.title = '导出格式';
+  fill(exportSel, [['csv', 'CSV'], ['ndjson', 'NDJSON']], state.exportFormat);
+  exportSel.onchange = () => { state.exportFormat = exportSel.value; };
+  const exportBtn = document.createElement('button');
+  exportBtn.id = 'btn-export';
+  exportBtn.textContent = '导出';
+  exportBtn.title = '按当前筛选与排序导出整表（不受分页限制）';
+  exportBtn.onclick = () => exportTable(exportSel.value);
+  bar.append(exportSel, exportBtn);
+
   state.filter.forEach((f, i) => {
     const chip = document.createElement('span');
     chip.className = 'chip';
@@ -436,6 +451,64 @@ function renderToolbar() {
     };
     bar.appendChild(clear);
   }
+}
+
+// exportTable 走 fetch 而不是 <a href>：接口要 X-DBRover-Token 请求头，
+// 普通链接带不上。代价是文件先落在浏览器内存里，
+// 千万行级别的导出请用 CLI / curl 走流式。
+async function exportTable(format) {
+  if (!state.current || !state.tableName) return;
+  let url = path(API.export, { id: state.current.id }) +
+    '?table=' + encodeURIComponent(state.tableName) + '&format=' + encodeURIComponent(format);
+  if (state.filter.length) {
+    url += '&where=' + encodeURIComponent(JSON.stringify(state.filter));
+  }
+  if (state.order) {
+    url += '&order=' + encodeURIComponent(JSON.stringify(state.order));
+  }
+
+  setStatus('导出中…');
+  try {
+    const headers = {};
+    if (state.token) headers['X-DBRover-Token'] = state.token;
+    const res = await fetch(url, { headers });
+    if (!res.ok) {
+      const text = await res.text();
+      let msg = res.statusText;
+      try {
+        const e = JSON.parse(text);
+        if (e && e.error && e.error.message) msg = e.error.message;
+      } catch { /* 非 JSON 就用状态文本 */ }
+      throw new Error(msg);
+    }
+    const blob = await res.blob();
+    const text = await blob.text();
+    const name = state.tableName + '.' + (format === 'ndjson' ? 'ndjson' : 'csv');
+
+    // 先把内容确认下来再交给浏览器保存：万一宿主环境拦了下载，
+    // 状态栏至少能证明「数据确实取回来了、多少字节、长什么样」。
+    const head = (text.split('\n')[0] || '').slice(0, 80);
+
+    const href = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = href;
+    a.download = name;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(href), 10000);
+
+    setStatus('已取回 ' + name + ' · ' + fmtSize(blob.size) + ' · 首行 ' + head);
+  } catch (e) {
+    setStatus('');
+    showNotice('导出失败：' + e.message, 'error');
+  }
+}
+
+function fmtSize(n) {
+  if (n < 1024) return n + ' B';
+  if (n < 1024 * 1024) return (n / 1024).toFixed(1) + ' KB';
+  return (n / 1024 / 1024).toFixed(1) + ' MB';
 }
 
 async function loadTablePage(first) {

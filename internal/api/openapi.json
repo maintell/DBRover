@@ -503,6 +503,32 @@
         }
       }
     },
+    "/api/v1/connections/{id}/export": {
+      "get": {
+        "summary": "流式导出表数据（CSV / NDJSON）",
+        "description": "单条 SELECT 走游标分批取，内存上限由 page_size 决定。不需要主键，视图与无主键表也能导。CSV 的 NULL 写成空串（与空字符串文本上不可区分）；NDJSON 的 NULL 是真正的 null，BigInt 与二进制分别以字符串、base64 输出以保精度与字节安全。",
+        "parameters": [
+          { "name": "id", "in": "path", "required": true, "schema": { "type": "string" } },
+          { "name": "table", "in": "query", "required": true, "schema": { "type": "string" } },
+          { "name": "format", "in": "query", "schema": { "type": "string", "enum": ["csv", "ndjson"], "default": "csv" } },
+          { "name": "header", "in": "query", "description": "CSV 是否写表头，0 表示不写", "schema": { "type": "string", "default": "1" } },
+          { "name": "where", "in": "query", "description": "筛选条件，JSON 数组，与 rows 端点同构", "schema": { "type": "string" } },
+          { "name": "order", "in": "query", "description": "排序，JSON 对象", "schema": { "type": "string" } },
+          { "name": "page_size", "in": "query", "schema": { "type": "integer", "default": 500, "maximum": 1000 } }
+        ],
+        "responses": {
+          "200": {
+            "description": "文件流。导出行数记在审计里（流写完才知道行数，无法作为响应头返回）。",
+            "content": {
+              "text/csv": { "schema": { "type": "string" } },
+              "application/x-ndjson": { "schema": { "type": "string" } }
+            }
+          },
+          "400": { "description": "参数不合法（EXPORT_FORMAT_UNSUPPORTED / FILTER_INVALID / EXPORT_FAILED）" },
+          "404": { "description": "连接不存在" }
+        }
+      }
+    },
     "/api/v1/audit": {
       "get": {
         "summary": "审计事件",

@@ -22,6 +22,7 @@
 - **`NULL` 与空串显式区分**：`NULL` 显示为 `NULL`、空串显示为 `''`；右键菜单「设为 NULL」/「设为空串」二选一；原值为 NULL 时定位条件用 `IS NULL`（用 `= ?` 绑 NULL 永远匹配不到行）。
 - **关闭页面拦截**：有待提交改动时 `beforeunload` 拦一次。
 - **结构设计器（v1）**（`internal/service/ddl.go` + `internal/webui`）：表结构详情与 DDL 原文、加列与删列、表单改动即时预览将要执行的 DDL；结构变更复用同一套 Plan/Apply，预案带**表定义哈希**作为前置条件，被他人改过即 `409 SCHEMA_CHANGED`。删列展示非空行数并标不可逆；DDL 事务性由 `Capabilities().DDLTransactional` 决定，MySQL 上明确提示「隐式提交，回滚只是补偿」。
+- **流式导出**（`internal/service/export.go` + `GET /export`）：CSV 与 NDJSON，单条 SELECT 走游标分批取、边取边写；复用 `where`/`order`，导出的就是当前视图且不受分页限制；不要求主键，视图与无主键表也能导。大整数以字符串输出、二进制 base64、NULL 在 NDJSON 里是真正的 `null`。响应头推迟到首次写出，开跑前失败返回结构化错误而不是空文件配 200。界面加「导出」入口与格式下拉（状态栏给出字节数与首行，便于确认内容）。
 - **回环 HTTP 服务**（`internal/api`）：token 鉴权、Origin 校验、连接管理、`exec`、`query`、`results/{id}/page`、`tables/{name}/rows`、审计查询、OpenAPI 契约（`/api/v1/openapi.json`）。
 - **审计落盘**：JSONL 追加写（0600）+ 内存热区，`serve -audit <path>` 开启。
 - **SSH 隧道**（`internal/infra/tunnel`）：多跳、密码/私钥/agent 认证、主机密钥失败关闭 + 信任落盘、拨号与握手超时。
@@ -42,7 +43,7 @@
 ### 已知限制
 
 - 已实现 SQLite / MySQL / PostgreSQL 三个关系引擎；SQL Server、Oracle 与非关系型（Redis / MongoDB / Elasticsearch）仍是占位目录。
-- 编辑入口只覆盖最基础形态：JSON / BLOB / 复数类型走统一文本单元格，批次阈值分档、批量修改、导出、时区显示策略均未做（见 `docs/06-data-editor.md` §8.2）。
+- 编辑入口只覆盖最基础形态：JSON / BLOB / 复数类型走统一文本单元格，批次阈值分档、批量修改、时区显示策略均未做（见 `docs/06-data-editor.md` §8.2）。导出只支持 CSV 与 NDJSON（100 万行内存增长 10.6 MB，已压测），xlsx / SQL INSERT / Markdown 与测试数据生成未做。
 - 结构设计器只做加列与删列：建表、改列类型、索引/外键/约束、视图与例程设计器、结构比对、在线变更建议、依赖检查均未做（见 `docs/07-schema-designer.md` §8.2）。
 - 审计只做到「记录过什么」，链式哈希与完整性校验未实现，无法证明「没被人改过」。
 - 正式 React 前端未开始；`internal/webui` 是免构建的临时界面。
