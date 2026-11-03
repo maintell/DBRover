@@ -174,30 +174,35 @@ func (e *Executor) BuildBulkUpdatePlan(ctx context.Context, req BulkUpdateReques
 
 	// 分批：影响行数超过单批上限时按主键键集推进（docs/06 §3.2）。
 	//
-	// 只有单列主键才启用。多列主键要么得拼出各引擎方言不一的行值比较，
-	// 要么让绑定参数个数按主键列数翻倍——都不如老老实实走一个大事务，
-	// 代价只是「中途失败整体回滚」，对几万行的量级是可接受的。
-	if affected > DefaultBulkBatchSize {
-		switch {
-		case len(pk) == 1:
-			plan.Bulk = &BulkExecPlan{
-				Set:       req.Set,
-				Filter:    req.Filter,
-				PK:        pk[0],
-				PKType:    known[strings.ToLower(pk[0])].typ,
-				BatchSize: DefaultBulkBatchSize,
-			}
-			res.Batched = true
-			res.BatchSize = DefaultBulkBatchSize
-			res.Batches = (affected + int64(DefaultBulkBatchSize) - 1) / int64(DefaultBulkBatchSize)
-			res.Note = appendNote(res.Note, fmt.Sprintf(
-				"将按主键分 %d 批执行（每批 %d 行），每批各自提交；"+
-					"中途失败或中止时，已提交的批不回滚。",
-				res.Batches, DefaultBulkBatchSize))
-		case len(pk) > 1:
-			res.Note = appendNote(res.Note,
-				"这张表是复合主键，无法按单列键集分批；将在一个事务里一次改完，中途失败会整体回滚。")
+	// 复合主键也支持：键集条件按列展开成 OR，不需要行值比较，三个引擎通吃。
+	// 但复合主键的批大小要更小——按主键定位要写成 (a=? AND b=?) OR …，
+	// SQLite 的表达式树深度上限是 1000，1000 组会直接报错。
+	if affected > int64(DefaultBulkBatchSize) && len(pk) > 0 {
+		types := make([]model.ColumnType, len(pk))
+		idents := make([]string, len(pk))
+		for i, c := range pk {
+			types[i] = known[strings.ToLower(c)].typ
+			idents[i] = e.dialect.QuoteIdent(c)
 		}
+		batch := DefaultBulkBatchSize
+		if len(pk) > 1 {
+			batch = multiColumnBatchSize
+		}
+		plan.Bulk = &BulkExecPlan{
+			Set: req.Set, Filter: req.Filter,
+			PK: pk, PKTypes: types, PKIdents: idents, BatchSize: batch,
+		}
+		batch2 := int64(batch)
+		res.Batched = true
+		res.BatchSize = batch
+		res.Batches = (affected + batch2 - 1) / batch2
+		res.Note = appendNote(res.Note, fmt.Sprintf(
+			"将按主键分 %d 批执行（每批 %d 行），每批各自提交；"+
+				"中途失败或中止时，已提交的批不回滚。",
+			res.Batches, batch))
+	} else if affected > int64(DefaultBulkBatchSize) {
+		res.Note = appendNote(res.Note,
+			"这张表没有主键，无法按键集分批；将在一个事务里一次改完，中途失败会整体回滚。")
 	}
 
 	g := policy.GradeStatement(e.dialect, sqlText, nil)

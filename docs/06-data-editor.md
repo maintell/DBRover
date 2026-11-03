@@ -212,7 +212,16 @@ UI 上是两个不同入口，文案必须区分「修改选中的 12 行」与�
 
 **为什么阈值是 1000 而不是 10000**：1000 正是逐行回滚的生成上限（§3.3）。超过它就已经拿不到回滚语句，此时再要求「一个事务改完 N 万行」只会同时放大三件事——锁持有时间、回滚日志体积、失败时要重来的量。用一个数字同时表达「没有回滚」与「必须分批」比两个数字更好记，也更难配错。
 
-**为什么分批只做单列主键**：键集推进需要「下一批 = 主键大于上一批末值」。复合主键要么得拼出各引擎方言不一的行值比较（`(a,b) > (?,?)`），要么把 `UPDATE ... WHERE` 写成 `(a=? AND b=?) OR (a=? AND b=?)` 而让绑定参数按列数翻倍，都很容易在某个引擎上悄悄只改一部分。复合主键表因此退回单事务，并在预案的 `note` 里写明这一点。
+**复合主键怎么推进**：键集条件按列展开成 OR，不用行值比较（`(a,b) > (?,?)` 在 SQLite 3.15 之前不可用，而展开式在三个引擎上都是普通布尔表达式）：
+
+```sql
+-- 下一批：a 更大，或 a 相同而 b 更大
+(a > ?) OR (a = ? AND b > ?)
+```
+
+代价是「按主键定位」那一半也要写成 `(a=? AND b=?) OR (a=? AND b=?) …`，每多一组就多两层表达式，而 SQLite 的表达式树深度上限是 1000（`SQLITE_MAX_EXPR_DEPTH`）。所以**复合主键的批大小降到 200**（单列主键仍是 1000，用 `IN (...)` 只有一个节点，不吃深度）。
+
+这两档是实测出来的：先用 1000 跑，SQLite 直接报 `Expression tree is too large (maximum depth 1000)`。
 
 ### 3.3 回滚 SQL 的体积问题
 
@@ -235,7 +244,7 @@ UI 上是两个不同入口，文案必须区分「修改选中的 12 行」与�
 | 空 `WHERE` | 判定为全表写，**必须回填表名**才允许生成预案（否则 `ErrBulkNeedsConfirmTable`）；风险由策略判为 `R4` | 与目标一致（验收 9） |
 | 前后对比 | 展示最多 5 行的 `{主键} 改前 → 改后` | 与目标一致 |
 | 回滚 | 有主键且影响 ≤ 1000 行时**逐行生成反向 UPDATE**；超过 1000 行不生成，标不可逆并要求显式接受（`accept_no_rollback`） | 目标要求 >1000 行走 undo 临时表；v1 直接不生成并要求显式确认 |
-| 分批 | 影响 > 1000 行且是**单列主键**时按主键键集分批（每批 1000 行、每批独立事务、批间可中止），`apply?stream=1` 用 NDJSON 回报进度 | 与目标一致，只是阈值取 1000 而非 10000，且复合主键不分批（理由见 §3.2） |
+| 分批 | 影响 > 1000 行时按主键键集分批（每批独立事务、批间可中止），`apply?stream=1` 用 NDJSON 回报进度。单列主键每批 1000 行；**复合主键也支持**，键集条件按列展开成 OR，批大小降到 200（SQLite 表达式树深度上限 1000） | 与目标一致，只是阈值取 1000 而非 10000 |
 | 主键列 | 禁止批量修改 | 与目标一致（主键是行定位依据） |
 
 **分批的实现口径**
@@ -402,7 +411,7 @@ GET /api/v1/connections/{id}/tables/{name}/rows
 | `NULL` 与空串区分 | §1.4 / 验收 7 | NULL 显示为 `NULL`、空串显示为 `''`；右键菜单「设为 NULL」/「设为空串」显式二选一；NULL 单元格可直接输入取消 NULL，但清空输入框不会变成空串 | 浏览器实测 |
 | 关闭页面拦截未提交改动 | §2.2 / 验收 12 | `beforeunload` 在有待提交改动时拦一次（浏览器只给通用文案） | 浏览器实测 |
 | 条件批量修改 | §3.2 / 验收 9 | `POST /bulk/plan`：按当前筛选一次改多行；生成预案前精确 `COUNT(*)` 并写进 `expect_rows`；空 WHERE 必须回填表名；影响 ≤1000 行逐行生成回滚，超过则标不可逆并要求显式接受；前后对比最多 5 行 | `TestBulkUpdate*`、`TestBulkPlan*`、浏览器实测（改 2 行 + 撤销还原） |
-| 批量修改分批与中止 | §3.2 / 验收 8 | 单列主键且影响 >1000 行时按主键键集分批（每批 1000 行、每批独立事务）；`apply?stream=1` 用 NDJSON 逐批回报进度，界面显示「已提交 N / 总数」并提供「停止」；中止后已提交的批保留、预案保留可重新提交（幂等）；复合主键与无主键表退回单事务并在 `note` 写明 | `TestBulkBatchesSplitByKeyset`、`TestBulkBatchFailureKeepsEarlierBatches`、`TestBulkBatchAbortBetweenBatches`、`TestBulkCompositePrimaryKeyDoesNotBatch`、`TestBulkApplyStreamsBatchProgress`、端到端实测：SQLite 2 万行 20 批 + 中途断开、MySQL 5.7.38 与 PostgreSQL 17.11 各 3000 行 3 批 × 三次执行（见下表 8） |
+| 批量修改分批与中止 | §3.2 / 验收 8 | 影响 >1000 行时按主键键集分批（单列主键每批 1000 行、复合主键每批 200 行、每批独立事务）；`apply?stream=1` 用 NDJSON 逐批回报进度，界面显示「已提交 N / 总数」并提供「停止」；中止后已提交的批保留、预案保留可重新提交（幂等）；复合主键与无主键表退回单事务并在 `note` 写明 | `TestBulkBatchesSplitByKeyset`、`TestBulkBatchFailureKeepsEarlierBatches`、`TestBulkBatchAbortBetweenBatches`、`TestBulkCompositePrimaryKeyDoesNotBatch`、`TestBulkApplyStreamsBatchProgress`、端到端实测：SQLite 2 万行 20 批 + 中途断开、MySQL 5.7.38 与 PostgreSQL 17.11 各 3000 行 3 批 × 三次执行（见下表 8） |
 | 原始 SQL 结果集不可编辑 | §2.2 引申 | 只有「表浏览」的网格可编辑；`SELECT` 结果的列可能来自别的表，拿它拼 UPDATE 会改错表 | 代码约束（`renderTable` 的 `allowEdit` 由调用方显式给） |
 | 流式导出 CSV / NDJSON | §5.1 / 验收 10 | `GET /export`：单条 SELECT 走游标分批、边取边写；不需要主键；支持 `where`/`order`；大整数以字符串输出、二进制 base64；失败时返回结构化错误而不是空文件 | `TestExportCSV`、`TestExportNDJSONPreservesPrecisionAndNull`、`TestExportWorksWithoutPrimaryKey`、`TestExportEndpointErrorsAreJSON`、浏览器实测 |
 | 无主键表禁止编辑 | §1.2 | 无主键直接拒绝浏览（`ErrNoPrimaryKey` → 501），编辑入口不会出现 | `TestTableRowsNoPrimaryKey` |
@@ -424,7 +433,7 @@ GET /api/v1/connections/{id}/tables/{name}/rows
 | 大字段/JSON/BLOB/图片/数组/几何/枚举/时间戳专用编辑器 | §1.4 | 一律走统一文本单元格，复杂类型只能看文本形态 | 待实现；届时按列类型分派 |
 | 分批提交与阈值分档（500/2000/5000） | §2.3 | 变更集（逐行编辑）仍一律单事务；批量修改已按 1000 行分批 | 待实现；需先有影响面估计 |
 | 批量修改的「多单元格」路径 | §3.1 | 条件批量修改与分批都已实现（见 §3.4）；无「选中同列多行改同值」这条路径 | 待实现 |
-| 复合主键表的分批 | §3.2 | 复合主键退回单事务（理由见 §3.2） | 待实现；需要行值比较或参数上限的方案 |
+
 | 筛选与排序的完整形态 | §4.1 / §4.2 | 只有 AND；无 `OR`、分组、`IN`、`BETWEEN`、正则、原始 SQL 模式、多列拖拽排序 | 待实现；原始 SQL 模式需先有表达式校验，否则等于开注入面 |
 | 导出与测试数据生成 | §5 / 验收 10 | CSV / NDJSON 已实现并压测通过（100 万行内存增长 10.6 MB）；xlsx、SQL INSERT、Markdown 与测试数据生成未做 | 待实现 |
 

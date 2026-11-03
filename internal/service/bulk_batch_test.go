@@ -220,7 +220,13 @@ func TestBulkBatchAbortBetweenBatches(t *testing.T) {
 
 // TestBulkCompositePrimaryKeyDoesNotBatch 验证复合主键不启用分批，并且把原因写出来。
 // 宁可少一个能力，也不能拼出各引擎方言不一的行值比较。
-func TestBulkCompositePrimaryKeyDoesNotBatch(t *testing.T) {
+// TestBulkCompositePrimaryKeyBatches 验证复合主键也能按主键键集分批：
+// 键集条件按列展开成 OR，不需要行值比较，三个引擎通吃。
+//
+// 批大小要比单列主键小得多（200 而不是 1000)：每多一组就要多两层表达式，
+// SQLite 的表达式树深度上限是 1000，1000 组会直接报
+// "Expression tree is too large"。
+func TestBulkCompositePrimaryKeyBatches(t *testing.T) {
 	e := setup(t)
 	ctx := context.Background()
 	ex := newTestExecutor(t, e)
@@ -233,10 +239,11 @@ func TestBulkCompositePrimaryKeyDoesNotBatch(t *testing.T) {
 		CREATE TABLE comp (a INTEGER NOT NULL, b INTEGER NOT NULL, v TEXT, PRIMARY KEY (a, b))`, nil); err != nil {
 		t.Fatalf("建表: %v", err)
 	}
+	// 每行两个不同的 (a,b) 组合，确保键集推进按元组比较而不是按单列。
 	if _, err := s.Execute(ctx, `
 		INSERT INTO comp (a, b, v)
 		WITH RECURSIVE seq(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM seq WHERE x < 1500)
-		SELECT x, 1, 'x' FROM seq`, nil); err != nil {
+		SELECT x, (x % 3) + 1, 'x' FROM seq`, nil); err != nil {
 		t.Fatalf("造数: %v", err)
 	}
 	_ = s.Close()
@@ -253,19 +260,48 @@ func TestBulkCompositePrimaryKeyDoesNotBatch(t *testing.T) {
 	if res.Affected != 1500 {
 		t.Fatalf("影响行数 = %d, 期望 1500", res.Affected)
 	}
-	if res.Batched {
-		t.Error("复合主键不该启用分批")
+	if !res.Batched {
+		t.Fatal("复合主键也应启用分批")
 	}
-	if !strings.Contains(res.Note, "复合主键") {
-		t.Errorf("说明里应写明复合主键不分批, 实际 %q", res.Note)
+	if res.BatchSize != 200 {
+		t.Errorf("复合主键的批大小 = %d, 期望 200（受 SQLite 表达式树深度限制）", res.BatchSize)
+	}
+	if res.Batches != 8 {
+		t.Errorf("批次数 = %d, 期望 8", res.Batches)
 	}
 
-	out, err := ex.ApplyChangePlan(ctx, res.Plan, service.Request{Approval: true})
+	var progress []int64
+	out, err := ex.ApplyChangePlanWithProgress(ctx, res.Plan, service.Request{Approval: true},
+		func(done, total int64) { progress = append(progress, done) })
 	if err != nil || out.Err != nil || out.Blocked {
-		t.Fatalf("单事务执行失败: err=%v out=%+v", err, out)
+		t.Fatalf("分批执行失败: err=%v out=%+v", err, out)
 	}
 	if out.RowsAffected != 1500 {
 		t.Errorf("提交行数 = %d, 期望 1500", out.RowsAffected)
+	}
+	if len(progress) != 8 {
+		t.Errorf("进度回调 %d 次 (%v), 期望 8 次", len(progress), progress)
+	}
+	if progress[len(progress)-1] != 1500 {
+		t.Errorf("最后一次进度 = %d, 期望 1500", progress[len(progress)-1])
+	}
+
+	// 逐行确认：不重不漏，key 全部命中且值都改了。
+	s, err = e.rw.Acquire(ctx)
+	if err != nil {
+		t.Fatalf("Acquire: %v", err)
+	}
+	defer func() { _ = s.Close() }()
+	cur, err := s.Query(ctx, `SELECT COUNT(*) FROM comp WHERE v = 'done'`, nil, driver.QueryOptions{})
+	if err != nil {
+		t.Fatalf("核对: %v", err)
+	}
+	rows, _, err := cur.Next(ctx)
+	if err != nil || len(rows) != 1 {
+		t.Fatalf("核对: %v", err)
+	}
+	if n, _ := rows[0][0].(int64); n != 1500 {
+		t.Errorf("被改行数 = %d, 期望 1500", n)
 	}
 }
 

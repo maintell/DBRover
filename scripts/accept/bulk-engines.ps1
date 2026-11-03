@@ -150,6 +150,40 @@ try {
   }
   Write-Host "$Engine 通过：3 批 × 3 次执行，同值批次未被误判为冲突"
 
+  # 复合主键：键集要按元组推进，批大小自动降到 200
+  #（SQLite 的表达式树深度上限 1000，1000 组 OR 会直接报错）。
+  Exec 'DROP TABLE IF EXISTS bulk_comp' | Out-Null
+  Exec 'CREATE TABLE bulk_comp (a INT NOT NULL, b INT NOT NULL, v VARCHAR(32), PRIMARY KEY (a, b))' | Out-Null
+  $sb2 = [System.Text.StringBuilder]::new()
+  [void]$sb2.Append('INSERT INTO bulk_comp (a, b, v) VALUES ')
+  for ($i = 1; $i -le 1500; $i++) {
+    if ($i -gt 1) { [void]$sb2.Append(',') }
+    [void]$sb2.Append("($i,$(($i % 3) + 1),'x')")
+  }
+  Exec $sb2.ToString() | Out-Null
+
+  $pc = Invoke-RestMethod -Uri "$base/connections/$cid/bulk/plan" -Method Post -Headers ($hdr + $json) -Body (@{
+      table              = @{ kind = 'table'; name = 'bulk_comp' }
+      set                = @{ v = 'done' }
+      confirm_table      = 'bulk_comp'
+      accept_no_rollback = $true
+    } | ConvertTo-Json -Depth 6)
+  Write-Host ("  复合主键预案：affected={0} batched={1} batch_size={2} batches={3}" -f `
+      $pc.affected, $pc.batched, $pc.batch_size, $pc.batches)
+  if (-not $pc.batched) { throw '复合主键应启用分批' }
+  if ($pc.batch_size -ne 200) { throw "复合主键批大小 = $($pc.batch_size)，期望 200" }
+  $evc = ApplyStream $pc.plan.id
+  $resc = ($evc | Where-Object { $_.type -eq 'result' } | Select-Object -Last 1)
+  if (-not $resc) {
+    $err = ($evc | Where-Object { $_.type -eq 'error' } | Select-Object -Last 1)
+    throw "复合主键分批失败：$($err.error.code) $($err.error.message)"
+  }
+  if ($resc.body.rows_affected -ne 1500) { throw "复合主键 rows_affected = $($resc.body.rows_affected)" }
+  $chkc = Exec "SELECT COUNT(*) AS n FROM bulk_comp WHERE v = 'done'"
+  if ([int64]$chkc.results[0].rows[0][0] -ne 1500) { throw '复合主键分批后行数不符' }
+  Write-Host '  复合主键分批通过：8 批 × 200 行，全部命中'
+
+  Exec 'DROP TABLE bulk_comp' | Out-Null
   Exec 'DROP TABLE bulk_big' | Out-Null
 }
 finally {
