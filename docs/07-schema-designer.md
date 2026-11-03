@@ -252,7 +252,7 @@ SELECT COUNT(*) FROM t WHERE c > 2147483647 OR c < -2147483648;
 | 1 | 表设计器改动实时生成 DDL 且可见 | 手动 |
 | 2 | 5 种关系库的 DDL 还原可空库回放并结构等价 | `drivertest` |
 | 3 | MySQL 上 `DROP COLUMN` 显示「不可回滚且丢数据」红色警示 | 手动 |
-| 4 | PG 上展示 `CONCURRENTLY` 建议并提示不能用于事务 | 手动 |
+| 4 | PG 上展示 `CONCURRENTLY` 建议并提示不能用于事务 | 手动 + 集成 ✅ 预案 `notes` 给出 `CREATE INDEX CONCURRENTLY …` 的写法并说明「不能用于事务、要到 SQL 工作区单独跑」，界面把 `plan.notes` 渲染成警示条；`TestCreateIndexPlanGivesConcurrentlyAdvice` 反向锁住「预案里的语句不许自动出现 CONCURRENTLY」（执行门是单事务的，自动生成会让每次执行都失败）。真机 PG 17 核过：事务里建并发索引报 `CREATE INDEX CONCURRENTLY cannot run inside a transaction block`，普通 `CREATE INDEX` 正常 |
 | 5 | 加外键前检测孤儿数据并阻断 | 集成 |
 | 6 | 加唯一索引前检测重复值并阻断 | 集成 |
 | 7 | 收窄类型前检测越界数据并给出样本 | 集成 |

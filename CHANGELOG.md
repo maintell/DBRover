@@ -6,7 +6,7 @@
 
 ### 新增
 
-- **文档基线**：14 份设计文档 + 5 份 ADR（技术栈、Agent 能力面、Plan/Apply 分离、环境模型、以及它们的取舍理由）。
+- **文档基线**：14 份设计文档 + 7 份 ADR（技术栈 / Agent 工具边界 / Plan-Apply 分离 / 环境模型 / 跨引擎差异归能力与方言 / 依赖检查归驱动 / 非关系型连接器模型）。
 - **方言层**（`internal/driver/dialect`）：词法分析、语句切分、指纹归一化、语句分类、条件分析、标识符引用。覆盖 PostgreSQL / MySQL / SQL Server / Oracle / SQLite 五种方言，含 dollar-quote、`DELIMITER`、`GO`、Oracle `/`、嵌套块注释、`]]` 转义。
 - **风险与摩擦**（`internal/policy`）：语句风险 `R0`–`R4`；打扰强度 `F0`–`F5`，由「环境 × 风险」矩阵决定，含变更集路径、脚本长度、影响行数、备份缺失等修正项。
 - **连接器契约**（`internal/driver`）：`Connector` / `Session` / `Metadata` 接口、能力声明、一致性测试套件 `drivertest`。
