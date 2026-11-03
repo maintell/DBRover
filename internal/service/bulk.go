@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"sort"
 	"strings"
 	"time"
@@ -99,6 +100,9 @@ func (e *Executor) BuildBulkUpdatePlan(ctx context.Context, req BulkUpdateReques
 		if v == nil {
 			args = append(args, nil)
 			continue
+		}
+		if f, ok := v.(float64); ok && math.Abs(f) > 1<<53 && ci.typ.Kind == model.TypeInteger {
+			return nil, fmt.Errorf("%w（列 %q）", ErrLargeNumberAsJSON, ci.name)
 		}
 		if s, ok := v.(string); ok {
 			args = append(args, coerceKey(s, ci.typ))

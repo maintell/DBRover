@@ -450,3 +450,99 @@ func TestChangePlanKeepsRowCount(t *testing.T) {
 		t.Fatal("回滚语句数量异常")
 	}
 }
+
+// TestChangePlanRejectsBigIntegerAsJSONNumber 对应 docs/06 验收项 6：
+// BIGINT 一旦写成 JSON 数字，超过 2^53 的部分在解析成 float64 时就已经丢了。
+// 这里必须**拒绝**，而不是把丢了精度的值写进库——后者看起来只是末位变了。
+func TestChangePlanRejectsBigIntegerAsJSONNumber(t *testing.T) {
+	e := setup(t)
+	ctx := context.Background()
+	ex := newTestExecutor(t, e)
+
+	// 2^53 + 1 在 float64 上就是 2^53，写进去会静默少 1。
+	const id = int64(1)
+	_, err := ex.BuildChangePlan(ctx, service.ChangeSetRequest{
+		Table: tableRef("t"),
+		Changes: []service.RowChange{{
+			Op:     service.OpUpdate,
+			Key:    map[string]any{"id": id},
+			Before: map[string]any{"id": id, "v": "a"},
+			After:  map[string]any{"v": "b"},
+		}},
+	})
+	if err != nil {
+		t.Fatalf("正常变更不该被拦: %v", err)
+	}
+
+	// 加一个整数列，再拿大整数字面量去写它。
+	s, err := e.rw.Acquire(ctx)
+	if err != nil {
+		t.Fatalf("Acquire: %v", err)
+	}
+	if _, err := s.Execute(ctx, `ALTER TABLE t ADD COLUMN big INTEGER`, nil); err != nil {
+		t.Fatalf("加列: %v", err)
+	}
+	_ = s.Close()
+
+	// 9223372036854775807 写成 JSON 数字，服务端拿到的是 9223372036854775808 这个 float64。
+	big := float64(9223372036854775807)
+	if _, err := ex.BuildChangePlan(ctx, service.ChangeSetRequest{
+		Table: tableRef("t"),
+		Changes: []service.RowChange{{
+			Op:     service.OpUpdate,
+			Key:    map[string]any{"id": id},
+			Before: map[string]any{"id": id},
+			After:  map[string]any{"big": big},
+		}},
+	}); !errors.Is(err, service.ErrLargeNumberAsJSON) {
+		t.Fatalf("大整数写成 JSON 数字应被拒绝, 实际 %v", err)
+	}
+
+	// 字符串形式必须放行：这是无损路径。
+	if _, err := ex.BuildChangePlan(ctx, service.ChangeSetRequest{
+		Table: tableRef("t"),
+		Changes: []service.RowChange{{
+			Op:     service.OpUpdate,
+			Key:    map[string]any{"id": id},
+			Before: map[string]any{"id": id},
+			After:  map[string]any{"big": "9223372036854775807"},
+		}},
+	}); err != nil {
+		t.Fatalf("字符串形式的大整数应放行: %v", err)
+	}
+}
+
+// TestBulkUpdateRejectsBigIntegerAsJSONNumber 与上一条同源：
+// 批量修改的 SET 值也必须挡住 JSON 数字形态的大整数。
+func TestBulkUpdateRejectsBigIntegerAsJSONNumber(t *testing.T) {
+	e := setup(t)
+	ctx := context.Background()
+	ex := newTestExecutor(t, e)
+
+	s, err := e.rw.Acquire(ctx)
+	if err != nil {
+		t.Fatalf("Acquire: %v", err)
+	}
+	if _, err := s.Execute(ctx, `ALTER TABLE t ADD COLUMN big INTEGER`, nil); err != nil {
+		t.Fatalf("加列: %v", err)
+	}
+	_ = s.Close()
+
+	if _, err := ex.BuildBulkUpdatePlan(ctx, service.BulkUpdateRequest{
+		Table:            tableRef("t"),
+		Set:              map[string]any{"big": float64(9223372036854775807)},
+		Filter:           []service.FilterCond{{Column: "id", Op: service.FilterEq, Value: "1"}},
+		AcceptNoRollback: true,
+	}); !errors.Is(err, service.ErrLargeNumberAsJSON) {
+		t.Fatalf("批量修改的大整数 SET 值应被拒绝, 实际 %v", err)
+	}
+
+	if _, err := ex.BuildBulkUpdatePlan(ctx, service.BulkUpdateRequest{
+		Table:            tableRef("t"),
+		Set:              map[string]any{"big": "9223372036854775807"},
+		Filter:           []service.FilterCond{{Column: "id", Op: service.FilterEq, Value: "1"}},
+		AcceptNoRollback: true,
+	}); err != nil {
+		t.Fatalf("字符串形式应放行: %v", err)
+	}
+}

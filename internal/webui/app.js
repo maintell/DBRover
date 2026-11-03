@@ -711,7 +711,9 @@ function coerce(kind, text) {
   switch (kind) {
     case 'integer': {
       const n = Number(text);
-      return Number.isFinite(n) ? n : text;
+      // BIGINT 超过 2^53 转成 Number 就丢低位了（9223372036854775807 → ...5808）。
+      // 这种情况保持字符串，交给服务端按列类型还原。
+      return Number.isSafeInteger(n) ? n : text;
     }
     case 'float': {
       const f = Number(text);
@@ -1007,11 +1009,20 @@ function renderCompare(res) {
       tr.appendChild(cell(td.name));
       tr.appendChild(cell(td.status));
       // 仅在单侧的列没有「原因」，写清楚它是缺了还是多了，别留一个空冒号。
-      tr.appendChild(cell((td.columns || []).map((c) => {
+      // 索引与列分开列：一个是数据形状，一个是性能设施，混在一起看不出该改哪边。
+      const colLines = (td.columns || []).map((c) => {
         if (c.status === 'only_left') return c.name + '：仅在左侧';
         if (c.status === 'only_right') return c.name + '：仅在右侧';
         return c.name + '：' + (c.reason || []).join('；');
-      }).join('\n')));
+      });
+      const idxLines = (td.indexes || []).map((x) => {
+        const label = x.right || x.left;
+        const name = label ? label.name : x.key;
+        if (x.status === 'only_left') return '索引 ' + name + '：仅在左侧';
+        if (x.status === 'only_right') return '索引 ' + name + '：仅在右侧';
+        return '索引 ' + name + '：' + (x.reason || []).join('；');
+      });
+      tr.appendChild(cell(colLines.concat(idxLines).join('\n')));
       tb.appendChild(tr);
     }
     t.appendChild(tb);

@@ -1,8 +1,10 @@
 package api_test
 
 import (
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -248,5 +250,50 @@ func TestChangePlanRejectsNoPrimaryKey(t *testing.T) {
 	}, true)
 	if code != http.StatusNotImplemented {
 		t.Fatalf("status = %d, 期望 501, body=%v", code, body)
+	}
+}
+
+// TestChangePlanRejectsBigIntegerAsJSONNumber 是验收项 6 的接口侧守卫：
+// BIGINT 用 JSON 数字传（> 2^53）时必须 400，而不是把丢了精度的值写进去。
+func TestChangePlanRejectsBigIntegerAsJSONNumber(t *testing.T) {
+	_, ts, dir := newServer(t)
+	id := createConn(t, ts, dir, "test", "read-write")
+	if code := execApproved(t, ts, id, "CREATE TABLE pint (id INTEGER PRIMARY KEY, big INTEGER)"); code != http.StatusOK {
+		t.Fatalf("建表失败: %d", code)
+	}
+	if code := execApproved(t, ts, id, "INSERT INTO pint (id, big) VALUES (1, 1)"); code != http.StatusOK {
+		t.Fatalf("造数失败: %d", code)
+	}
+
+	// 直接写原始 JSON：绕过 map[string]any 的 float64 转换，模拟真实客户端。
+	body := `{"table":{"kind":"table","name":"pint"},` +
+		`"changes":[{"op":"update","key":{"id":1},"before":{"id":1},` +
+		`"after":{"big":9223372036854775807}}]}`
+	req, err := http.NewRequest(http.MethodPost, ts.URL+"/api/v1/connections/"+id+"/changes/plan",
+		strings.NewReader(body))
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	req.Header.Set("X-DBRover-Token", testToken)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("do: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	var out map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		t.Fatalf("解析响应: %v", err)
+	}
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("status = %d, 期望 400, body=%v", resp.StatusCode, out)
+	}
+	errObj, _ := out["error"].(map[string]any)
+	if errObj["code"] != "NUMBER_PRECISION_LOSS" {
+		t.Errorf("code = %v, 期望 NUMBER_PRECISION_LOSS", errObj["code"])
+	}
+	if errObj["hint"] == "" {
+		t.Error("必须给出「改用字符串」的提示")
 	}
 }

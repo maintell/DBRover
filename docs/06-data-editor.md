@@ -368,9 +368,9 @@ GET /api/v1/connections/{id}/tables/{name}/rows
 | 3 | 并发修改同一行，第二次提交报冲突且不覆盖 | 集成（两会话） | 过：`TestChangePlanConflictRollsBack`、`TestChangePlanConflictReturns409` |
 | 4 | `RowsAffected == 0` 时整批回滚 | 集成 | 过：同上 |
 | 5 | 提交后可一键撤销，数据恢复原值 | 集成 | 过：`TestChangePlanUndoRestoresValue` + 浏览器实测 + CLI 查库 |
-| 6 | `Decimal(38,10)` 与 `BigInt` 编辑保存无损 | 类型保真 | 未过：文本单元格未做精度专项验证 |
+| 6 | `Decimal(38,10)` 与 `BigInt` 编辑保存无损 | 类型保真 | 过：真实 MySQL 5.7.38 与 PostgreSQL 17.11 上，`BIGINT` 上下界（`±9223372036854775808`）与 `NUMERIC(38,10)` 极值（`±9999999999999999999999999999.9999999999`、以及 2^53+1 的陷阱值）在「独立 SQL 原文 → 表浏览接口 → 原样写回 → 改成新精度值再查」全链路逐字符一致；反向上，把 BIGINT 写成 JSON 数字（>2^53）会被 `400 NUMBER_PRECISION_LOSS` 拒绝而不是静默丢低位 |
 | 7 | `NULL` 可设为 `NULL`，与空串区分 | 单测 | 过：`TestChangePlanSetsNullAndLocatesNullRow` + 浏览器右键菜单实测 |
-| 8 | 条件批量修改 2 万行分批执行，进度可见，可中止 | 集成 | 过：①本地 `serve` + SQLite，2 万行改值 → `batched=true`、`batches=20`，`apply?stream=1` 收到 20 条 `progress`（1000→20000，跨度 10.8 s，逐条陆续到达）与 1 条 `result`（`rows_affected=20000`）；`curl --max-time 0.6` 中途断开后仅保留第一批 1000 行、剩余 19000 行未改，预案仍有效，重新提交后补齐到 20000。②真实 MySQL 5.7.38 与 PostgreSQL 17.11（各自独立容器，用后即删）：3000 行 3 批，`batched=true`，三次执行（需改值 / 先改回再改 / 逐批都是改成相同值）都得到 3 条进度与 `rows_affected=3000`——最后一种正是 MySQL `clientFoundRows` 的判别式，关掉它会被误判成 `CHANGE_ROW_CONFLICT` |
+| 8 | 条件批量修改 2 万行分批执行，进度可见，可中止 | 集成 | 过：①本地 `serve` + SQLite，2 万行改值 → `batched=true`、`batches=20`，`apply?stream=1` 收到 20 条 `progress`（1000→20000，跨度 10.8 s，逐条陆续到达）与 1 条 `result`（`rows_affected=20000`）；`curl --max-time 0.6` 中途断开后仅保留第一批 1000 行、剩余 19000 行未改，预案仍有效，重新提交后补齐到 20000。②真实 MySQL 5.7.38 与 PostgreSQL 17.11（各自独立容器，用后即删）：3000 行 3 批，`batched=true`，三次执行（需改值 / 先改回再改 / 逐批都是改成相同值）都得到 3 条进度与 `rows_affected=3000`——最后一种正是 MySQL `clientFoundRows` 的判别式，关掉它会被误判成 `CHANGE_ROW_CONFLICT`。③规模：同一批脚本把行数提到 **100 万**（`batches=1000`），PostgreSQL 17.11 用 31.8 s、MySQL 5.7.38 用 126.2 s，两者都收到 1000 条进度、`rows_affected=1000000`、核验 `COUNT(*)=1000000`；服务端工作集全程平稳（PG 46–48 MB、MySQL 44 MB，不随已提交行数增长），说明分批推进没有攒状态 |
 | 9 | 空 `WHERE` 判定 `R4` 并要求输入表名 | 单测 | 过：`TestBulkUpdateRequiresTableNameWhenNoFilter`（表名不匹配也拒绝） |
 | 10 | 导出 100 万行 CSV 内存增长 < 200MB | 压测 | 过：本地 SQLite 100 万行，19.7 MB CSV / 1.5 s，进程工作集 12.1 → 22.7 MB（增长 10.6 MB）；文件首尾与抽样行均正确 |
 | 11 | 时区：`timestamptz` 按配置时区显示，写回为 UTC | 集成（跨时区样例） | 未过：无连接级显示时区 |
@@ -398,6 +398,7 @@ GET /api/v1/connections/{id}/tables/{name}/rows
 | 流式导出 CSV / NDJSON | §5.1 / 验收 10 | `GET /export`：单条 SELECT 走游标分批、边取边写；不需要主键；支持 `where`/`order`；大整数以字符串输出、二进制 base64；失败时返回结构化错误而不是空文件 | `TestExportCSV`、`TestExportNDJSONPreservesPrecisionAndNull`、`TestExportWorksWithoutPrimaryKey`、`TestExportEndpointErrorsAreJSON`、浏览器实测 |
 | 无主键表禁止编辑 | §1.2 | 无主键直接拒绝浏览（`ErrNoPrimaryKey` → 501），编辑入口不会出现 | `TestTableRowsNoPrimaryKey` |
 | 只读连接不出现编辑入口 | §1.2 引申 | `TableRowsResult.Editable = mode.AllowsWrite()`，前端据此决定 `contenteditable` | `TestTableRowsEditableFollowsAccessMode`（含变异验证） |
+| 大整数与高精度小数的保真 | §1.4 / 验收 6 | 十进制列以字符串传输与展示（不经过 double）；`BIGINT` 超过 2^53 时界面保持字符串、服务端按列类型还原；客户端若把它写成 JSON 数字，服务端直接 `400 NUMBER_PRECISION_LOSS` 而不是写入丢了低位的值 | `TestChangePlanRejectsBigIntegerAsJSONNumber`、`TestBulkUpdateRejectsBigIntegerAsJSONNumber`、`TestChangePlanRejectsBigIntegerAsJSONNumber`（接口侧）、真实 MySQL 5.7 / PostgreSQL 17 双向实测（见下表 6） |
 | 变更集模型 | §2.2 | `RowChange{op, key, before, after}`；UI 脏单元格 + 顶部变更条「待提交 N 处修改」 | `change_test.go`、浏览器实测 |
 | 单事务提交 | §2.3 | `Begin` → 逐条执行 → `Commit`；任一条失败整体 `Rollback` | `change_test.go` |
 | 影响行数校验与冲突报错 | §2.3 | 每语句比对 `RowsAffected` 与 `expect_rows`；为 0 → `CHANGE_ROW_CONFLICT`（409）+ 整批回滚 | `change_test.go`（两会话） |

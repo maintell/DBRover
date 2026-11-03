@@ -394,6 +394,7 @@ POST /connections
 | `POLICY_APPROVAL_REQUIRED` | policy | 428 | 需要审批 |
 | `POLICY_APPROVAL_MISMATCH` | policy | 409 | 审批内容与实际语句不一致 |
 | `CHANGE_ROW_CONFLICT` | constraint | 409 | 按原值定位不到行，或影响行数与预案不符 |
+| `NUMBER_PRECISION_LOSS` | internal | 400 | 大整数被写成 JSON 数字（>2^53 已在解析阶段丢精度），改用字符串重传 |
 | `CHANGE_APPLY_ABORTED` | policy | 409 | 分批执行被中止：已提交的批不回滚，预案仍有效 |
 | `SCHEMA_CHANGED` | constraint | 409 | 表定义在生成预案后变过 |
 | `NARROWING_BLOCKED` | constraint | 409 | 改列类型会截断现存数据 |

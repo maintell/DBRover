@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"fmt"
 	"sort"
 	"strings"
 
@@ -30,11 +31,25 @@ type ColumnDiff struct {
 	Status CompareStatus `json:"status"`
 }
 
+// IndexDiff 描述一个索引的差异。
+//
+// 按「列序列 + 唯一性 + 谓词」为键匹配，不按名字：两边各自起的名字不同
+// 不构成功能差异（docs/07 §4.2）。主键索引不参与比对——它的有无已经体现
+// 在列的主键标记上，而且删主键不是一条 DROP INDEX 能表达的。
+type IndexDiff struct {
+	Key    string        `json:"key"`
+	Left   *model.Index  `json:"left,omitempty"`
+	Right  *model.Index  `json:"right,omitempty"`
+	Reason []string      `json:"reason,omitempty"`
+	Status CompareStatus `json:"status"`
+}
+
 // TableDiff 描述一张表的差异。
 type TableDiff struct {
 	Name    string        `json:"name"`
 	Status  CompareStatus `json:"status"`
 	Columns []ColumnDiff  `json:"columns,omitempty"`
+	Indexes []IndexDiff   `json:"indexes,omitempty"`
 	// LeftDDL / RightDDL 供人眼对照；只在状态不是 same 时给出。
 	LeftDDL  string `json:"left_ddl,omitempty"`
 	RightDDL string `json:"right_ddl,omitempty"`
@@ -115,6 +130,7 @@ func Compare(ctx context.Context, left, right driver.Connector) (*CompareResult,
 			res.Tables = append(res.Tables, td)
 			appendColumnScripts(&res.Upgrade, &res.Downgrade, &res.NeedReview,
 				td, leftDialect, rightDialect)
+			appendIndexScripts(&res.Upgrade, &res.Downgrade, &res.NeedReview, td, leftDialect)
 		}
 	}
 	return res, nil
@@ -192,17 +208,99 @@ func compareTable(left, right *model.TableDetail, crossEngine bool) TableDiff {
 		}
 	}
 
-	if len(td.Columns) == 0 {
+	td.Indexes = compareIndexes(left, right)
+
+	if len(td.Columns) == 0 && len(td.Indexes) == 0 {
 		td.Status = CompareSame
 		return td
 	}
-	td.Status = CompareChanged
+	td.Status = CompareSame
 	for _, c := range td.Columns {
+		if c.Status != CompareSame {
+			td.Status = CompareChanged
+		}
 		if c.Status == CompareNeedReview {
 			td.Status = CompareNeedReview
 		}
 	}
+	for _, ix := range td.Indexes {
+		if ix.Status != CompareSame {
+			td.Status = CompareChanged
+		}
+	}
 	return td
+}
+
+// indexKey 是索引的比对键：唯一性 + 谓词 + 列序列。
+func indexKey(ix model.Index) string {
+	cols := make([]string, len(ix.Columns))
+	for i, c := range ix.Columns {
+		cols[i] = strings.ToLower(strings.TrimSpace(c))
+	}
+	return fmt.Sprintf("%t|%s|%s",
+		ix.Unique, strings.ToLower(strings.TrimSpace(ix.Predicate)), strings.Join(cols, ","))
+}
+
+// compareIndexes 按比对键对齐两侧索引。
+func compareIndexes(left, right *model.TableDetail) []IndexDiff {
+	collect := func(td *model.TableDetail) map[string]model.Index {
+		out := make(map[string]model.Index, len(td.Indexes))
+		for _, ix := range td.Indexes {
+			if ix.Primary {
+				continue // 主键由列上的标记体现，不当作普通索引处理
+			}
+			out[indexKey(ix)] = ix
+		}
+		return out
+	}
+	leftIdx := collect(left)
+	rightIdx := collect(right)
+
+	seen := map[string]bool{}
+	keys := make([]string, 0, len(leftIdx)+len(rightIdx))
+	for k := range leftIdx {
+		if !seen[k] {
+			seen[k] = true
+			keys = append(keys, k)
+		}
+	}
+	for k := range rightIdx {
+		if !seen[k] {
+			seen[k] = true
+			keys = append(keys, k)
+		}
+	}
+	sort.Strings(keys)
+
+	var out []IndexDiff
+	for _, k := range keys {
+		li, lok := leftIdx[k]
+		ri, rok := rightIdx[k]
+
+		switch {
+		case lok && !rok:
+			l := li
+			out = append(out, IndexDiff{Key: k, Left: &l, Status: CompareOnlyLeft})
+		case !lok && rok:
+			r := ri
+			out = append(out, IndexDiff{Key: k, Right: &r, Status: CompareOnlyRight})
+		default:
+			// 键相同说明列序列、唯一性、谓词都一致；名字或访问方法不同只是形式差异。
+			l, r := li, ri
+			var reasons []string
+			if l.Name != r.Name {
+				reasons = append(reasons, "索引名不同: "+l.Name+" → "+r.Name)
+			}
+			if !strings.EqualFold(strings.TrimSpace(l.Method), strings.TrimSpace(r.Method)) {
+				reasons = append(reasons, "索引方法不同: "+l.Method+" → "+r.Method)
+			}
+			if len(reasons) == 0 {
+				continue
+			}
+			out = append(out, IndexDiff{Key: k, Left: &l, Right: &r, Reason: reasons, Status: CompareChanged})
+		}
+	}
+	return out
 }
 
 // columnReasons 列出同一列在两侧的差异原因。
@@ -217,6 +315,12 @@ func columnReasons(left, right model.Column, crossEngine bool) []string {
 	}
 	if left.Nullable != right.Nullable {
 		out = append(out, "可空不同: "+boolText(left.Nullable)+" → "+boolText(right.Nullable))
+	}
+	if left.IsPrimary != right.IsPrimary {
+		out = append(out, "主键标记不同: "+yesNo(left.IsPrimary)+" → "+yesNo(right.IsPrimary))
+	}
+	if left.IsUnique != right.IsUnique {
+		out = append(out, "唯一标记不同: "+yesNo(left.IsUnique)+" → "+yesNo(right.IsUnique))
 	}
 	if !sameDefault(left.Default, right.Default) {
 		out = append(out, "默认值不同: "+defaultText(left.Default)+" → "+defaultText(right.Default))
@@ -248,6 +352,41 @@ func boolText(b bool) string {
 		return "可空"
 	}
 	return "非空"
+}
+
+func yesNo(b bool) string {
+	if b {
+		return "是"
+	}
+	return "否"
+}
+
+// appendIndexScripts 生成索引的升级与回退语句。
+//
+// 与列不同，删索引不丢数据，只丢性能，所以这里两个方向都生成脚本：
+// 对齐索引是可逆的，没必要推给人。脚本都在**左侧**执行，因此一律用左侧方言
+// 渲染引用——跨引擎比对时右侧的类型名才需要保留右侧的写法。
+func appendIndexScripts(upgrade, downgrade, needReview *[]string, td TableDiff, leftDialect dialect.Dialect) {
+	table := leftDialect.QuoteQualified("", td.Name)
+
+	for _, ix := range td.Indexes {
+		switch ix.Status {
+		case CompareOnlyRight:
+			*upgrade = append(*upgrade,
+				leftDialect.CreateIndexSQL(table, ix.Right.Name, ix.Right.Columns, ix.Right.Unique)+";")
+			*downgrade = append(*downgrade,
+				leftDialect.DropIndexSQL(table, ix.Right.Name)+";")
+		case CompareOnlyLeft:
+			*upgrade = append(*upgrade,
+				leftDialect.DropIndexSQL(table, ix.Left.Name)+";")
+			*downgrade = append(*downgrade,
+				leftDialect.CreateIndexSQL(table, ix.Left.Name, ix.Left.Columns, ix.Left.Unique)+";")
+		default:
+			*needReview = append(*needReview,
+				td.Name+"."+ix.Key+"：索引定义不同（"+strings.Join(ix.Reason, "；")+"），"+
+					"改名或换访问方法不影响查询结果，未自动生成")
+		}
+	}
 }
 
 // sameDefault 比较默认值，去掉外层括号与大小写差异。

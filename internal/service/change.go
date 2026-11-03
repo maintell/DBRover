@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"sort"
 	"strings"
 	"time"
@@ -19,7 +20,32 @@ var (
 	ErrRowConflict = errors.New("行已被其他会话修改或删除")
 	// ErrPlanExpired 表示预案超过有效期。
 	ErrPlanExpired = errors.New("变更预案已过期，请重新生成")
+	// ErrLargeNumberAsJSON 表示大整数被写成 JSON 数字传进来。
+	// 超过 2^53 的整数在 JSON 解析成 float64 时低位就已经没了，
+	// 到服务端无论怎么转都救不回来——只能拒绝，让人改成字符串重传。
+	ErrLargeNumberAsJSON = errors.New("大整数请用字符串传：JSON 数字超过 2^53 会在解析阶段丢精度")
 )
+
+// guardChangeNumbers 拦住「已经在 JSON 解析阶段丢了精度」的大整数。
+//
+// 这是静默数据事故的典型来源：9223372036854775807 写成 JSON 数字会被解析成
+// ...5808 并原样写进库里，界面看起来只是末位变了。字符串走的是无损路径，
+// 由 coerceKey 按列类型还原，所以这里只拒绝数字形态。
+func guardChangeNumbers(cols map[string]model.Column, ch RowChange) error {
+	for _, m := range []map[string]any{ch.Key, ch.Before, ch.After} {
+		for name, v := range m {
+			f, ok := v.(float64)
+			if !ok || math.Abs(f) <= 1<<53 {
+				continue
+			}
+			ci, known := cols[strings.ToLower(strings.TrimSpace(name))]
+			if known && ci.Type.Kind == model.TypeInteger {
+				return fmt.Errorf("%w（列 %q）", ErrLargeNumberAsJSON, ci.Name)
+			}
+		}
+	}
+	return nil
+}
 
 // ChangeOp 是单行的变更类型。
 type ChangeOp string
@@ -122,6 +148,9 @@ func (e *Executor) BuildChangePlan(ctx context.Context, req ChangeSetRequest) (*
 
 	var highest policy.Level
 	for _, ch := range req.Changes {
+		if err := guardChangeNumbers(cols, ch); err != nil {
+			return nil, err
+		}
 		fwd, back, reversible, err := e.compileRowChange(table, pk, cols, ch)
 		if err != nil {
 			return nil, err

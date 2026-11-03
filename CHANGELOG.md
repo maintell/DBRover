@@ -27,6 +27,7 @@
 - **条件批量修改**（`internal/service/bulk.go` + `POST /bulk/plan` + 界面「批量修改」）：按当前筛选一次改多行，不加载行。生成预案前用 `COUNT(*)` 精确统计影响行数并写进 `expect_rows`，执行时行数不符即整体回滚；空 `WHERE` 等于全表写，必须回填表名；影响 ≤1000 行逐行生成回滚（可一键撤销），超过则不生成回滚、标不可逆并要求显式接受；确认弹窗给最多 5 行前后对比。主键列禁止批量修改。
 - **批量修改分批与中止**（`internal/service/bulk_exec.go` + `apply?stream=1`）：影响超过 1000 行且是单列主键时，按主键键集分批推进（`pk > 上批末值 ORDER BY pk LIMIT 1000`），每批一个独立事务；键集只用来挑行，改行仍是 `WHERE pk IN (...)`，否则会越过本批边界。`apply?stream=1` 用 NDJSON 逐批回报 `{"type":"progress","done","total"}`，最后一行是 `result` 或 `error`；界面显示「已提交 N / 总数」并可「停止」。中止在批与批之间生效，已提交的批不回滚、预案保留（`SET` 是常量，重新提交幂等），返回 `409 CHANGE_APPLY_ABORTED`。被审批拦下时还没有进度，仍是普通 JSON + 428，不会把状态码藏进流里。复合主键与无主键表退回单事务，并在预案 `note` 里写明。
 - **结构比对（v1）**（`internal/service/compare.go` + `POST /compare` + 界面「比对」）：两个已打开连接逐表比对，输出 `only_left` / `only_right` / `changed` / `need_review` 与逐列原因（中立类型、原始类型、可空、默认值、注释）；跨引擎的类型差异一律交人工判断。升级脚本只生成增量（建缺失的表、加缺失的列），删除与改类型进 `need_review`。只读：不生成预案、不改任何一边。- **外键孤儿数据预检（只读）**（`internal/service/fk_precheck.go` + `POST /connections/{id}/fk/precheck`）：检出子表里父表找不到对应行的数据（任一子列为 NULL 不计入），判断父表参与列是否唯一（主键或**列集合完全一致**的唯一索引——(a) 的单列唯一索引不能证明 (a,b) 唯一），有孤儿即阻断并给最多 5 条样本。加外键的 DDL 本轮未做：SQLite 不支持 `ALTER TABLE ADD CONSTRAINT`，MySQL/PG 暂无可用真机验收，不把没验过的语句交给用户。
+- **结构比对补上索引级差异**：按「列序列 + 唯一性 + 谓词」为键匹配、不按名字（名字不同不构成功能差异，只记进 `need_review` 说明）；主键索引不当作普通索引处理。索引的增删不丢数据，所以 `upgrade` 与 `downgrade` 两个方向都生成脚本——这是比对第一次能给出真正可用的回退语句。列的删除与改类型仍进 `need_review`。
 - **流式导出**（`internal/service/export.go` + `GET /export`）：CSV 与 NDJSON，单条 SELECT 走游标分批取、边取边写；复用 `where`/`order`，导出的就是当前视图且不受分页限制；不要求主键，视图与无主键表也能导。大整数以字符串输出、二进制 base64、NULL 在 NDJSON 里是真正的 `null`。响应头推迟到首次写出，开跑前失败返回结构化错误而不是空文件配 200。界面加「导出」入口与格式下拉（状态栏给出字节数与首行，便于确认内容）。
 - **回环 HTTP 服务**（`internal/api`）：token 鉴权、Origin 校验、连接管理、`exec`、`query`、`results/{id}/page`、`tables/{name}/rows`、审计查询、OpenAPI 契约（`/api/v1/openapi.json`）。
 - **审计落盘**：JSONL 追加写（0600）+ 内存热区，`serve -audit <path>` 开启。
@@ -37,6 +38,7 @@
 
 ### 安全
 
+- **大整数不再静默丢精度**：`BIGINT` 超过 2^53 时，界面保持字符串、服务端按列类型还原；客户端若把它写成 JSON 数字，直接 `400 NUMBER_PRECISION_LOSS` 并提示改用字符串，而不是把丢了低位的值写进库。此前界面 `coerce()` 用 `Number()` 转换整数列，编辑 `9223372036854775807` 会变成 `...5808`。
 - 只读连接的三层一致判定：`AllowsWrite()`、执行门拦截、驱动只读模式。
 - 原始 SQL 的结果集不再可编辑：只有「表浏览」的网格允许改单元格。此前结果集的列可能来自别的表，拼出来的 `UPDATE` 会打错表。
 - `access_mode` 严格校验：拼错的值直接 400，不会被当成未知模式放行。

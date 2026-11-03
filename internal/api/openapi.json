@@ -470,7 +470,7 @@
         },
         "responses": {
           "201": { "description": "预案已生成（含 statements / rollback / risk / friction）" },
-          "400": { "description": "变更集非法" },
+          "400": { "description": "变更集非法（CHANGE_PLAN_FAILED / NUMBER_PRECISION_LOSS：大整数写成了 JSON 数字且超过 2^53，改用字符串重传）" },
           "501": { "description": "无主键表不支持（CAPABILITY_UNSUPPORTED）" }
         }
       }
@@ -590,7 +590,7 @@
           "201": {
             "description": "预案已生成：plan（语句/回滚/风险/摩擦）+ affected + samples 前后对比 + note；影响超过单批上限且是单列主键时 batched 为 true，并给出 batch_size 与 batches（执行时按主键键集分批，每批独立提交，中途失败或中止不回滚已提交的批）。复合主键与无主键表不分批，走单事务。"
           },
-          "400": { "description": "参数不合法（REQUEST_INVALID / FILTER_INVALID / BULK_PLAN_FAILED）" },
+          "400": { "description": "参数不合法（REQUEST_INVALID / FILTER_INVALID / BULK_PLAN_FAILED / NUMBER_PRECISION_LOSS：大整数写成了 JSON 数字且超过 2^53，改用字符串重传）" },
           "428": { "description": "需要额外确认（BULK_CONFIRM_TABLE_REQUIRED / BULK_NO_ROLLBACK_ACK）" }
         }
       }
@@ -598,7 +598,7 @@
     "/api/v1/compare": {
       "post": {
         "summary": "比对两个连接的结构",
-        "description": "只读：不生成预案、不改任何一边。返回每张表的状态（only_left / only_right / changed / need_review）与逐列差异原因。upgrade 只包含增量语句（建缺失的表、加缺失的列）；删除与改类型一律进 need_review，不自动生成脚本。",
+        "description": "只读：不生成预案、不改任何一边。返回每张表的状态（only_left / only_right / changed / need_review）与逐列差异原因。索引参与比对，按「列序列 + 唯一性 + 谓词」为键、不按名字；只改索引名或访问方法不生成脚本而进 need_review。列的删除与改类型一律进 need_review；索引的增删因为不丢数据，upgrade 与 downgrade 两个方向都给脚本。",
         "requestBody": {
           "required": true,
           "content": {

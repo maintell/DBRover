@@ -261,7 +261,7 @@ SELECT COUNT(*) FROM t WHERE c > 2147483647 OR c < -2147483648;
 | DDL 事务性差异 | §2.3 / 验收 3 | 由 `Capabilities().DDLTransactional` 声明，预案据此设 `rolls_back_as_compensation`；MySQL 上提示「隐式提交，补偿不是撤销」 | `TestDDLPlanOnRealEngines`（MySQL 补偿 / PG 真回滚） |
 | 改列类型 | §1.1 / §5.2 | `action` 为 `alter_column_type`；语句文本由 `Dialect.AlterColumnTypeSQL` 渲染（PG `ALTER COLUMN … TYPE`、MySQL `MODIFY COLUMN` 带完整列定义）；**生成预案前做收窄预检**，装不下现存数据即 `ErrNarrowingBlocked` 并给出样本 | `TestBoundsFor`、`TestDDLAlterColumnTypeOnRealEngines`（MySQL + PG）、浏览器实测（含拦截与放行两条路径） |
 | 索引管理（建 / 删） | §1.1 / 验收 6 | `action` 为 `create_index` / `drop_index`；语句文本由 `Dialect.CreateIndexSQL` / `DropIndexSQL` 渲染（MySQL 的 `DROP INDEX` 要带 `ON <table>`，PG/SQLite 不能带）；建唯一索引前先查重复值，命中即 `ErrDuplicateRows` 并给样本；主键索引拒绝删除；删索引不动数据，回滚按原定义重建 | `TestDDLCreateAndDropIndex`、`TestDDLUniqueIndexBlocksDuplicates`、`TestDDLIndexOnRealEngines`（MySQL + PG，直接验证 `DROP INDEX` 写法）、浏览器实测 |
-| 结构比对（v1） | §4 / 验收 9 | ``POST /compare``：两个已打开连接逐表比对，输出 ``only_left`` / ``only_right`` / ``changed`` / ``need_review`` 与逐列原因（中立类型、原始类型、可空、默认值、注释）；升级脚本只生成**增量**（建缺失的表、加缺失的列），删除与改类型一律进 ``need_review`` | ``TestCompareSchemas``、``TestCompareEndpoint``、浏览器实测（3 张差异表 + 升级脚本 + 3 条待决策） |
+| 结构比对（v1） | §4 / 验收 9 | `POST /compare`：两个已打开连接逐表比对，输出 `only_left` / `only_right` / `changed` / `need_review` 与逐列原因（中立类型、原始类型、可空、默认值、注释、主键与唯一标记）；**索引参与比对**，按「列序列 + 唯一性 + 谓词」为键、不按名字，只改名字或访问方法不生成脚本而进 `need_review`；主键索引不当作普通索引处理。列的删除与改类型仍进 `need_review`，索引的增删因为不丢数据、两个方向都生成脚本（升级与回退） | `TestCompareSchemas`、`TestCompareIndexes`、`TestCompareIndexNameOnlyDifference`、`TestCompareEndpoint`、浏览器实测（3 张差异表 + 升级脚本 + 3 条待决策）；`TestCompareIndexes` 含变异验证（去掉脚本生成即失败） |
 | 外键孤儿数据预检（只读） | §5.1 / §5.2 / 验收 5 | ``POST /connections/{id}/fk/precheck``：检出子表里父表找不到对应行的数据（任一子列为 NULL 不计），判断父表参与列是否唯一（主键或**列集合完全一致**的唯一索引），orphans>0 即 ``blocked`` 并给最多 5 条样本 | ``TestFKPrecheckCleanData``、``TestFKPrecheckOrphansBlocked``、``TestFKPrecheckCompositeUniqueness``、``TestFKPrecheckEndpoint`` |
 | 删列的影响面 | §5.2 | 展示该列**非空行数**（`COUNT(*) WHERE col IS NOT NULL`），并标 `不可逆`；NULL 行不计入 | 浏览器实测（3 行有值 → 显示「影响 3 行」） |
 | 加列可撤销 | §2.6 | 撤销预案 = `DROP COLUMN`，复用撤销通道；删列因数据丢失不生成撤销 | 浏览器实测（加列后撤销，结构与 DDL 复原） |
@@ -278,11 +278,11 @@ SELECT COUNT(*) FROM t WHERE c > 2147483647 OR c < -2147483648;
 | 预执行检查（长事务 / MDL / 磁盘 / 孤儿数据） | §2.5 / 验收 5、11 | 只做了「定义哈希」一项；其余未探测 | 待实现 |
 | 类型收窄预检与样本行 | §5.2 / 验收 7 | 改类型未做，故也没有越界检查 | 待实现 |
 | 依赖检查（删对象的引用关系） | §5.1 / 验收 8 | 删表/删列前不查视图与外键依赖 | 待实现 |
-| 结构比对的完整形态 | §4 / 验收 9 | v1 只比对表与列，未比索引/外键/检查约束/视图定义；升级脚本只有增量，回退脚本为空 | 待实现；索引比对要按「列序列+唯一性+条件」为键，不能按名字 |
+| 结构比对的完整形态 | §4 / 验收 9 | 已比表、列、索引；尚未比外键、检查约束、视图定义；回退脚本目前只覆盖索引与新增表以外的部分（删表/删列/改类型仍不生成） | 待实现；外键比对要按「列集合 → 引用表与引用列」为键，检查约束按归一化后的表达式 |
 | 手写 SQL 模式（表单与 SQL 双向同步） | §1.2 / 验收 12 | 只有只读预览，没有可编辑的手写模式 | 待实现；手写模式需要表达式与 DDL 校验 |
 
 ### 8.3 验收清单状态
 
 已过：1（预览）、3（MySQL 警示）、6（唯一索引前查重复值并阻断，含样本）、7（收窄预检 + 样本）、10（定义变更阻断）。
-未过：2（MSSQL/Oracle 未实现，无法 5 引擎回放）、4（在线变更建议）、8（依赖检查）、11（长事务探测）、12（手写 SQL 模式）；5（外键孤儿数据预检）部分过：预检可用且能阻断并给样本，但「加外键」动作本身未实现；9（结构比对）部分过：差异分类与升级脚本已可用，回退脚本尚未生成。
+未过：2（MSSQL/Oracle 未实现，无法 5 引擎回放）、4（在线变更建议）、8（依赖检查）、11（长事务探测）、12（手写 SQL 模式）；5（外键孤儿数据预检）部分过：预检可用且能阻断并给样本，但「加外键」动作本身未实现；9（结构比对）部分过：差异分类、索引级差异、升级脚本与索引回退脚本已可用，但删表/删列/改类型不生成回退脚本，外键与检查约束尚未比对。
 

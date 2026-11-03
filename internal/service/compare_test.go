@@ -120,3 +120,86 @@ func TestCompareSameSchemaIsEmpty(t *testing.T) {
 		t.Errorf("结构相同不该生成脚本: %v / %v", res.Upgrade, res.Downgrade)
 	}
 }
+
+// TestCompareIndexes 对应 docs/07 §4.1 / §4.2 与验收 9：
+// 索引要参与比对，且按「列序列 + 唯一性 + 谓词」为键、不按名字；
+// 索引差异要同时给出升级与回退脚本（删索引不丢数据，可逆）。
+func TestCompareIndexes(t *testing.T) {
+	dir := t.TempDir()
+	left := openCompareSide(t, dir, "il.db",
+		`CREATE TABLE t (id INTEGER PRIMARY KEY, v TEXT)`,
+		`CREATE INDEX ix_v ON t(v)`,
+	)
+	right := openCompareSide(t, dir, "ir.db",
+		`CREATE TABLE t (id INTEGER PRIMARY KEY, v TEXT)`,
+		`CREATE UNIQUE INDEX ix_v2 ON t(v)`,
+		`CREATE INDEX ix_id ON t(id)`,
+	)
+
+	res, err := service.Compare(context.Background(), left, right)
+	if err != nil {
+		t.Fatalf("Compare: %v", err)
+	}
+	if len(res.Tables) != 1 {
+		t.Fatalf("差异表数 = %d, 期望 1: %+v", len(res.Tables), res.Tables)
+	}
+	td := res.Tables[0]
+	if td.Status != service.CompareChanged {
+		t.Errorf("表状态 = %s, 期望 changed", td.Status)
+	}
+	if len(td.Columns) != 0 {
+		t.Errorf("列没有差异, 却报了 %d 条: %+v", len(td.Columns), td.Columns)
+	}
+	if len(td.Indexes) != 3 {
+		t.Fatalf("索引差异数 = %d, 期望 3（左侧多 1、右侧多 2）: %+v", len(td.Indexes), td.Indexes)
+	}
+
+	upgrade := strings.Join(res.Upgrade, "\n")
+	downgrade := strings.Join(res.Downgrade, "\n")
+	for _, want := range []string{"CREATE UNIQUE INDEX", "ix_v2", "ix_id", "DROP INDEX"} {
+		if !strings.Contains(upgrade, want) {
+			t.Errorf("升级脚本缺 %q:\n%s", want, upgrade)
+		}
+	}
+	// 回退脚本必须能把左侧还原：重建被删的 ix_v、删掉新增的两个。
+	for _, want := range []string{"CREATE INDEX", "ix_v", "DROP INDEX", "ix_v2", "ix_id"} {
+		if !strings.Contains(downgrade, want) {
+			t.Errorf("回退脚本缺 %q:\n%s", want, downgrade)
+		}
+	}
+	// 主键索引不参与：不该出现对 PRIMARY / autoindex 的 DROP INDEX。
+	if strings.Contains(strings.ToUpper(upgrade), "PRIMARY") {
+		t.Errorf("主键索引不该被当成普通索引处理:\n%s", upgrade)
+	}
+}
+
+// TestCompareIndexNameOnlyDifference 验证「名字不同」不被当成结构差异去生成脚本。
+func TestCompareIndexNameOnlyDifference(t *testing.T) {
+	dir := t.TempDir()
+	left := openCompareSide(t, dir, "nl.db",
+		`CREATE TABLE t (id INTEGER PRIMARY KEY, v TEXT)`,
+		`CREATE INDEX a_idx ON t(v)`,
+	)
+	right := openCompareSide(t, dir, "nr.db",
+		`CREATE TABLE t (id INTEGER PRIMARY KEY, v TEXT)`,
+		`CREATE INDEX b_idx ON t(v)`,
+	)
+
+	res, err := service.Compare(context.Background(), left, right)
+	if err != nil {
+		t.Fatalf("Compare: %v", err)
+	}
+	if len(res.Upgrade) != 0 || len(res.Downgrade) != 0 {
+		t.Errorf("只是改了索引名，不该生成脚本: %v / %v", res.Upgrade, res.Downgrade)
+	}
+	review := strings.Join(res.NeedReview, "\n")
+	if !strings.Contains(review, "索引名不同") {
+		t.Errorf("应说明只是索引名不同: %s", review)
+	}
+	if len(res.Tables) != 1 || len(res.Tables[0].Indexes) != 1 {
+		t.Fatalf("应报 1 条索引差异: %+v", res.Tables)
+	}
+	if res.Tables[0].Indexes[0].Status != service.CompareChanged {
+		t.Errorf("状态 = %s, 期望 changed", res.Tables[0].Indexes[0].Status)
+	}
+}

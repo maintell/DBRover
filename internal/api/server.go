@@ -863,6 +863,10 @@ func (s *Server) handleBulkPlan(w http.ResponseWriter, r *http.Request) {
 	case errors.Is(err, service.ErrInvalidFilter):
 		writeError(w, http.StatusBadRequest, "FILTER_INVALID", "internal", err.Error(), "", false)
 		return
+	case errors.Is(err, service.ErrLargeNumberAsJSON):
+		writeError(w, http.StatusBadRequest, "NUMBER_PRECISION_LOSS", "internal", err.Error(),
+			"把该列的值改成字符串形式（例如 \"9223372036854775807\"）再提交", false)
+		return
 	case errors.Is(err, service.ErrInvalidDDL):
 		writeError(w, http.StatusBadRequest, "REQUEST_INVALID", "internal", err.Error(), "", false)
 		return
@@ -974,6 +978,11 @@ func (s *Server) handleChangePlan(w http.ResponseWriter, r *http.Request) {
 	if errors.Is(err, service.ErrNoPrimaryKeyForEdit) {
 		writeError(w, http.StatusNotImplemented, "CAPABILITY_UNSUPPORTED", "internal",
 			err.Error(), "无主键表只能通过原始 SQL 修改，无法保证定位准确", false)
+		return
+	}
+	if errors.Is(err, service.ErrLargeNumberAsJSON) {
+		writeError(w, http.StatusBadRequest, "NUMBER_PRECISION_LOSS", "internal", err.Error(),
+			"把该列的值改成字符串形式（例如 \"9223372036854775807\"）再提交", false)
 		return
 	}
 	if err != nil {
