@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/maintell/DBRover/internal/driver"
 	"github.com/maintell/DBRover/internal/model"
@@ -504,4 +505,80 @@ func (c *Connector) Dependents(ctx context.Context, ref model.ObjectRef) ([]mode
 		}
 	}
 	return out, viewRows.Err()
+}
+
+// Blockers 报告可能让 DDL 卡住的会话。
+//
+//   - 长事务：information_schema.innodb_trx 里 trx_started 早于阈值的。
+//   - 锁等待：innodb_lock_waits 里有记录就说明已经有人在等锁（5.7 起可用）。
+//
+// 5.7 没有 performance_schema.metadata_locks，MDL 探测做不了，
+// 所以这里只覆盖「行锁/事务」这一类，做到不假装能探测 MDL。
+func (c *Connector) Blockers(ctx context.Context, threshold time.Duration) ([]model.Blocker, error) {
+	h, err := c.handle()
+	if err != nil {
+		return nil, err
+	}
+	if threshold <= 0 {
+		threshold = 30 * time.Second
+	}
+	secs := int64(threshold / time.Second)
+
+	var out []model.Blocker
+
+	// 只看**本库**的会话：innodb_trx 是全实例的，别的库开着事务与这次 DDL 无关，
+	// 报出来只会变成噪音。
+	db := refCatalog(c)
+	rows, err := h.QueryContext(ctx, `
+		SELECT t.trx_id, t.trx_mysql_thread_id, t.trx_started, t.trx_state,
+		       TIMESTAMPDIFF(SECOND, t.trx_started, NOW())
+		FROM information_schema.innodb_trx t
+		JOIN information_schema.processlist p ON p.id = t.trx_mysql_thread_id
+		WHERE TIMESTAMPDIFF(SECOND, t.trx_started, NOW()) >= ?
+		  AND (? = '' OR p.db = ?)
+		ORDER BY t.trx_started`, secs, db, db)
+	if err != nil {
+		return nil, err
+	}
+	for rows.Next() {
+		var trxID any
+		var threadID sql.NullInt64
+		var started any
+		var state string
+		var age sql.NullInt64
+		if err := rows.Scan(&trxID, &threadID, &started, &state, &age); err != nil {
+			_ = rows.Close()
+			return nil, err
+		}
+		out = append(out, model.Blocker{
+			Kind:    "idle_in_transaction",
+			Session: fmt.Sprintf("thread %d", threadID.Int64),
+			Detail: fmt.Sprintf("事务 %v 已持续 %d 秒（%s）；DDL 可能要等它释放表锁",
+				trxID, age.Int64, state),
+			Seconds: age.Int64,
+		})
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return nil, err
+	}
+	_ = rows.Close()
+
+	// helper: 本库名（空表示不限库，例如连接没指定 catalog）
+	// 锁等待：只在有记录时给一条汇总，逐条搬运锁信息意义不大。
+	var waits int64
+	if err := h.QueryRowContext(ctx,
+		"SELECT COUNT(*) FROM information_schema.innodb_lock_waits").Scan(&waits); err == nil && waits > 0 {
+		out = append(out, model.Blocker{
+			Kind:    "lock_wait",
+			Session: "innodb",
+			Detail:  fmt.Sprintf("当前有 %d 组行锁等待；再执行拿锁的 DDL 会让队列更长", waits),
+		})
+	}
+	return out, nil
+}
+
+// refCatalog 返回连接配置里的库名；空串表示不限库。
+func refCatalog(c *Connector) string {
+	return c.config().Catalog
 }

@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/maintell/DBRover/internal/driver"
 	"github.com/maintell/DBRover/internal/model"
@@ -656,4 +657,57 @@ func (c *Connector) Dependents(ctx context.Context, ref model.ObjectRef) ([]mode
 		})
 	}
 	return out, viewRows.Err()
+}
+
+// Blockers 报告可能让 DDL 卡住的会话。
+//
+//   - 长事务：pg_stat_activity 里 state='idle in transaction' 且开始得够早的。
+//     PostgreSQL 的 DDL 需要 ACCESS EXCLUSIVE 锁，被它挡住时整张表都不能读写。
+//   - 锁等待：wait_event_type='Lock' 的会话——说明已经有人在排队了。
+func (c *Connector) Blockers(ctx context.Context, threshold time.Duration) ([]model.Blocker, error) {
+	h, err := c.handle()
+	if err != nil {
+		return nil, err
+	}
+	if threshold <= 0 {
+		threshold = 30 * time.Second
+	}
+	secs := int64(threshold / time.Second)
+
+	rows, err := h.QueryContext(ctx, `
+		SELECT pid, state, COALESCE(wait_event_type,''), COALESCE(query,''),
+		       GREATEST(0, EXTRACT(EPOCH FROM (now() - state_change))::bigint)
+		FROM pg_stat_activity
+		WHERE datname = current_database()
+		  AND pid <> pg_backend_pid()
+		  AND (
+		    (state LIKE 'idle in transaction%' AND now() - state_change >= make_interval(secs => $1))
+		    OR wait_event_type = 'Lock'
+		  )
+		ORDER BY 5 DESC
+		LIMIT 20`, secs)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+
+	var out []model.Blocker
+	for rows.Next() {
+		var pid int64
+		var state, waitType, query string
+		var secs2 int64
+		if err := rows.Scan(&pid, &state, &waitType, &query, &secs2); err != nil {
+			return nil, err
+		}
+		kind := "idle_in_transaction"
+		detail := fmt.Sprintf("会话 %d 已 idle in transaction %d 秒；ACCESS EXCLUSIVE 锁会被它挡住", pid, secs2)
+		if waitType == "Lock" {
+			kind = "lock_wait"
+			detail = fmt.Sprintf("会话 %d 正在等锁 %d 秒；再执行拿锁的 DDL 会让队列更长", pid, secs2)
+		}
+		out = append(out, model.Blocker{
+			Kind: kind, Session: fmt.Sprintf("pid %d", pid), Detail: detail, Seconds: secs2,
+		})
+	}
+	return out, rows.Err()
 }

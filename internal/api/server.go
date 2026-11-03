@@ -810,6 +810,11 @@ func (s *Server) handleSchemaPlan(w http.ResponseWriter, r *http.Request) {
 		Columns: req.Columns, PrimaryKey: req.PrimaryKey, Index: req.Index,
 		ForeignKey: req.ForeignKey,
 	})
+	if errors.Is(err, service.ErrLockWait) {
+		writeError(w, http.StatusConflict, "LOCK_WAIT_BLOCKED", "connection",
+			err.Error(), "先处理等锁的会话（结束长事务或 kill 掉），再重新生成预案", false)
+		return
+	}
 	if errors.Is(err, service.ErrDependencyBlocked) {
 		writeError(w, http.StatusConflict, "DEPENDENCY_BLOCKED", "policy",
 			err.Error(), "先删掉引用它的视图或外键，再删这个对象", false)

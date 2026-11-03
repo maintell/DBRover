@@ -400,6 +400,7 @@ POST /connections
 | `NARROWING_BLOCKED` | constraint | 409 | 改列类型会截断现存数据 |
 | `FK_PRECHECK_BLOCKED` | constraint | 409 | 有孤儿数据或父表列不唯一，加外键会失败（带样本） |
 | `DEPENDENCY_BLOCKED` | policy | 409 | 目标仍被视图或入向外键引用，删除会打断它们（提示里列出引用方，近似结果带标记） |
+| `LOCK_WAIT_BLOCKED` | connection | 409 | 已有会话在等锁，此时执行拿锁的 DDL 只会让队列更长 |
 | `DUPLICATE_ROWS` | constraint | 409 | 唯一索引预检发现重复值 |
 | `BULK_CONFIRM_TABLE_REQUIRED` | policy | 428 | 无条件批量修改需回填表名 |
 | `BULK_NO_ROLLBACK_ACK` | policy | 428 | 影响行数超过回滚上限，需显式接受 |

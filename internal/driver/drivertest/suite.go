@@ -48,7 +48,62 @@ func Run(t *testing.T, cfg Config) {
 	t.Run("ReadOnlyRejectsWrite", func(t *testing.T) { testReadOnlyRejectsWrite(t, cfg) })
 	t.Run("DescribeMissingObjectErrors", func(t *testing.T) { testDescribeMissingObject(t, cfg) })
 	t.Run("DependentsReported", func(t *testing.T) { testDependents(t, cfg) })
+	t.Run("BlockersReported", func(t *testing.T) { testBlockers(t, cfg) })
 	t.Run("DDLRoundTrip", func(t *testing.T) { testDDLRoundTrip(t, cfg) })
+}
+
+// testBlockers 锁住「预执行检查能看到我们自己开着的事务」。
+//
+// 为什么必须测：这条决定了高风险 DDL 会不会在「有人开着事务」的库上
+// 一路绿灯。断言方式是自己开一个事务待在里面，再从另一条连接查——比断言
+// 「返回空」有意义得多，后者在实现完全没写时也能通过。
+func testBlockers(t *testing.T, cfg Config) {
+	if cfg.Engine == model.EngineSQLite {
+		// SQLite 是单写者模型：写事务会直接 SQLITE_BUSY，不存在「长事务卡住 DDL」。
+		t.Skip("SQLite 没有长事务概念，Blockers 恒为空")
+	}
+
+	ctx := context.Background()
+	// 只用一个连接器：套件给每个连接器分配的是独立数据库（PostgreSQL），
+	// 两个连接器之间互相看不见对方的事务。同一个连接器的池里有多条物理连接，
+	// 占住一条开事务，Blockers 走另一条去查，才是「同一库里有人开着事务」。
+	c := open(t, cfg, false)
+	hs := session(t, c)
+
+	// 先确保有一张表可读——MySQL 的 innodb_trx 只登记碰过 InnoDB 表的事务。
+	mustExec(t, hs, "CREATE TABLE IF NOT EXISTS dbv_blocker_probe (id INT NOT NULL PRIMARY KEY)")
+	mustExec(t, hs, "DELETE FROM dbv_blocker_probe")
+	mustExec(t, hs, "INSERT INTO dbv_blocker_probe (id) VALUES (1)")
+
+	if err := hs.Begin(ctx); err != nil {
+		t.Fatalf("Begin: %v", err)
+	}
+	// 事务里读一次，确保它真的登记到引擎侧。
+	if _, err := hs.Execute(ctx, "SELECT id FROM dbv_blocker_probe", nil); err != nil {
+		t.Fatalf("事务内查询: %v", err)
+	}
+
+	// 等一会儿让「已经持续」超过阈值，再从池里另一条连接看。
+	time.Sleep(1200 * time.Millisecond)
+
+	blockers, err := c.Meta().Blockers(ctx, time.Second)
+	if err != nil {
+		t.Fatalf("Blockers: %v", err)
+	}
+	if len(blockers) == 0 {
+		t.Fatalf("自己在同一连接池的另一条连接里开着事务，Blockers 却什么都没报；"+
+			"这条检查形同虚设（引擎 %s）", cfg.Engine)
+	}
+	for _, b := range blockers {
+		if b.Detail == "" {
+			t.Errorf("Blockers 项缺少说明: %+v", b)
+		}
+		if b.Kind != "idle_in_transaction" && b.Kind != "lock_wait" {
+			t.Errorf("未知的 Kind: %q", b.Kind)
+		}
+	}
+
+	_ = hs.Rollback(ctx)
 }
 
 // testDependents 锁住「删除前的依赖查询」：造一张父表、一张引用它的子表、

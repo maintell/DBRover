@@ -561,6 +561,10 @@ func (e *Executor) BuildDDLPlan(ctx context.Context, req DDLRequest) (*ChangePla
 		return nil, fmt.Errorf("%w: 不支持的动作 %q", ErrInvalidDDL, req.Action)
 	}
 
+	// 预执行检查放在最后：此时语句已定，检查失败就直接作废这张预案。
+	if err := e.checkBlockers(ctx, plan); err != nil {
+		return nil, err
+	}
 	// 引擎的 DDL 在隐式提交时不参与事务，回滚语句只是补偿。
 	e.finishDDLPlan(plan)
 	return plan, nil
@@ -792,6 +796,55 @@ func (e *Executor) recreateTableSQL(table string, td *model.TableDetail) string 
 		cols = append(cols, "PRIMARY KEY ("+strings.Join(e.quoteAll(pk), ", ")+")")
 	}
 	return "CREATE TABLE " + table + " (" + strings.Join(cols, ", ") + ")"
+}
+
+// ErrLockWait 表示当前已经有会话在等锁，此时不该再执行拿锁的 DDL。
+var ErrLockWait = errors.New("当前有会话在等锁，先处理锁等待再执行结构变更")
+
+// longTransactionThreshold 是「多久算长事务」。60 秒：低于它的写事务在正常
+// 业务里很常见，拿它去提示只会变成噪音。
+const longTransactionThreshold = 60 * time.Second
+
+// checkBlockers 做预执行检查：长事务只提示，锁等待才阻断。
+//
+// 这条不对称是刻意的：忙碌的库上永远有人开着事务，用长事务阻断会让工具
+// 完全没法用；而「已经有人在等锁」说明再上一条拿锁的 DDL 只会让队列更长，
+// 那种情况下不该假装一切正常。
+func (e *Executor) checkBlockers(ctx context.Context, plan *ChangePlan) error {
+	blockers, err := e.conn.Meta().Blockers(ctx, longTransactionThreshold)
+	if err != nil {
+		// 查不到就不检查：元数据查询失败不该变成「不让你改结构」。
+		return nil
+	}
+	waits, notes := splitBlockers(blockers, 3)
+	for _, n := range notes {
+		plan.Notes = append(plan.Notes, "执行前检查："+n)
+	}
+	if len(waits) > 0 {
+		return fmt.Errorf("%w：%s", ErrLockWait, strings.Join(waits, "；"))
+	}
+	return nil
+}
+
+// splitBlockers 把阻塞项拆成「阻断」与「提示」两堆。
+//
+// 单独提出来是为了让这条规则可以被单测直接验证——它是本模块里唯一一处
+// 「同样是阻塞项，有的挡有的不挡」的地方，写错了要么把工具锁死，要么形同虚设。
+func splitBlockers(blockers []model.Blocker, maxNotes int) (waits, notes []string) {
+	for _, b := range blockers {
+		if b.Kind == "lock_wait" {
+			waits = append(waits, b.Detail)
+			continue
+		}
+		if len(notes) >= maxNotes {
+			continue
+		}
+		notes = append(notes, b.Detail)
+	}
+	if len(blockers)-len(waits) > maxNotes {
+		notes = append(notes, fmt.Sprintf("另有 %d 个长事务未逐条列出", len(blockers)-len(waits)-maxNotes))
+	}
+	return waits, notes
 }
 
 // finishDDLPlan 补上风险、摩擦与回滚语义。// 结构变更与数据变更共用同一套分级：不因为「是 DDL」就给个特例等级。

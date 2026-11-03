@@ -115,13 +115,21 @@ ChangePlan
 
 ### 2.5 预执行检查（Preconditions）
 
-执行前逐条校验，任一失败则阻断：
+生成预案时逐条校验。**阻断与提示的边界是刻意划的**：能确定「现在做会更糟」的才阻断，其余提示——否则工具会在忙碌的库上完全没法用。
 
-- 对象仍存在且定义未变（比对 `DDL` 的哈希）→ 防止「我看着旧的改，别人已经改了」。
-- 无长事务（超过阈值）→ MySQL/PG 会因此阻塞。
-- 无活跃的 DDL（`metadata_lock` / `MDL`）。
-- 磁盘空间充足（估算体积 × 2.5）。
-- 外键相关表无孤儿数据（加外键前）。
+| 检查 | 手段 | 不通过时 |
+|---|---|---|
+| 对象仍存在且定义未变 | 比对 `DDL` 的哈希；建表要求「执行时表仍不存在」 | **阻断**（`409 SCHEMA_CHANGED`） |
+| 外键相关表无孤儿数据 | `PrecheckForeignKey`（加外键前） | **阻断**（`409 FK_PRECHECK_BLOCKED` 带样本） |
+| 唯一索引前无重复值 | `probeDuplicates` | **阻断**（`409 DUPLICATE_ROWS` 带样本） |
+| 收窄类型不丢数据 | `probeNarrowing` | **阻断**（`409 NARROWING_BLOCKED` 带样本） |
+| 目标不再被引用 | `Metadata.Dependents`（删表/删列前） | **阻断**（`409 DEPENDENCY_BLOCKED`，列出引用方） |
+| 无人在等锁 | `Metadata.Blockers`：`lock_wait` 类 | **阻断**（`409 LOCK_WAIT_BLOCKED`）——已经有人在排队，再上一条拿锁的 DDL 只会让队列更长 |
+| 无长事务 | `Metadata.Blockers`：`idle_in_transaction` 类（阈值 60 秒） | **只提示**（写进预案 `notes`，最多 3 条）。忙碌的库上永远有人开着事务，用它阻断等于关掉整个结构设计器 |
+| 无活跃 DDL / MDL | 未做：MySQL 5.7 没有 `performance_schema.metadata_locks`，做不了就如实写在这里 | — |
+| 磁盘空间充足 | 未做 | — |
+
+**SQLite 不参与这两项**：单写者模型，写事务直接 `SQLITE_BUSY`，不存在「长事务卡住 DDL」，`Blockers` 恒为空（drivertest 明确 skip，而不是假装测过）。
 
 ---
 
@@ -273,6 +281,8 @@ SELECT COUNT(*) FROM t WHERE c > 2147483647 OR c < -2147483648;
 | 加外键 | §1.1 / 验收 5 | `action` 为 `add_foreign_key`；生成预案前**先跑与预检端点同一套检查**（孤儿数据 + 父表列唯一性），不通过即 `ErrForeignKeyBlocked` → 409 `FK_PRECHECK_BLOCKED` 并带样本；动作子句走白名单（CASCADE / RESTRICT / NO ACTION / SET NULL），`SET NULL` 撞上 NOT NULL 引用列时提前拒绝；名字为空按 `fk_<表>_<列>` 生成（回滚要靠它摘约束，不能是随机名）；回滚是 `ALTER TABLE … DROP` 约束，不动数据 | `TestValidateFKShape`、`TestDefaultFKName`、`TestDDLAddForeignKeyNeedsCapability`、`TestSchemaPlanAddForeignKeyNeedsCapability`、`TestDDLAddForeignKeyOnRealEngines`（MySQL 5.7 + PG 17：孤儿阻断带样本 → 清数据后出预案 → 执行 → 结构里出现外键 → 回滚摘掉） |
 | 删表 + 依赖阻断 | §5.1 / 验收 8 | `action` 为 `drop_table`：生成预案前先查依赖，被视图或入向外键引用即 `409 DEPENDENCY_BLOCKED` 并列出引用方（近似结果带「可能误报」标注）；删表必然不可逆，回滚语句只是把空表建回来，预案里明说「数据不会回来」 | `TestDDLDropTableBlockedByView`、`TestDDLDropColumnBlockedByForeignKey`、`TestSchemaPlanDropTableBlockedByDependency`、`drivertest` 的 `DependentsReported`（三引擎）、`scripts/accept/deps-drop.ps1`（MySQL 5.7 + PG 17 真机：外键 + 视图双阻断 → 拆掉后出预案 → 执行 → 表消失） |
 | 删列的外键阻断 | §5.1 | 删列前查入向外键；引用该列即阻断并点名引用方（外键依赖是精确的，不标近似）；视图依赖只写进 `notes` 提示自查 | `TestDDLDropColumnBlockedByForeignKey` |
+| 预执行检查：长事务与锁等待 | §2.5 / 验收 11 | `Metadata.Blockers`：MySQL 走 `innodb_trx`（超 60 秒的事务）+ `innodb_lock_waits`；PG 走 `pg_stat_activity`（`idle in transaction` 与 `wait_event_type='Lock'`）；SQLite 恒为空（单写者模型）。**锁等待阻断**（`409 LOCK_WAIT_BLOCKED`），**长事务只写进 `notes`**（最多 3 条）——忙碌的库上永远有人开着事务，用它阻断等于关掉整个设计器 | `drivertest` 的 `BlockersReported`（自己开一个事务再从另一条连接查，断言必须报出来；SQLite 明确 skip）、`TestSchemaPlan*` 系列不回归 |
+| 预执行检查：元数据锁（MDL） | §2.5 / 验收 11 | 未做：MySQL 5.7 没有 `performance_schema.metadata_locks`，做不了就不假装能做 | 待有 MySQL 8 实测环境后再补 |
 | 外键预检（只读） | §5.1 / §5.2 / 验收 5 | `POST /connections/{id}/fk/precheck`：检出子表里父表找不到对应行的数据（任一子列为 NULL 不计），判断父表参与列是否唯一（主键或**列集合完全一致**的唯一索引），orphans>0 即 `blocked` 并给最多 5 条样本 | `TestFKPrecheckCleanData`、`TestFKPrecheckOrphansBlocked`、`TestFKPrecheckCompositeUniqueness`、`TestFKPrecheckEndpoint` |
 | 删列的影响面 | §5.2 | 展示该列**非空行数**（`COUNT(*) WHERE col IS NOT NULL`），并标 `不可逆`；NULL 行不计入 | 浏览器实测（3 行有值 → 显示「影响 3 行」） |
 | 加列可撤销 | §2.6 | 撤销预案 = `DROP COLUMN`，复用撤销通道；删列因数据丢失不生成撤销 | 浏览器实测（加列后撤销，结构与 DDL 复原） |
@@ -285,7 +295,7 @@ SELECT COUNT(*) FROM t WHERE c > 2147483647 OR c < -2147483648;
 | 检查约束的 DDL | §1.1 / §5.2 | 既没有加检查约束的动作，结构比对也不比它（`TableDetail.Checks` 已由驱动填充，只是没被用起来） | 待实现；加检查约束要先做「存量行是否满足表达式」的预检，否则和孤儿数据是同一类问题 |
 | 视图 / 物化视图 / 例程 / 触发器 / 序列 / 用户类型设计器 | §1.1、§6 | 全部缺失 | 待实现 |
 | 引擎特有项（`EngineExtra`）表单 | §1.3 | 未渲染，仅能看 DDL 原文 | 待实现；依赖各引擎补充元数据 |
-| 预执行检查（长事务 / MDL / 磁盘 / 孤儿数据） | §2.5 / 验收 5、11 | 已做「定义哈希」与「外键孤儿数据」两项；长事务、MDL、磁盘余量未探测 | 待实现；需要各引擎的会话/元数据锁查询 |
+| 磁盘余量探测 | §2.5 | 未做：DDL 前不检查可用空间，大表重建可能把磁盘写满 | 待实现；需要各引擎的库体积与所在卷余量 |
 | 类型收窄预检与样本行 | §5.2 / 验收 7 | 改类型未做，故也没有越界检查 | 待实现 |
 | 例程依赖检查 | §5.1 | 只查视图与外键；存储过程/函数体里引用目标对象查不出来 | 待实现；文本搜索例程体误报率太高，加之前要先想清楚怎么标注 |
 | 结构比对的完整形态 | §4 / 验收 9 | 已比表、列、索引、外键、检查约束；尚未比视图定义与例程；回退脚本覆盖索引与外键，删表/删列/改类型与检查约束仍不生成 | 待实现；视图定义比对要做归一化（引擎各自的 `CREATE VIEW` 文本差异太大） |
@@ -293,6 +303,6 @@ SELECT COUNT(*) FROM t WHERE c > 2147483647 OR c < -2147483648;
 
 ### 8.3 验收清单状态
 
-已过：1（预览）、3（MySQL 警示）、4（建索引时按引擎给出在线变更建议，并说明 `CONCURRENTLY` 不能在事务里跑）、5（加外键前检测孤儿并阻断，含样本；MySQL/PG 真机跑通「阻断 → 出预案 → 执行 → 结构出现 → 回滚摘掉」）、6（唯一索引前查重复值并阻断，含样本）、7（收窄预检 + 样本）、8（删表/删列前查依赖并阻断，引用方点名，MySQL/PG 真机验证）、10（定义变更阻断）。
-未过：2（MSSQL/Oracle 未实现，无法 5 引擎回放）、11（长事务/MDL 探测）、12（手写 SQL 模式）；9（结构比对）部分过：表/列/索引/外键/检查约束都已比，升级与回退脚本覆盖索引与外键，但删表/删列/改类型与检查约束不生成回退脚本，视图定义与例程尚未比对。
+已过：1（预览）、3（MySQL 警示）、4（建索引时按引擎给出在线变更建议，并说明 `CONCURRENTLY` 不能在事务里跑）、5（加外键前检测孤儿并阻断，含样本；MySQL/PG 真机跑通「阻断 → 出预案 → 执行 → 结构出现 → 回滚摘掉」）、6（唯一索引前查重复值并阻断，含样本）、7（收窄预检 + 样本）、8（删表/删列前查依赖并阻断，引用方点名，MySQL/PG 真机验证）、10（定义变更阻断）、11（长事务与锁等待探测：锁等待阻断、长事务只提示，drivertest 用「自己开着事务」验证）。
+未过：2（MSSQL/Oracle 未实现，无法 5 引擎回放）、11 的 MDL 部分（MySQL 5.7 无 metadata_locks）、12（手写 SQL 模式）；9（结构比对）部分过：表/列/索引/外键/检查约束都已比，升级与回退脚本覆盖索引与外键，但删表/删列/改类型与检查约束不生成回退脚本，视图定义与例程尚未比对。
 

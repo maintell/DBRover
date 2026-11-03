@@ -33,6 +33,22 @@ type Dependent struct {
 	Exact bool `json:"exact"`
 }
 
+// Blocker 是「可能让 DDL 卡住」的一个会话。
+//
+// 两种性质必须分开：idle_in_transaction 只是「有人开着事务没提交」，
+// 在忙碌的库上永远存在，用它阻断会让工具完全不可用；lock_wait 是
+// 「已经有人被锁住了」，此时再上一条会拿锁的 DDL 只会让队列更长。
+type Blocker struct {
+	// Kind 是类型：idle_in_transaction | lock_wait。
+	Kind string `json:"kind"`
+	// Session 是会话/事务标识（各引擎不同，只用于定位，不保证可跨引擎理解）。
+	Session string `json:"session,omitempty"`
+	// Detail 是给人看的一句话。
+	Detail string `json:"detail"`
+	// Seconds 是已经持续的秒数；未知时为 0。
+	Seconds int64 `json:"seconds,omitempty"`
+}
+
 // Column 是中立列描述。Type.Raw 保留引擎原始类型串。
 type Column struct {
 	Name        string     `json:"name"`

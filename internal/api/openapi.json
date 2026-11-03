@@ -293,7 +293,7 @@
         "responses": {
           "201": { "description": "预案已生成（语句 / 回滚 / 风险 / 摩擦 / 不可逆标记）" },
           "400": { "description": "参数不合法（INVALID_COLUMN）或生成失败（SCHEMA_PLAN_FAILED）；引擎不支持该动作也走 400（例如 SQLite 的 alter_column_type 与 add_foreign_key）" },
-          "409": { "description": "收窄预检不通过（NARROWING_BLOCKED）、唯一索引前发现重复值（DUPLICATE_ROWS）、外键预检不通过（FK_PRECHECK_BLOCKED：有孤儿数据或父表列不唯一，带样本），或目标仍被引用（DEPENDENCY_BLOCKED：被视图或入向外键引用，提示里带近似标记）" },
+          "409": { "description": "收窄预检不通过（NARROWING_BLOCKED）、唯一索引前发现重复值（DUPLICATE_ROWS）、外键预检不通过（FK_PRECHECK_BLOCKED：有孤儿数据或父表列不唯一，带样本），目标仍被引用（DEPENDENCY_BLOCKED：被视图或入向外键引用，提示里带近似标记），或已有会话在等锁（LOCK_WAIT_BLOCKED：长事务只写进 notes，锁等待才阻断）" },
           "404": { "description": "连接不存在" }
         }
       }

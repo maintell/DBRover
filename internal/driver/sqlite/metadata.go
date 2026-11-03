@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/maintell/DBRover/internal/driver"
 	"github.com/maintell/DBRover/internal/driver/dialect"
@@ -497,4 +498,13 @@ func (c *Connector) Dependents(ctx context.Context, ref model.ObjectRef) ([]mode
 		}
 	}
 	return out, nil
+}
+
+// Blockers 在 SQLite 上恒为空。
+//
+// SQLite 是单写者模型：写事务期间其他写会直接收到 SQLITE_BUSY，
+// 不存在「某个会话开着事务把 DDL 卡住」这回事，也就没有可探测的东西。
+// 返回空列表而不是错误——这是「没事」，不是「查不了」。
+func (c *Connector) Blockers(ctx context.Context, threshold time.Duration) ([]model.Blocker, error) {
+	return nil, nil
 }

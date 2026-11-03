@@ -156,6 +156,13 @@ type Metadata interface {
 	// ref 不存在时返回空列表而不是错误：删除一个已经被别人删掉的对象，
 	// 不该因为依赖查询失败而变成一个看不懂的报错。
 	Dependents(ctx context.Context, ref model.ObjectRef) ([]model.Dependent, error)
+	// Blockers 返回可能让 DDL 卡住的会话（长事务、以及已经在等锁的会话）。
+	//
+	// threshold 是「多久算长」。实现要分清两种性质，调用方据此决定提示还是阻断：
+	// idle_in_transaction 在忙碌的库上永远存在，只该提示；lock_wait 说明已经
+	// 有人在等锁，再上一条拿锁的 DDL 只会让队列更长。
+	// 不支持会话观察的引擎返回空列表即可，不要返回错误。
+	Blockers(ctx context.Context, threshold time.Duration) ([]model.Blocker, error)
 }
 
 // Session 是一条逻辑会话。事务进行中时，后续语句必须落在同一条物理连接上。
