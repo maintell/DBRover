@@ -130,6 +130,8 @@ DBRover 面向同时维护多种数据库的工程师：一个人可能上午在
 > 跨引擎差异的写法约定见 [ADR-0005](docs/adr/0005-engine-differences-as-capabilities.md)：能力有无进 `Capabilities`，语句文本归 `dialect`，其余位置不得判断引擎名。
 >
 > 删除前的依赖查询放在驱动层，精确与近似的边界由驱动自己标注（`Dependent.Exact`），见 [ADR-0006](docs/adr/0006-dependency-check-in-driver.md)。
+>
+> 非关系型引擎（Redis / Mongo / ES）不实现 `Connector`/`Metadata`，另用 `KVConnector` 一族接口，`api` 靠类型断言而不是引擎名选路径，见 [ADR-0007](docs/adr/0007-nosql-connector-model.md)。
 
 **尚未实现**：React 前端、SQL Server / Oracle / Redis / MongoDB / Elasticsearch 连接器、AI Agent、索引与外键管理、结构比对、备份迁移、监控面板。
 

@@ -79,7 +79,32 @@ type MetadataProvider interface {
 
 这条不是洁癖：`PRAGMA table_info`、`information_schema`、`pg_catalog` 对不存在的表都只是「查不到行」而不报错，一不小心就会把「表不存在」说成「表没有列」。上层会据此给出误导性提示（例如把建表失败说成「没有主键，无法编辑」），API 也会对已删除的表返回 200 空结构。由 `drivertest` 的 `DescribeMissingObjectErrors` 用例锁住。
 
-### 2.3 可选能力（用能力接口 + 类型断言）
+### 2.3 非关系型引擎：另一族接口
+
+Redis / Mongo / ES **不实现**上面的 `Connector` 与 `MetadataProvider`。它们没有「表 / 列 / SQL」这套语义，硬套只会得到一堆永远返空的实现，让上层误判能力存在（详细论证与备选方案见 [ADR-0007](adr/0007-nosql-connector-model.md)）。
+
+```go
+// KVConnector 由 key-value 引擎实现。独立接口，不实现 Connector。
+type KVConnector interface {
+    Engine() model.Engine
+    Capabilities() model.Capabilities
+    Open(ctx context.Context, cfg ConnectConfig) error
+    Close() error
+    Health(ctx context.Context) (*HealthInfo, error)
+
+    Scan(ctx context.Context, opt KVScanOptions) (*KVPage, error)      // 禁止实现成 KEYS
+    Inspect(ctx context.Context, key string) (*KVEntry, error)
+    Value(ctx context.Context, key string, opt KVValueOptions) (*KVValue, error)
+    Mutate(ctx context.Context, op KVMutation) (*KVResult, error)
+    Command(ctx context.Context, name string, args []any) (*KVResult, error)
+}
+```
+
+**用哪个接口由类型断言决定，不由引擎名判断**：`api` 里 `if kv, ok := e.drv.(driver.KVConnector); ok { … }`。这与 ADR-0005 同一条原则——新增 NoSQL 引擎时 `api` 一行都不用改。
+
+写路径复用同一套执行门、审计与摩擦分级，但**命令风险表分开**：Redis 命令没有语句结构，不能过 `dialect` 分级（表见 ADR-0007 §3，不在表里的命令按 `R4` 处理）。
+
+### 2.4 可选能力（用能力接口 + 类型断言）
 
 ```go
 type MonitorProvider interface {
@@ -374,18 +399,30 @@ type Dialect interface {
 
 ### 5.6 Redis
 
-- 不是 SQL 引擎：编辑器需「命令模式」，带命令与参数的结构化校验。
-- 集群模式（Cluster）下：
-  - `KEYS` 不可用 → 只能 `SCAN`（且需逐节点扫描）。
-  - 多 key 命令要求同 slot（`{tag}` hash tag）。
-  - db index 只有 0。
+模型与分层见 [ADR-0007](adr/0007-nosql-connector-model.md)：Redis **不实现** `Connector`/`Metadata`，改用独立的 `driver.KVConnector`；`api` 通过类型断言选择路径，不判断引擎名。
+
+**能力契约（第一版范围）**
+
+| 做什么 | 怎么触发 | 失败与降级 | 验收 |
+|---|---|---|---|
+| 浏览 keyspace | `GET /connections/{id}/kv/keys?cursor&pattern&type&count`，界面左侧对象树 | 游标遍历超时 → 返回已取到的部分 + `has_more: true`，**不假装取完** | 10 万 key 的库能连续翻页到结束，不漏不重 |
+| 看一个 key | `GET /kv/keys/{key}` → 类型 / TTL / 编码 / 元素数 / 体积 | `MEMORY USAGE` 超时 → 只给类型与元素数，体积字段为 `null`，不猜 | 六种内建类型都能返回正确类型与 TTL |
+| 读值 | `GET /kv/keys/{key}/value?cursor&count`，按类型分页（`HSCAN`/`SSCAN`/`ZRANGE`/`XRANGE`/`GETRANGE`） | string 超过 8 KB 默认只取前 8 KB 并标 `truncated: true` | 500 MB 的 string 不会整取；大 hash 能翻页 |
+| 改值 | `POST /kv/apply`，走与 SQL 同构的 Plan/Apply | 摩擦 ≥ F2 要审批凭证；**预案里必须写明 Redis 多命令不保证回滚** | 只读连接上的写在执行门被拒；生产环境改写要审批 |
+| 命令模式 | `POST /kv/command`，结构化「命令 + 参数」 | 命令不在白名单 → 按 `R4` 处理并要求审批；`KEYS` 与 `DEBUG` 直接拒绝并说明替代方案 | `FLUSHALL` 需要审批；`KEYS *` 被拒并提示 `SCAN` |
+
+**实现约束**
+
+- 不是 SQL 引擎：编辑器需「命令模式」，带命令与参数的结构化校验（不做自由文本解析）。
+- 集群模式（Cluster）下：`KEYS` 不可用 → 只能 `SCAN`（且需逐节点扫描）；多 key 命令要求同 slot（`{tag}` hash tag）；db index 只有 0。**第一版不支持集群**，检测到集群时 `Health` 给 `Warnings` 并在 UI 标注「集群未验证」，连接照常可用。
 - 16 个逻辑库仅非集群模式；`SELECT` 切换。
-- 类型化编辑器：`string` / `hash` / `list` / `set` / `zset` / `stream` / `bitmap` / `hyperloglog` / `geo` / `module`。每种有不同的读写语义与分页方式（`HSCAN` / `SSCAN` / `ZRANGE` / `XRANGE`）。
+- 类型化编辑器：第一版做 `string` / `hash` / `list` / `set` / `zset` / `stream` 六种内建类型。`bitmap` / `hyperloglog` / `geo` / `module` 暂按 binary 或只读展示。
 - 大 key 检测：`MEMORY USAGE`（可能阻塞，需限流）+ `STRLEN`/`HLEN`/`LLEN`/`SCARD`/`ZCARD`/`XLEN`。
 - 慢日志：`SLOWLOG GET n`；`SLOWLOG LEN` 先探测。
 - 会话：`CLIENT LIST` 解析（7.0+ 有 `CLIENT LIST TYPE`），Kill 用 `CLIENT KILL ID <id>`。
 - 值预览要限长：一个 500MB 的 string 不能整取，默认 `GETRANGE 0 8191`。
 - `DEBUG` 系列命令默认禁用（危险）。
+- 命令风险分级见 ADR-0007 §3：**不在表里的命令一律按 `R4` 处理**并与 SQL 侧同一条原则（未知即最危险）。
 
 ### 5.7 MongoDB
 
