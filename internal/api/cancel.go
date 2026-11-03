@@ -118,10 +118,12 @@ func (s *Server) handleAuditVerify(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"supported": true,
-		"ok":        res.OK,
-		"events":    res.Events,
-		"broken_at": res.BrokenAt,
-		"reason":    res.Reason,
+		"supported":      true,
+		"ok":             res.OK,
+		"events":         res.Events,
+		"broken_at":      res.BrokenAt,
+		"reason":         res.Reason,
+		"anchor_checked": res.AnchorChecked,
+		"anchor_ok":      res.AnchorOK,
 	})
 }

@@ -2,6 +2,8 @@ package main
 
 import (
 	"bufio"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"flag"
 	"fmt"
@@ -96,4 +98,37 @@ func readSecretFromStdin() (string, error) {
 		return "", errors.New("stdin 里没有内容；口令要按一行从标准输入传进来")
 	}
 	return v, nil
+}
+
+// anchorKey 取出（或首次生成）审计锚点用的密钥。
+//
+// 密钥存 OS 凭据库而不是文件：锚点的可信度全押在「伪造者拿不到密钥」上，
+// 把密钥和锚点放同一个目录等于没设防。
+//
+// 首次使用会生成一把并存进凭据库——这一步只在用户显式加了 -audit-anchor
+// 时发生，不会在默认启动路径上偷偷往凭据库里写东西。
+func anchorKey() ([]byte, error) {
+	const svc, acct = "dbrover/audit", "anchor-key"
+
+	v, err := secret.Load(svc, acct)
+	if err == nil && v != "" {
+		return []byte(v), nil
+	}
+	if err != nil && !errors.Is(err, secret.ErrNotFound) {
+		if errors.Is(err, secret.ErrUnsupported) {
+			return nil, fmt.Errorf("审计锚点需要系统凭据库存放密钥，当前平台不支持")
+		}
+		return nil, err
+	}
+
+	buf := make([]byte, 32)
+	if _, err := rand.Read(buf); err != nil {
+		return nil, fmt.Errorf("生成锚点密钥失败: %w", err)
+	}
+	hexKey := hex.EncodeToString(buf)
+	if err := secret.Store(svc, acct, hexKey); err != nil {
+		return nil, fmt.Errorf("锚点密钥存不进系统凭据库: %w", err)
+	}
+	fmt.Fprintf(os.Stderr, "已生成审计锚点密钥并存入系统凭据库：%s/%s\n", svc, acct)
+	return []byte(hexKey), nil
 }

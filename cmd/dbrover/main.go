@@ -81,7 +81,7 @@ func usage() {
   dbrover health -db <file> [-env ...] [-ro|-rw]
   dbrover tables -db <file> [-env ...] [-ro|-rw]
   dbrover exec   -db <file> (-sql "..." | -file <path>) [-env ...] [-ro|-rw] [-approve]
-  dbrover serve  [-addr 127.0.0.1:7788] [-token <token>] [-allow-remote] [-open]
+  dbrover serve  [-addr 127.0.0.1:7788] [-token <token>] [-allow-remote] [-open] [-audit <path>] [-audit-anchor <path>]
   dbrover tunnel -via user@hop1:22[,user@hop2:22] -to host:port (-password-stdin | -key <path>)
   dbrover secret (set|clear|status) [-service dbrover/agent] [-account api-key]  # 口令从 stdin 读
 
@@ -390,6 +390,7 @@ func cmdServe(args []string) error {
 	allowRemote := fs.Bool("allow-remote", false, "允许监听非回环地址")
 	openUI := fs.Bool("open", false, "启动后自动用默认浏览器打开界面（桌面用法的轻量形态）")
 	auditPath := fs.String("audit", "", "审计日志文件（JSONL 追加写；留空则只保留内存）")
+	anchorPath := fs.String("audit-anchor", "", "审计锚点文件（把链头封存到独立文件，防整段重写；密钥存系统凭据库）")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -399,6 +400,20 @@ func cmdServe(args []string) error {
 		return err
 	}
 	defer func() { _ = audit.Close() }()
+
+	// 锚点必须在 Serve 之前挂上：之后再挂，前面写的事件就没有锚点保护。
+	if *anchorPath != "" {
+		key, err := anchorKey()
+		if err != nil {
+			return err
+		}
+		a, err := service.OpenAnchor(*anchorPath, key)
+		if err != nil {
+			return err
+		}
+		audit.SetAnchor(a)
+		fmt.Fprintf(os.Stderr, "审计锚点: %s（每 %d 条封存一次链头）\n", *anchorPath, 100)
+	}
 
 	s := api.New(*token, openConnector, audit)
 	defer s.Close()

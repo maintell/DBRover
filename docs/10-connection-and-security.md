@@ -319,7 +319,11 @@ Statement
 
 能发现：改一条内容、删中间一条、插一条、把 `hash` 字段删掉。用例：`TestAuditChainVerifyOK`、`TestAuditChainDetectsTamper`、`TestAuditChainDetectsDeletedLine`、`TestAuditChainContinuesAfterRestart`，其中「删中间一条」用变异验证过——去掉连段校验该用例就红。
 
-**尚未实现**：外部锚点。也就是说，能发现「改了一行」，还不能发现「有管理员权限的人把整个文件重写成一条自洽的新链」。这需要定期把链头哈希发到外部系统，v1 不做。
+**本地锚点已实现**（`dbrover serve -audit <path> -audit-anchor <path>`）：每写 1 条（首条立即封）与每 100 条，把「当前条数 + 链头哈希」连同用 HMAC-SHA256 算出的 MAC 追加进锚点文件；MAC 的密钥存在系统凭据库（`dbrover/audit` / `anchor-key`，首次使用 `-audit-anchor` 时生成）。
+
+`GET /api/v1/audit/verify` 因此会多报两个字段：`anchor_checked` / `anchor_ok`。它能发现**整段重写**与**截断**——把审计文件换成一条自洽的新链时，链校验过得去，但条数与链头对不上锚点记录（用例 `TestAnchorDetectsFullRewrite`、`TestAnchorDetectsTruncation`，都做过变异验证）。
+
+**仍然挡不住的**：能同时改审计文件、锚点文件**并且**读到系统凭据库里那把密钥的人。锚点把攻击成本从「改一个文件」提高到「改两个文件 + 拿密钥」，但要真正防住本地管理员，需要把链头发到**另一台机器**（真正的外部锚点），v1 不做。
 
 > 一个实现上的前提：`Risk` / `Friction` 的 JSON 编解码必须对称（`"R1"` ↔ 1）。链校验是「读回来重算一遍哈希」，只要有一边不对称，任何文件都验不过——所以这两个类型补了 `UnmarshalJSON`。
 
@@ -379,7 +383,7 @@ Statement
 | 6 | 只读连接执行 `SELECT 1; DELETE FROM t` 只拒第二条 | 单测 |
 | 7 | 配置序列化、日志、审计三处均无明文密码 | 单测（CI 强制） | ✅ `TestNoPlaintextPassword`：带口令建连接后，`GET /connections`、`GET /audit`、审计文件三处原始字节都不含该口令；另外改口令类语句走真实 `record` 路径验证脱敏（`ALTER USER … IDENTIFIED BY '***'`），并用变异验证过——把 `RedactSQL` 去掉该用例立刻红。`TestRedactSQL` 覆盖 5 种引擎写法 |
 | 8 | 审批 A、执行 B 被拒绝（哈希不匹配） | 单测 |
-| 9 | 审计链被手工修改一行后可被检测 | 单测 | ✅ `TestAuditChainDetectsTamper`（改一行 → `broken_at` 指到该行）、`TestAuditChainDetectsDeletedLine`（删一行 → 接不上）、`TestAuditChainVerifyOK` / `TestAuditChainContinuesAfterRestart`（跨重启不断链）；端点 `GET /api/v1/audit/verify`，用例 `TestAuditVerifyRealLog`。**不防**整段重写，需外部锚点（未做） |
+| 9 | 审计链被手工修改一行后可被检测 | 单测 | ✅ `TestAuditChainDetectsTamper`（改一行 → `broken_at` 指到该行）、`TestAuditChainDetectsDeletedLine`（删一行 → 接不上）、`TestAuditChainVerifyOK` / `TestAuditChainContinuesAfterRestart`（跨重启不断链）；端点 `GET /api/v1/audit/verify`，用例 `TestAuditVerifyRealLog`。**整段重写与截断**由本地锚点覆盖：`TestAnchorDetectsFullRewrite`、`TestAnchorDetectsTruncation`（均含变异验证）、`TestAnchorSealAndVerify`、`TestAnchorRejectsWrongKey`、`TestAnchorRequiresKey`；真机端到端验过「正常 → anchor_ok=true」与「篡改 → ok=false」。**不防**能同时改两个文件并读到凭据库密钥的本地管理员（需真正的外部锚点，未做） |
 | 10 | 提示注入用例中 Agent 不执行注入指令 | 集成（端到端） |
 | 11 | 端口不对外监听（`netstat` 断言仅 127.0.0.1） | 集成 |
 | 12 | 生产连接在界面有醒目标识 | 手动 |

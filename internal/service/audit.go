@@ -52,7 +52,16 @@ type AuditLog struct {
 	path   string
 	// lastHash 是链上最后一条的哈希，新事件接着它算（docs/10 §6.2）。
 	lastHash string
+	// written 是已经写进文件的条数（含打开时已有的），锚点要靠它对准进度。
+	written int
+	// anchor 非空时，每写满一段就把链头封存一次（docs/10 §6.2「外部锚点」的本地形态）。
+	anchor *Anchor
 }
+
+// anchorEvery 是封存间隔：每写这么多条事件就锚一次。
+//
+// 太密会让锚点文件长得比审计还快，太稀则「被重写」的窗口变大。100 是个折中。
+const anchorEvery = 100
 
 // DefaultAuditRecent 是内存热区保留的条数。
 const DefaultAuditRecent = 500
@@ -80,8 +89,9 @@ func NewAuditLog(path string, recentLimit int) (*AuditLog, error) {
 	l.f = f
 	// 接到已有链条的末尾：重启之后写的事件必须继续挂在上一条后面，
 	// 否则每次重启都会开一条新链，校验时必然报断点。
-	if h, err := lastHashInFile(path); err == nil {
+	if h, n, err := lastHashInFile(path); err == nil {
 		l.lastHash = h
+		l.written = n
 	}
 	return l, nil
 }
@@ -90,14 +100,15 @@ func NewAuditLog(path string, recentLimit int) (*AuditLog, error) {
 //
 // 顺序读整个文件：审计是追加写的，正常情况下几 MB 就很大了；真到需要优化时
 // 再改成从尾部反向读。
-func lastHashInFile(path string) (string, error) {
+func lastHashInFile(path string) (string, int, error) {
 	f, err := os.Open(path)
 	if err != nil {
-		return "", err
+		return "", 0, err
 	}
 	defer func() { _ = f.Close() }()
 
 	var last string
+	n := 0
 	sc := bufio.NewScanner(f)
 	sc.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
 	for sc.Scan() {
@@ -105,12 +116,13 @@ func lastHashInFile(path string) (string, error) {
 		if len(line) == 0 {
 			continue
 		}
+		n++
 		var ev AuditEvent
 		if err := json.Unmarshal(line, &ev); err == nil && ev.Hash != "" {
 			last = ev.Hash
 		}
 	}
-	return last, sc.Err()
+	return last, n, sc.Err()
 }
 
 // Record 追加一条事件。写盘失败不会向上传播——审计失败不应阻断业务，
@@ -124,6 +136,7 @@ func (l *AuditLog) Record(ev AuditEvent) {
 	ev.Hash = hashAuditEvent(ev)
 	l.lastHash = ev.Hash
 
+	l.written++
 	l.recent = append(l.recent, ev)
 	if len(l.recent) > l.limit {
 		drop := len(l.recent) - l.limit
@@ -140,7 +153,26 @@ func (l *AuditLog) Record(ev AuditEvent) {
 	}
 	if _, err := l.f.Write(append(b, '\n')); err != nil {
 		fmt.Fprintf(os.Stderr, "审计写入失败: %v\n", err)
+		return
 	}
+	// 按间隔把链头封存到锚点：整段重写审计文件时，链再自洽也对不上这里的记录。
+	// 第一条也封：新库立刻就有基线，不用等攒够 anchorEvery 条。
+	// 否则刚启动就被整段重写的那段时间完全没有锚点保护。
+	if l.anchor != nil && (l.written == 1 || l.written%anchorEvery == 0) {
+		if err := l.anchor.Seal(l.written, ev.Hash); err != nil {
+			fmt.Fprintf(os.Stderr, "锚点封存失败: %v\n", err)
+		}
+	}
+}
+
+// SetAnchor 挂上锚点。为空表示不做锚定（默认）。
+//
+// 锚点要求调用方先从系统凭据库取到密钥：没有密钥的锚点挡不住任何人，
+// 所以宁可「配了但没有密钥就报错」，也不要在启动时悄悄生成一把明文密钥。
+func (l *AuditLog) SetAnchor(a *Anchor) {
+	l.mu.Lock()
+	l.anchor = a
+	l.mu.Unlock()
 }
 
 // Recent 返回内存热区里的事件。
@@ -161,6 +193,12 @@ func (l *AuditLog) Close() error {
 	defer l.mu.Unlock()
 	if l.f == nil {
 		return nil
+	}
+	// 关之前封存最后一次：否则最后不满 anchorEvery 的那一段没有锚点保护。
+	if l.anchor != nil && l.written > 0 {
+		if err := l.anchor.Seal(l.written, l.lastHash); err != nil {
+			fmt.Fprintf(os.Stderr, "锚点封存失败: %v\n", err)
+		}
 	}
 	err := l.f.Close()
 	l.f = nil
@@ -190,6 +228,9 @@ type VerifyResult struct {
 	// BrokenAt 是第一个出问题的行号（1 基）；0 表示没有断点。
 	BrokenAt int    `json:"broken_at,omitempty"`
 	Reason   string `json:"reason,omitempty"`
+	// AnchorChecked 表示这次校验有没有对照锚点；AnchorOK 是锚点的结论。
+	AnchorChecked bool `json:"anchor_checked,omitempty"`
+	AnchorOK      bool `json:"anchor_ok,omitempty"`
 }
 
 // Verify 校验审计文件的链式哈希。
@@ -243,7 +284,44 @@ func (l *AuditLog) Verify() (VerifyResult, error) {
 	if err := sc.Err(); err != nil {
 		return VerifyResult{}, err
 	}
-	return VerifyResult{OK: true, Events: line}, nil
+	res := VerifyResult{OK: true, Events: line}
+
+	// 链自洽还不够：整段重写过的文件同样自洽，只有锚点记得「当时有多少条、头是谁」。
+	if a := l.currentAnchor(); a != nil {
+		res.AnchorChecked = true
+		latest, err := a.Latest()
+		switch {
+		case err != nil:
+			res.OK, res.AnchorOK = false, false
+			res.Reason = err.Error()
+		case latest == nil:
+			// 还没封存过：不算失败，但要让人知道这次没被锚点保护。
+			res.AnchorOK = false
+			res.Reason = "锚点文件还没有记录，本次只校验了链条自洽"
+		case latest.Events != line || latest.Head != prev:
+			res.OK, res.AnchorOK = false, false
+			res.Reason = fmt.Sprintf(
+				"与锚点不一致：锚点记的是 %d 条、头 %s，实际 %d 条、头 %s（文件可能被整段重写或截断）",
+				latest.Events, shortHash(latest.Head), line, shortHash(prev))
+		default:
+			res.AnchorOK = true
+		}
+	}
+	return res, nil
+}
+
+func (l *AuditLog) currentAnchor() *Anchor {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.anchor
+}
+
+// shortHash 只取前 12 位：完整哈希在错误信息里没人看，还会把日志撑长。
+func shortHash(h string) string {
+	if len(h) <= 12 {
+		return h
+	}
+	return h[:12]
 }
 
 // itoa 是本地小工具，避免为了一个整数格式化再拉一个依赖。
