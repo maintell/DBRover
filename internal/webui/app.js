@@ -1040,8 +1040,8 @@ function renderCompare(res) {
     pre.textContent = lines.join('\n');
     wrap.appendChild(pre);
   };
-  addPre('升级脚本（左侧 → 右侧，仅增量）', res.upgrade);
-  addPre('回退脚本', res.downgrade);
+  addPre('升级脚本（左侧 → 右侧）', res.upgrade);
+  addPre('回退脚本（右侧 → 左侧）', res.downgrade);
 
   if ((res.need_review || []).length) {
     const h = document.createElement('div');
