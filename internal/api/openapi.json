@@ -219,7 +219,7 @@
     "/api/v1/connections/{id}/schema/plan": {
       "post": {
         "summary": "生成结构变更预案",
-        "description": "v1 支持 create_table / add_column / drop_column。执行走同一个 /changes/{pid}/apply；预案带表定义哈希（建表则要求执行时表仍不存在），变了就返回 409 SCHEMA_CHANGED。建表必须给主键。",
+        "description": "v1 支持 create_table / add_column / drop_column / alter_column_type。执行走同一个 /changes/{pid}/apply；预案带表定义哈希（建表则要求执行时表仍不存在），变了就返回 409 SCHEMA_CHANGED。建表必须给主键。改列类型前会做收窄预检，装不下现存数据返回 409 NARROWING_BLOCKED；SQLite 不支持原地改类型，返回 400。",
         "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "string" } }],
         "requestBody": {
           "required": true,
@@ -230,7 +230,7 @@
                 "required": ["table", "action"],
                 "properties": {
                   "table": { "type": "object" },
-                  "action": { "type": "string", "enum": ["create_table", "add_column", "drop_column"] },
+                  "action": { "type": "string", "enum": ["create_table", "add_column", "drop_column", "alter_column_type"] },
                   "column": {
                     "type": "object",
                     "required": ["name"],
@@ -251,6 +251,7 @@
         "responses": {
           "201": { "description": "预案已生成（语句 / 回滚 / 风险 / 摩擦 / 不可逆标记）" },
           "400": { "description": "参数不合法（INVALID_COLUMN）或生成失败（SCHEMA_PLAN_FAILED）" },
+          "409": { "description": "收窄预检不通过（NARROWING_BLOCKED）" },
           "404": { "description": "连接不存在" }
         }
       }

@@ -259,6 +259,7 @@ SELECT COUNT(*) FROM t WHERE c > 2147483647 OR c < -2147483648;
 | 结构变更走同一套 Plan/Apply | §2.1 / ADR-0003 | 预案含语句、回滚、风险（`policy` 分级）、摩擦、有效期；确认后才执行 | `TestSchemaLifecycle` |
 | 前置条件：定义未变 | §2.5 / 验收 10 | 预案带表定义哈希，执行前比对，变了返回 `409 SCHEMA_CHANGED` 并让前端重读结构；建表则要求「执行时表仍不存在」（`ExpectTableAbsent`），别人抢先建了就停下 | `TestDDLPlanSchemaChangedBlocks`、`TestDDLCreateTableBlocksWhenTableAppeared`、`TestDDLPlanOnRealEngines`（MySQL + PG） |
 | DDL 事务性差异 | §2.3 / 验收 3 | 由 `Capabilities().DDLTransactional` 声明，预案据此设 `rolls_back_as_compensation`；MySQL 上提示「隐式提交，补偿不是撤销」 | `TestDDLPlanOnRealEngines`（MySQL 补偿 / PG 真回滚） |
+| 改列类型 | §1.1 / §5.2 | `action` 为 `alter_column_type`；语句文本由 `Dialect.AlterColumnTypeSQL` 渲染（PG `ALTER COLUMN … TYPE`、MySQL `MODIFY COLUMN` 带完整列定义）；**生成预案前做收窄预检**，装不下现存数据即 `ErrNarrowingBlocked` 并给出样本 | `TestBoundsFor`、`TestDDLAlterColumnTypeOnRealEngines`（MySQL + PG）、浏览器实测（含拦截与放行两条路径） |
 | 删列的影响面 | §5.2 | 展示该列**非空行数**（`COUNT(*) WHERE col IS NOT NULL`），并标 `不可逆`；NULL 行不计入 | 浏览器实测（3 行有值 → 显示「影响 3 行」） |
 | 加列可撤销 | §2.6 | 撤销预案 = `DROP COLUMN`，复用撤销通道；删列因数据丢失不生成撤销 | 浏览器实测（加列后撤销，结构与 DDL 复原） |
 
@@ -266,7 +267,7 @@ SELECT COUNT(*) FROM t WHERE c > 2147483647 OR c < -2147483648;
 
 | 缺口 | 契约位置 | 影响 | 处置 |
 |---|---|---|---|
-| 改列类型 / 改默认值 / 改可空 | §1.1 | 只能建表、加列、删列；改类型需要收窄预检，不想做半成品 | 待实现；改类型须先做 §5.2 的越界数据预检 |
+| 改默认值 / 改可空 | §1.1 | 改列类型时会把原有的可空性与默认值一起保留，但还不能单独修改它们 | 待实现；改默认值涉及表达式白名单，改可空涉及 NOT NULL 预检 |
 | 索引 / 外键 / 检查约束管理 | §1.1 | 不能建索引、加外键；`Capabilities().Indexes` 已声明但无写入路径。注意 `DROP INDEX` 的语法跨引擎不同（MySQL 要 `ON table`），需要先在方言层声明而不是按引擎名判断 | 待实现；预计需要一份 ADR 记录「方言差异用能力/语法声明」 |
 | 视图 / 物化视图 / 例程 / 触发器 / 序列 / 用户类型设计器 | §1.1、§6 | 全部缺失 | 待实现 |
 | 引擎特有项（`EngineExtra`）表单 | §1.3 | 未渲染，仅能看 DDL 原文 | 待实现；依赖各引擎补充元数据 |
@@ -279,6 +280,6 @@ SELECT COUNT(*) FROM t WHERE c > 2147483647 OR c < -2147483648;
 
 ### 8.3 验收清单状态
 
-已过：1（预览）、3（MySQL 警示）、10（定义变更阻断）。
-未过：2（MSSQL/Oracle 未实现，无法 5 引擎回放）、4、5、6、7、8、9、11、12（原因见 §8.2）。
+已过：1（预览）、3（MySQL 警示）、7（收窄预检 + 样本，真实 MySQL 与 PG 双路径）、10（定义变更阻断）。
+未过：2（MSSQL/Oracle 未实现，无法 5 引擎回放）、4（在线变更建议）、5（外键孤儿数据）、6（唯一索引重复值）、8（依赖检查）、9（结构比对）、11（长事务探测）、12（手写 SQL 模式）。
 

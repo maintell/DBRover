@@ -222,6 +222,10 @@ type Capabilities struct {
 	KeysetPagination  bool `json:"keyset_pagination"`
 	// DDLTransactional 为 true 时 DDL 可真实回滚（PG / SQLite / 多数 MSSQL DDL）。
 	DDLTransactional bool `json:"ddl_transactional"`
+	// AlterColumnType 表示引擎支持原地修改列类型。
+	// SQLite 为 false：它只能重建表，因此上层必须给出明确拒绝而不是生成必然失败的语句。
+	// 见 ADR-0005：能力有无写进 Capabilities，语句文本差异归 dialect。
+	AlterColumnType bool `json:"alter_column_type"`
 }
 
 // Connection 是一个可复用的连接配置。它不持有物理连接。

@@ -108,24 +108,28 @@ DBRover 面向同时维护多种数据库的工程师：一个人可能上午在
 
 ## 5. 当前状态
 
-**阶段：M1 进行中**。安全内核与首个引擎闭环已可运行。
+**阶段：M2 部分完成**。查询、数据编辑、结构变更、导出都已可用；SQL Server 与 NoSQL 引擎未做。
 
 | 模块 | 状态 |
 |---|---|
 | `internal/model` | 领域模型、能力声明、环境严格度、元数据模型 |
-| `internal/driver/dialect` | 5 种 SQL 方言：词法、语句切分、指纹、分类、条件分析、标识符引用 |
+| `internal/driver/dialect` | 5 种 SQL 方言：词法、语句切分、指纹、分类、条件分析、标识符引用、改列类型语句渲染 |
 | `internal/policy` | 风险分级 `R0`–`R4`、摩擦分级 `F0`–`F5` |
 | `internal/driver` | Connector 契约 + `drivertest` 一致性套件 |
 | `internal/driver/sqlite` | SQLite 完整实现（元数据 / 查询 / 事务 / 只读强制） |
-| `internal/service` | 执行门：切分 → 分级 → 摩擦 → 审批 → 审计，整批原子拦截 |
-| `internal/api` | 回环 HTTP 服务：token 鉴权、连接管理、`exec`、流式游标、键集分页、审计查询、OpenAPI 契约 |
+| `internal/driver/mysql` | MySQL 完整实现（真实 5.7 实例验收） |
+| `internal/driver/pg` | PostgreSQL 完整实现（真实 17 实例验收，占位符词法级改写） |
+| `internal/service` | 执行门、变更集与变更预案、结构变更（建表/加列/删列/改列类型）、收窄预检、流式导出、游标与键集分页 |
+| `internal/api` | 回环 HTTP 服务：token 鉴权、连接管理、`exec`、流式游标、键集分页、变更预案、结构变更、导出、审计查询、OpenAPI 契约 |
 | `internal/infra/tunnel` | SSH 隧道与跳板链：多跳、密码/私钥/agent 认证、主机密钥 TOFU |
-| `internal/webui` | **临时界面**：免构建的内嵌 Web UI（连接、对象树、SQL、结果网格、审批弹窗） |
+| `internal/webui` | **临时界面**：免构建的内嵌 Web UI（连接、对象树、SQL、结果网格、字段编辑、筛选排序、结构变更、导出、审批弹窗） |
 | `cmd/dbrover` | CLI：`version` / `health` / `tables` / `exec` / `serve` / `tunnel` |
 
 > `internal/webui` 是为了「能点着验收」而做的最小实现，**不是最终前端**。最终前端仍是 [ADR-0001](docs/adr/0001-tech-stack.md) 规定的 React + TypeScript + Vite 栈；先做无构建版本是因为本机磁盘紧张，不装 node_modules。
 
-**尚未实现**：React 前端、PostgreSQL/MySQL/MSSQL/Oracle/NoSQL 连接器、AI Agent。
+> 跨引擎差异的写法约定见 [ADR-0005](docs/adr/0005-engine-differences-as-capabilities.md)：能力有无进 `Capabilities`，语句文本归 `dialect`，其余位置不得判断引擎名。
+
+**尚未实现**：React 前端、SQL Server / Oracle / Redis / MongoDB / Elasticsearch 连接器、AI Agent、索引与外键管理、结构比对、备份迁移、监控面板。
 
 ## 6. 快速开始
 

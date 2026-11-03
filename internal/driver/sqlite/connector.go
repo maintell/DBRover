@@ -58,6 +58,8 @@ func (c *Connector) Capabilities() model.Capabilities {
 		BulkLoad:          false,
 		KeysetPagination:  true,
 		DDLTransactional:  true,
+		// SQLite 不能改列类型，只能重建表。
+		AlterColumnType: false,
 	}
 }
 

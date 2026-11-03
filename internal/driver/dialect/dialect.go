@@ -58,6 +58,14 @@ type Dialect interface {
 	QuoteIdent(name string) string
 	QuoteQualified(parts ...string) string
 
+	// AlterColumnTypeSQL 返回「把某列改成新类型」所需的语句（可能不止一条）。
+	//
+	// defaultText 为空表示没有默认值；nullable 为 false 表示 NOT NULL。
+	// 之所以要传完整定义：MySQL 的 MODIFY COLUMN 必须拿到完整列定义，
+	// 否则会把原有的 NOT NULL 与默认值一起丢掉。
+	// 返回空切片表示该引擎不支持改列类型（调用方应先看 Capabilities）。
+	AlterColumnTypeSQL(table, column, typeName, defaultText string, nullable bool) []string
+
 	Split(script string) ([]Statement, error)
 	Normalize(sqlText string) (string, error)
 	Fingerprint(sqlText string) (string, error)
@@ -105,6 +113,38 @@ func (d impl) QuoteQualified(parts ...string) string {
 		out = append(out, d.quote(p))
 	}
 	return strings.Join(out, ".")
+}
+
+// AlterColumnTypeSQL 渲染改列类型所需语句。
+//
+// PostgreSQL 用 ALTER COLUMN … TYPE，且 NOT NULL 与默认值要单独设置；
+// MySQL 用 MODIFY COLUMN，一条语句里必须给完整列定义（否则会丢掉 NOT NULL 与默认值）；
+// SQLite 不支持原地改类型（只能重建表），返回空切片。
+func (d impl) AlterColumnTypeSQL(table, column, typeName, defaultText string, nullable bool) []string {
+	col := d.quote(column)
+	switch d.engine {
+	case model.EnginePostgres:
+		out := []string{"ALTER TABLE " + table + " ALTER COLUMN " + col + " TYPE " + typeName}
+		if !nullable {
+			out = append(out, "ALTER TABLE "+table+" ALTER COLUMN "+col+" SET NOT NULL")
+		}
+		if defaultText != "" {
+			out = append(out, "ALTER TABLE "+table+" ALTER COLUMN "+col+" SET DEFAULT "+defaultText)
+		}
+		return out
+	case model.EngineMySQL:
+		def := col + " " + typeName
+		if !nullable {
+			def += " NOT NULL"
+		}
+		if defaultText != "" {
+			def += " DEFAULT " + defaultText
+		}
+		return []string{"ALTER TABLE " + table + " MODIFY COLUMN " + def}
+	default:
+		// SQLite / 未支持引擎：改列类型需要重建表，不在本方法里假装能做。
+		return nil
+	}
 }
 
 func quoteDouble(s string) string { return `"` + strings.ReplaceAll(s, `"`, `""`) + `"` }

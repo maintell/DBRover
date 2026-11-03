@@ -771,6 +771,11 @@ func (s *Server) handleSchemaPlan(w http.ResponseWriter, r *http.Request) {
 		Table: req.Table, Action: req.Action, Column: req.Column,
 		Columns: req.Columns, PrimaryKey: req.PrimaryKey,
 	})
+	if errors.Is(err, service.ErrNarrowingBlocked) {
+		writeError(w, http.StatusConflict, "NARROWING_BLOCKED", "policy",
+			err.Error(), "先清理越界数据，或换一个能装下的类型", false)
+		return
+	}
 	if errors.Is(err, service.ErrInvalidDDL) {
 		writeError(w, http.StatusBadRequest, "INVALID_COLUMN", "internal",
 			err.Error(), "列名、类型与默认值都有白名单约束，见 docs/07 §6", false)

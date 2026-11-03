@@ -61,6 +61,7 @@ func (c *Connector) Capabilities() model.Capabilities {
 		KeysetPagination:  true,
 		// MySQL 的 DDL 隐式提交，无法真实回滚。
 		DDLTransactional: false,
+		AlterColumnType:  true,
 	}
 }
 

@@ -30,10 +30,55 @@ var ErrInvalidDDL = errors.New("结构变更参数不合法")
 type DDLAction string
 
 const (
-	DDLAddColumn   DDLAction = "add_column"
-	DDLDropColumn  DDLAction = "drop_column"
-	DDLCreateTable DDLAction = "create_table"
+	DDLAddColumn       DDLAction = "add_column"
+	DDLDropColumn      DDLAction = "drop_column"
+	DDLCreateTable     DDLAction = "create_table"
+	DDLAlterColumnType DDLAction = "alter_column_type"
 )
+
+// safeDefaultText 把元数据里的默认值转成可拼进语句的文本。
+//
+// 之所以要看列类型：MySQL 的 information_schema 对字符串默认值给出的是不带引号的
+// 裸值（`d` 而不是 `'d'`），直接拼进 MODIFY COLUMN 就是语法错误。
+// PostgreSQL 给的是 `'d'::character varying`，已经可直接使用。
+func safeDefaultText(kind model.TypeKind, def *string) string {
+	if def == nil {
+		return ""
+	}
+	d := strings.TrimSpace(*def)
+	if d == "" || strings.ContainsAny(d, ";") {
+		return ""
+	}
+	if defaultNeedsQuoting(kind, d) {
+		return "'" + strings.ReplaceAll(d, "'", "''") + "'"
+	}
+	return d
+}
+
+// defaultNeedsQuoting 判断一个默认值文本是不是「未加引号的裸字符串」。
+func defaultNeedsQuoting(kind model.TypeKind, d string) bool {
+	if strings.HasPrefix(d, "'") || strings.HasPrefix(d, "-") {
+		return false
+	}
+	if d[0] >= '0' && d[0] <= '9' {
+		return false
+	}
+	switch strings.ToUpper(d) {
+	case "NULL", "TRUE", "FALSE", "CURRENT_TIMESTAMP", "CURRENT_DATE",
+		"CURRENT_TIME", "CURRENT_USER", "NOW()", "UUID()":
+		return false
+	}
+	// 带括号的视为函数调用/表达式，原样保留。
+	if strings.ContainsAny(d, "()") {
+		return false
+	}
+	switch kind {
+	case model.TypeString, model.TypeText, model.TypeJSON, model.TypeUUID,
+		model.TypeEnum, model.TypeGeometry, model.TypeNetwork:
+		return true
+	}
+	return false
+}
 
 // ColumnSpec 是加列时的列定义。
 type ColumnSpec struct {
@@ -176,10 +221,8 @@ func (e *Executor) columnDefinitionFromColumn(c model.Column) string {
 	if !c.Nullable {
 		parts = append(parts, "NOT NULL")
 	}
-	if c.Default != nil {
-		if d := strings.TrimSpace(*c.Default); defaultPattern.MatchString(d) {
-			parts = append(parts, "DEFAULT", d)
-		}
+	if d := safeDefaultText(c.Type.Kind, c.Default); d != "" {
+		parts = append(parts, "DEFAULT", d)
 	}
 	return strings.Join(parts, " ")
 }
@@ -302,6 +345,49 @@ func (e *Executor) BuildDDLPlan(ctx context.Context, req DDLRequest) (*ChangePla
 		}}
 		plan.Irreversible = true
 		plan.AffectedRows = e.countNonNull(ctx, table, col.Name)
+
+	case DDLAlterColumnType:
+		col, ok := findColumn(td, req.Column.Name)
+		if !ok {
+			return nil, fmt.Errorf("%w: 列 %q 不存在", ErrInvalidDDL, req.Column.Name)
+		}
+		if !e.conn.Capabilities().AlterColumnType {
+			return nil, fmt.Errorf("%w: 该引擎不支持原地修改列类型（SQLite 只能重建表）", ErrInvalidDDL)
+		}
+		newType := strings.TrimSpace(req.Column.Type)
+		if !typePattern.MatchString(newType) {
+			return nil, fmt.Errorf("%w: 类型 %q 不在允许的形态内", ErrInvalidDDL, req.Column.Type)
+		}
+		oldType := strings.TrimSpace(col.Type.Raw)
+		if oldType == "" {
+			return nil, fmt.Errorf("%w: 读不到列 %q 的当前类型，无法生成回滚语句", ErrInvalidDDL, col.Name)
+		}
+
+		// 收窄预检：新类型有容量上限时，先数一遍装不下的行。
+		// 探测失败按「未知」放行，让引擎自己报错；探测成功且有越界数据则拒绝。
+		bad, samples, why, perr := e.probeNarrowing(ctx, table, e.dialect.QuoteIdent(col.Name), newType)
+		if perr == nil && bad > 0 {
+			return nil, fmt.Errorf("%w：%d 行%s，例如 %s",
+				ErrNarrowingBlocked, bad, why, strings.Join(samples, "、"))
+		}
+
+		def := safeDefaultText(col.Type.Kind, col.Default)
+		fwd := e.dialect.AlterColumnTypeSQL(table, col.Name, newType, def, col.Nullable)
+		if len(fwd) == 0 {
+			return nil, fmt.Errorf("%w: 无法为 %s 渲染改列类型语句", ErrInvalidDDL, e.dialect.Engine())
+		}
+		back := e.dialect.AlterColumnTypeSQL(table, col.Name, oldType, def, col.Nullable)
+		for _, s := range fwd {
+			plan.Statements = append(plan.Statements, PlanStatement{SQL: s, ExpectRows: -1})
+		}
+		for _, s := range back {
+			plan.Rollback = append(plan.Rollback, PlanStatement{SQL: s, ExpectRows: -1})
+		}
+		if td.RowEstimate > 0 {
+			plan.AffectedRows = td.RowEstimate
+		} else {
+			plan.AffectedRows = -1 // 未知就说未知，不写 0
+		}
 
 	default:
 		return nil, fmt.Errorf("%w: 不支持的动作 %q", ErrInvalidDDL, req.Action)

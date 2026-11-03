@@ -979,6 +979,11 @@ function renderSchema(out) {
       drop.onclick = () => planDropColumn(c.name);
       actions.appendChild(drop);
     }
+    // 改类型：主键列也允许（类型与「是不是主键」无关）。
+    const retype = document.createElement('button');
+    retype.textContent = '改类型';
+    retype.onclick = () => startRetype(tr, c);
+    actions.appendChild(retype);
     tr.appendChild(actions);
     tbody.appendChild(tr);
   }
@@ -1073,6 +1078,61 @@ async function planDropColumn(name) {
     plan = await fetchSchemaPlan('drop_column', { name }, false);
   } catch (e) {
     showNotice('生成结构预案失败：' + e.message, 'error');
+    return;
+  }
+  if (!(await confirmPlan(plan))) return;
+  await applyPlan(plan.id, undefined, refreshSchema);
+}
+
+// ---------- 改列类型 ----------
+
+// startRetype 把该行的类型单元格换成输入框，让用户就地改。
+// 预检与风险分级都在服务端，这里只负责把意图表达清楚。
+function startRetype(tr, col) {
+  const cells = tr.children;
+  const oldType = col.type && col.type.raw ? col.type.raw : String(col.type.kind);
+  const typeCell = cells[1];
+
+  const input = document.createElement('input');
+  input.className = 'narrow';
+  input.value = oldType;
+  input.setAttribute('list', 'sch-types');
+  typeCell.replaceChildren(input);
+  input.focus();
+  input.select();
+
+  const actions = tr.lastElementChild;
+  actions.replaceChildren();
+  const ok = document.createElement('button');
+  ok.className = 'primary';
+  ok.textContent = '应用';
+  const cancel = document.createElement('button');
+  cancel.textContent = '取消';
+
+  ok.onclick = () => planRetype(col.name, input.value.trim());
+  cancel.onclick = () => refreshSchema();
+  actions.append(ok, cancel);
+
+  input.onkeydown = (ev) => {
+    if (ev.key === 'Enter') {
+      ev.preventDefault();
+      planRetype(col.name, input.value.trim());
+    }
+    if (ev.key === 'Escape') refreshSchema();
+  };
+}
+
+async function planRetype(name, newType) {
+  if (!newType) {
+    showNotice('新类型不能为空。', 'warn');
+    return;
+  }
+  let plan;
+  try {
+    plan = await fetchSchemaPlan('alter_column_type', { name, type: newType }, false);
+  } catch (e) {
+    // 收窄预检不通过时服务端会带越界样本，原文展示，别换成笼统的话。
+    showNotice(e.message + (e.hint ? '（' + e.hint + '）' : ''), 'error');
     return;
   }
   if (!(await confirmPlan(plan))) return;

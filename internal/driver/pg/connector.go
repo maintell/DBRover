@@ -62,6 +62,7 @@ func (c *Connector) Capabilities() model.Capabilities {
 		KeysetPagination:  true,
 		// PG 的 DDL 在事务内，可真实回滚。
 		DDLTransactional: true,
+		AlterColumnType:  true,
 	}
 }
 
