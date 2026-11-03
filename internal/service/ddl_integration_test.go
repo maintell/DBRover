@@ -205,6 +205,90 @@ func TestDDLAlterColumnTypeOnRealEngines(t *testing.T) {
 	}
 }
 
+// TestDDLIndexOnRealEngines 验证索引管理的三件事：
+//
+//   - 建索引与删索引都能被目标引擎接受——尤其 DROP INDEX：
+//     MySQL 必须带 ON <table>，PostgreSQL 必须不带，写反了直接语法错误；
+//   - 唯一索引前先查重复值；
+//   - 主键索引不能被当成普通索引删掉。
+func TestDDLIndexOnRealEngines(t *testing.T) {
+	for _, tgt := range rowsTargets(t) {
+		t.Run(tgt.name, func(t *testing.T) {
+			ctx := context.Background()
+			tgt.prepareTable(t, []string{
+				"DROP TABLE IF EXISTS it_idxprobe",
+				"CREATE TABLE it_idxprobe (id INT PRIMARY KEY, v VARCHAR(32))",
+			}, func(ctx context.Context, s driver.Session) {
+				for i, v := range []string{"a", "a", "b"} {
+					if _, err := s.Execute(ctx, "INSERT INTO it_idxprobe (id, v) VALUES (?, ?)", []any{i + 1, v}); err != nil {
+						t.Fatalf("插入: %v", err)
+					}
+				}
+			})
+
+			conn := tgt.open(t)
+			ex := service.NewExecutor(conn, model.EnvTest, model.AccessReadWrite, nil)
+			defer ex.Close()
+
+			// 1) 唯一索引：v 上有重复，必须被拦并带样本。
+			_, err := ex.BuildDDLPlan(ctx, service.DDLRequest{
+				Table:  tableRef("it_idxprobe"),
+				Action: service.DDLCreateIndex,
+				Index:  service.IndexSpec{Name: "ux_it_v", Columns: []string{"v"}, Unique: true},
+			})
+			if !errors.Is(err, service.ErrDuplicateRows) {
+				t.Fatalf("应收敛为 ErrDuplicateRows, 实际 %v", err)
+			}
+
+			// 2) 普通索引：建成功。
+			plan, err := ex.BuildDDLPlan(ctx, service.DDLRequest{
+				Table:  tableRef("it_idxprobe"),
+				Action: service.DDLCreateIndex,
+				Index:  service.IndexSpec{Name: "ix_it_v", Columns: []string{"v"}},
+			})
+			if err != nil {
+				t.Fatalf("BuildDDLPlan(create_index): %v", err)
+			}
+			if out, err := ex.ApplyChangePlan(ctx, plan, service.Request{Approval: true}); err != nil || out.Err != nil || out.Blocked {
+				t.Fatalf("建索引失败: err=%v out=%+v", err, out)
+			}
+
+			// 3) 删索引：这一条直接验证 DROP INDEX 的方言差异。
+			plan, err = ex.BuildDDLPlan(ctx, service.DDLRequest{
+				Table:  tableRef("it_idxprobe"),
+				Action: service.DDLDropIndex,
+				Index:  service.IndexSpec{Name: "ix_it_v"},
+			})
+			if err != nil {
+				t.Fatalf("BuildDDLPlan(drop_index): %v", err)
+			}
+			out, err := ex.ApplyChangePlan(ctx, plan, service.Request{Approval: true})
+			if err != nil || out.Err != nil || out.Blocked {
+				t.Fatalf("删索引失败（DROP INDEX 写法可能不对）: statement=%v err=%v out=%+v",
+					plan.Statements[0].SQL, err, out)
+			}
+
+			// 4) 主键索引不能删。
+			detail, err := ex.DescribeTable(ctx, tableRef("it_idxprobe"))
+			if err != nil {
+				t.Fatalf("DescribeTable: %v", err)
+			}
+			for _, ix := range detail.Indexes {
+				if !ix.Primary {
+					continue
+				}
+				if _, err := ex.BuildDDLPlan(ctx, service.DDLRequest{
+					Table:  tableRef("it_idxprobe"),
+					Action: service.DDLDropIndex,
+					Index:  service.IndexSpec{Name: ix.Name},
+				}); !errors.Is(err, service.ErrInvalidDDL) {
+					t.Fatalf("主键索引 %q 应拒绝删除, 实际 %v", ix.Name, err)
+				}
+			}
+		})
+	}
+}
+
 func hasColumnNamed(detail *model.TableDetail, name string) bool {
 	for _, c := range detail.Columns {
 		if c.Name == name {

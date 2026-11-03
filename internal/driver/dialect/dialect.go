@@ -66,6 +66,13 @@ type Dialect interface {
 	// 返回空切片表示该引擎不支持改列类型（调用方应先看 Capabilities）。
 	AlterColumnTypeSQL(table, column, typeName, defaultText string, nullable bool) []string
 
+	// CreateIndexSQL 渲染建索引语句。columns 只给列名，引用由方言负责。
+	CreateIndexSQL(table, name string, columns []string, unique bool) string
+
+	// DropIndexSQL 渲染删索引语句。
+	// MySQL 必须写 DROP INDEX <name> ON <table>，PostgreSQL / SQLite 不能带 ON。
+	DropIndexSQL(table, name string) string
+
 	Split(script string) ([]Statement, error)
 	Normalize(sqlText string) (string, error)
 	Fingerprint(sqlText string) (string, error)
@@ -144,6 +151,33 @@ func (d impl) AlterColumnTypeSQL(table, column, typeName, defaultText string, nu
 	default:
 		// SQLite / 未支持引擎：改列类型需要重建表，不在本方法里假装能做。
 		return nil
+	}
+}
+
+// CreateIndexSQL 渲染建索引语句。
+// 三种关系引擎的写法一致：CREATE [UNIQUE] INDEX name ON table (cols)。
+func (d impl) CreateIndexSQL(table, name string, columns []string, unique bool) string {
+	cols := make([]string, 0, len(columns))
+	for _, c := range columns {
+		cols = append(cols, d.quote(c))
+	}
+	kw := "CREATE INDEX "
+	if unique {
+		kw = "CREATE UNIQUE INDEX "
+	}
+	return kw + d.quote(name) + " ON " + table + " (" + strings.Join(cols, ", ") + ")"
+}
+
+// DropIndexSQL 渲染删索引语句。
+//
+// 只有 MySQL 要带 ON <table>（它把索引当成表的附属对象）；
+// PostgreSQL 与 SQLite 的索引是独立对象，带上 ON 反而是语法错误。
+func (d impl) DropIndexSQL(table, name string) string {
+	switch d.engine {
+	case model.EngineMySQL, model.EngineMSSQL:
+		return "DROP INDEX " + d.quote(name) + " ON " + table
+	default:
+		return "DROP INDEX " + d.quote(name)
 	}
 }
 

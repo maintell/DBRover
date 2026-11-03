@@ -765,6 +765,7 @@ type schemaPlanRequest struct {
 	Column     service.ColumnSpec   `json:"column"`
 	Columns    []service.ColumnSpec `json:"columns"`
 	PrimaryKey []string             `json:"primary_key"`
+	Index      service.IndexSpec    `json:"index"`
 }
 
 // handleSchemaPlan 生成结构变更预案。执行走同一个 /changes/{pid}/apply。
@@ -782,8 +783,13 @@ func (s *Server) handleSchemaPlan(w http.ResponseWriter, r *http.Request) {
 
 	plan, err := e.exec.BuildDDLPlan(r.Context(), service.DDLRequest{
 		Table: req.Table, Action: req.Action, Column: req.Column,
-		Columns: req.Columns, PrimaryKey: req.PrimaryKey,
+		Columns: req.Columns, PrimaryKey: req.PrimaryKey, Index: req.Index,
 	})
+	if errors.Is(err, service.ErrDuplicateRows) {
+		writeError(w, http.StatusConflict, "DUPLICATE_ROWS", "policy",
+			err.Error(), "先清理重复值，或去掉「唯一」再建", false)
+		return
+	}
 	if errors.Is(err, service.ErrNarrowingBlocked) {
 		writeError(w, http.StatusConflict, "NARROWING_BLOCKED", "policy",
 			err.Error(), "先清理越界数据，或换一个能装下的类型", false)

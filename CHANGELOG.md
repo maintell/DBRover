@@ -21,7 +21,7 @@
 - **一键撤销（10 分钟）**：应用成功后服务端把预案里已算好的反向语句登记成一张 `undo-` 预案，撤销就是把它 POST 回同一个 `apply` 端点——同风险、同摩擦、同审批，不给撤销开后门；撤销不可再撤销；不可逆变更返回 `undo: null`。
 - **`NULL` 与空串显式区分**：`NULL` 显示为 `NULL`、空串显示为 `''`；右键菜单「设为 NULL」/「设为空串」二选一；原值为 NULL 时定位条件用 `IS NULL`（用 `= ?` 绑 NULL 永远匹配不到行）。
 - **关闭页面拦截**：有待提交改动时 `beforeunload` 拦一次。
-- **结构设计器（v1）**（`internal/service/ddl.go` + `internal/webui`）：表结构详情与 DDL 原文、**建表**、加列、删列、**改列类型（带收窄预检）**、表单改动即时预览将要执行的 DDL；结构变更复用同一套 Plan/Apply，预案带**表定义哈希**作为前置条件（建表则要求执行时表仍不存在），被他人改过即 `409 SCHEMA_CHANGED`。建表必须给主键且主键列强制 `NOT NULL`；删列展示非空行数并标不可逆；改列类型前先数越界数据，装不下即 `409 NARROWING_BLOCKED` 并给出样本行；DDL 事务性由 `Capabilities().DDLTransactional` 决定，MySQL 上明确提示「隐式提交，回滚只是补偿」。
+- **结构设计器（v1）**（`internal/service/ddl.go` + `internal/webui`）：表结构详情与 DDL 原文、**建表**、加列、删列、**改列类型（带收窄预检）**、**索引建删（带唯一索引重复值预检）**、表单改动即时预览将要执行的 DDL；结构变更复用同一套 Plan/Apply，预案带**表定义哈希**作为前置条件（建表则要求执行时表仍不存在），被他人改过即 `409 SCHEMA_CHANGED`。建表必须给主键且主键列强制 `NOT NULL`；删列展示非空行数并标不可逆；改列类型前先数越界数据；建唯一索引前先查重复值，两者不满足都返回 409 并带样本行；DDL 事务性由 `Capabilities().DDLTransactional` 决定，MySQL 上明确提示「隐式提交，回滚只是补偿」。
 - **跨引擎差异的写法约定**（ADR-0005）：能力有无进 `model.Capabilities`（本次新增 `AlterColumnType`，SQLite 为 false），语句文本归 `internal/driver/dialect`（本次新增 `AlterColumnTypeSQL`），`service` / `api` 不再判断引擎名。
 - **连接器契约收紧**：`Describe*` 遇到不存在的对象必须返回 `driver.ErrObjectNotFound`，不得返回零列的空结构。SQLite / MySQL / PostgreSQL 三个驱动原先都会把「表不存在」说成「表没有列」，导致 API 对已删除的表返回 200 空结构、变更预案给出误导性提示。由 `drivertest` 的 `DescribeMissingObjectErrors` 用例锁住（含变异验证）。
 - **流式导出**（`internal/service/export.go` + `GET /export`）：CSV 与 NDJSON，单条 SELECT 走游标分批取、边取边写；复用 `where`/`order`，导出的就是当前视图且不受分页限制；不要求主键，视图与无主键表也能导。大整数以字符串输出、二进制 base64、NULL 在 NDJSON 里是真正的 `null`。响应头推迟到首次写出，开跑前失败返回结构化错误而不是空文件配 200。界面加「导出」入口与格式下拉（状态栏给出字节数与首行，便于确认内容）。
@@ -46,7 +46,7 @@
 
 - 已实现 SQLite / MySQL / PostgreSQL 三个关系引擎；SQL Server、Oracle 与非关系型（Redis / MongoDB / Elasticsearch）仍是占位目录。
 - 编辑入口只覆盖最基础形态：JSON / BLOB / 复数类型走统一文本单元格，批次阈值分档、批量修改、时区显示策略均未做（见 `docs/06-data-editor.md` §8.2）。导出只支持 CSV 与 NDJSON（100 万行内存增长 10.6 MB，已压测），xlsx / SQL INSERT / Markdown 与测试数据生成未做。
-- 结构设计器只做建表、加列、删列、改列类型：改默认值/可空、索引/外键/约束、视图与例程设计器、结构比对、在线变更建议、依赖检查均未做（见 `docs/07-schema-designer.md` §8.2）。
+- 结构设计器只做建表、加列、删列、改列类型、索引建删：改默认值/可空、外键与检查约束、视图与例程设计器、结构比对、在线变更建议、依赖检查均未做（见 `docs/07-schema-designer.md` §8.2）。
 - 审计只做到「记录过什么」，链式哈希与完整性校验未实现，无法证明「没被人改过」。
 - 正式 React 前端未开始；`internal/webui` 是免构建的临时界面。
 - OpenAPI 契约已落文件并由测试约束，但尚未接入代码生成。

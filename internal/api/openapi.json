@@ -245,7 +245,7 @@
                 "required": ["table", "action"],
                 "properties": {
                   "table": { "type": "object" },
-                  "action": { "type": "string", "enum": ["create_table", "add_column", "drop_column", "alter_column_type"] },
+                  "action": { "type": "string", "enum": ["create_table", "add_column", "drop_column", "alter_column_type", "create_index", "drop_index"] },
                   "column": {
                     "type": "object",
                     "required": ["name"],
@@ -257,7 +257,16 @@
                     }
                   },
                   "columns": { "type": "array", "items": { "type": "object" }, "description": "create_table 用" },
-                  "primary_key": { "type": "array", "items": { "type": "string" }, "description": "create_table 用，必须非空" }
+                  "primary_key": { "type": "array", "items": { "type": "string" }, "description": "create_table 用，必须非空" },
+                  "index": {
+                    "type": "object",
+                    "description": "create_index / drop_index 用；drop 时只需 name",
+                    "properties": {
+                      "name": { "type": "string" },
+                      "columns": { "type": "array", "items": { "type": "string" } },
+                      "unique": { "type": "boolean" }
+                    }
+                  }
                 }
               }
             }
@@ -266,7 +275,7 @@
         "responses": {
           "201": { "description": "预案已生成（语句 / 回滚 / 风险 / 摩擦 / 不可逆标记）" },
           "400": { "description": "参数不合法（INVALID_COLUMN）或生成失败（SCHEMA_PLAN_FAILED）" },
-          "409": { "description": "收窄预检不通过（NARROWING_BLOCKED）" },
+          "409": { "description": "收窄预检不通过（NARROWING_BLOCKED）或唯一索引前发现重复值（DUPLICATE_ROWS）" },
           "404": { "description": "连接不存在" }
         }
       }

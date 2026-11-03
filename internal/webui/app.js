@@ -1042,6 +1042,59 @@ function renderSchema(out) {
   table.appendChild(tbody);
   wrap.appendChild(table);
 
+  // 索引区
+  const ixHead = document.createElement('div');
+  ixHead.className = 'head';
+  ixHead.textContent = '索引';
+  wrap.appendChild(ixHead);
+
+  const ixForm = document.createElement('div');
+  ixForm.className = 'toolbar';
+  ixForm.innerHTML =
+    '<input id="ix-name" class="narrow" placeholder="索引名" autocomplete="off" spellcheck="false">' +
+    '<input id="ix-cols" class="narrow" placeholder="列（逗号分隔）" autocomplete="off" spellcheck="false">' +
+    '<label class="inline"><input type="checkbox" id="ix-unique"> 唯一</label>' +
+    '<button id="ix-add" class="primary">建索引</button>';
+  wrap.appendChild(ixForm);
+
+  const idxs = out.indexes || [];
+  if (!idxs.length) {
+    const none = document.createElement('div');
+    none.className = 'notice';
+    none.textContent = '这个表还没有索引（主键索引除外）。';
+    wrap.appendChild(none);
+  } else {
+    const it = document.createElement('table');
+    const ith = document.createElement('thead');
+    const ihtr = document.createElement('tr');
+    for (const label of ['名称', '列', '唯一', '主键', '']) {
+      const th = document.createElement('th');
+      th.textContent = label;
+      ihtr.appendChild(th);
+    }
+    ith.appendChild(ihtr);
+    it.appendChild(ith);
+    const itb = document.createElement('tbody');
+    for (const ix of idxs) {
+      const tr = document.createElement('tr');
+      tr.appendChild(cell(ix.name));
+      tr.appendChild(cell((ix.columns || []).join(', ')));
+      tr.appendChild(cell(ix.unique ? '是' : '否'));
+      tr.appendChild(cell(ix.primary ? '✓' : ''));
+      const act = document.createElement('td');
+      if (!ix.primary) {
+        const del = document.createElement('button');
+        del.textContent = '删索引';
+        del.onclick = () => planDropIndex(ix.name);
+        act.appendChild(del);
+      }
+      tr.appendChild(act);
+      itb.appendChild(tr);
+    }
+    it.appendChild(itb);
+    wrap.appendChild(it);
+  }
+
   if (out.ddl) {
     const ddl = document.createElement('pre');
     ddl.className = 'preview';
@@ -1057,6 +1110,7 @@ function renderSchema(out) {
   $('sch-default').oninput = onInput;
   $('sch-nullable').onchange = onInput;
   $('sch-add').onclick = () => planAddColumn();
+  $('ix-add').onclick = () => planCreateIndex();
   setStatus(state.tableName + ' · ' + cols.length + ' 列' +
     (pk.length ? '（主键 ' + pk.join(', ') + '）' : '（无主键）'));
 }
@@ -1079,16 +1133,22 @@ function columnInput() {
   return column;
 }
 
-async function fetchSchemaPlan(action, column, preview) {
+// postSchemaPlan 是结构预案的统一出口：不同动作带的字段不同
+// （column / columns+primary_key / index），由调用方拼好再发。
+async function postSchemaPlan(body, preview) {
   const url = path(API.schemaPlan, { id: state.current.id }) + (preview ? '?preview=1' : '');
   return api(url, {
     method: 'POST',
-    body: JSON.stringify({
-      table: { kind: 'table', name: state.tableName },
-      action,
-      column,
-    }),
+    body: JSON.stringify(Object.assign({ table: { kind: 'table', name: state.tableName } }, body)),
   });
+}
+
+async function fetchSchemaPlan(action, column, preview) {
+  return postSchemaPlan({ action, column }, preview);
+}
+
+async function fetchIndexPlan(action, index, preview) {
+  return postSchemaPlan({ action, index }, preview);
 }
 
 async function previewAddColumn() {
@@ -1128,6 +1188,45 @@ async function planDropColumn(name) {
   let plan;
   try {
     plan = await fetchSchemaPlan('drop_column', { name }, false);
+  } catch (e) {
+    showNotice('生成结构预案失败：' + e.message, 'error');
+    return;
+  }
+  if (!(await confirmPlan(plan))) return;
+  await applyPlan(plan.id, undefined, refreshSchema);
+}
+
+// ---------- 索引 ----------
+
+async function planCreateIndex() {
+  const name = $('ix-name').value.trim();
+  const cols = $('ix-cols').value.split(/[,，\s]+/).filter(Boolean);
+  if (!name) {
+    showNotice('索引名不能为空。', 'warn');
+    return;
+  }
+  if (!cols.length) {
+    showNotice('索引至少要有一列。', 'warn');
+    return;
+  }
+  let plan;
+  try {
+    plan = await fetchIndexPlan('create_index', {
+      name, columns: cols, unique: $('ix-unique').checked,
+    }, false);
+  } catch (e) {
+    // 唯一索引撞重复值时会带样本，原文展示比换成笼统提示有用。
+    showNotice(e.message + (e.hint ? '（' + e.hint + '）' : ''), 'error');
+    return;
+  }
+  if (!(await confirmPlan(plan))) return;
+  await applyPlan(plan.id, undefined, refreshSchema);
+}
+
+async function planDropIndex(name) {
+  let plan;
+  try {
+    plan = await fetchIndexPlan('drop_index', { name }, false);
   } catch (e) {
     showNotice('生成结构预案失败：' + e.message, 'error');
     return;

@@ -34,6 +34,8 @@ const (
 	DDLDropColumn      DDLAction = "drop_column"
 	DDLCreateTable     DDLAction = "create_table"
 	DDLAlterColumnType DDLAction = "alter_column_type"
+	DDLCreateIndex     DDLAction = "create_index"
+	DDLDropIndex       DDLAction = "drop_index"
 )
 
 // safeDefaultText 把元数据里的默认值转成可拼进语句的文本。
@@ -99,6 +101,8 @@ type DDLRequest struct {
 	// 建出来只会让人困惑。
 	Columns    []ColumnSpec `json:"columns"`
 	PrimaryKey []string     `json:"primary_key"`
+	// Index 用于 create_index / drop_index（drop 时只用到 Name）。
+	Index IndexSpec `json:"index"`
 }
 
 // typePattern 限定类型声明的字符集。
@@ -283,15 +287,16 @@ func (e *Executor) BuildDDLPlan(ctx context.Context, req DDLRequest) (*ChangePla
 		return nil, err
 	}
 
-	// 删列只需要列名，类型与默认值不参与语句，因此不必校验。
+	// 删列与索引操作只需要列名/索引名；加列与改类型才需要完整列定义。
 	var spec ColumnSpec
-	if req.Action == DDLDropColumn {
+	switch req.Action {
+	case DDLDropColumn:
 		name, nerr := normalizeColumnName(req.Column.Name)
 		if nerr != nil {
 			return nil, nerr
 		}
 		spec = ColumnSpec{Name: name}
-	} else {
+	case DDLAddColumn, DDLAlterColumnType:
 		var cerr error
 		spec, cerr = normalizeColumn(req.Column)
 		if cerr != nil {
@@ -388,6 +393,68 @@ func (e *Executor) BuildDDLPlan(ctx context.Context, req DDLRequest) (*ChangePla
 		} else {
 			plan.AffectedRows = -1 // 未知就说未知，不写 0
 		}
+
+	case DDLCreateIndex:
+		if !e.conn.Capabilities().Indexes {
+			return nil, fmt.Errorf("%w: 该引擎不支持索引管理", ErrInvalidDDL)
+		}
+		spec, nerr := normalizeIndex(req.Index, td)
+		if nerr != nil {
+			return nil, nerr
+		}
+		for _, ix := range td.Indexes {
+			if strings.EqualFold(ix.Name, spec.Name) {
+				return nil, fmt.Errorf("%w: 索引 %q 已存在", ErrInvalidDDL, ix.Name)
+			}
+		}
+		// 唯一索引前先查重复值：让用户拿到样本，而不是等引擎报一句无从下手的错。
+		if spec.Unique {
+			n, samples, perr := e.probeDuplicates(ctx, table, spec.Columns)
+			if perr == nil && n > 0 {
+				return nil, fmt.Errorf("%w：%d 组重复，例如 %s",
+					ErrDuplicateRows, n, strings.Join(samples, "、"))
+			}
+		}
+		plan.Statements = []PlanStatement{{
+			SQL:        e.dialect.CreateIndexSQL(table, spec.Name, spec.Columns, spec.Unique),
+			ExpectRows: -1,
+		}}
+		plan.Rollback = []PlanStatement{{
+			SQL:        e.dialect.DropIndexSQL(table, spec.Name),
+			ExpectRows: -1,
+		}}
+		plan.AffectedRows = 0
+
+	case DDLDropIndex:
+		if !e.conn.Capabilities().Indexes {
+			return nil, fmt.Errorf("%w: 该引擎不支持索引管理", ErrInvalidDDL)
+		}
+		name, nerr := normalizeColumnName(req.Index.Name)
+		if nerr != nil {
+			return nil, fmt.Errorf("%w: 索引名 %q 不合法", ErrInvalidDDL, req.Index.Name)
+		}
+		var target *model.Index
+		for i := range td.Indexes {
+			if strings.EqualFold(td.Indexes[i].Name, name) {
+				target = &td.Indexes[i]
+			}
+		}
+		if target == nil {
+			return nil, fmt.Errorf("%w: 索引 %q 不存在", ErrInvalidDDL, name)
+		}
+		if target.Primary {
+			return nil, fmt.Errorf("%w: 主键索引不能删除", ErrInvalidDDL)
+		}
+		plan.Statements = []PlanStatement{{
+			SQL:        e.dialect.DropIndexSQL(table, target.Name),
+			ExpectRows: -1,
+		}}
+		// 回滚把索引按原定义建回来。删索引不动数据，所以不标不可逆。
+		plan.Rollback = []PlanStatement{{
+			SQL:        e.dialect.CreateIndexSQL(table, target.Name, target.Columns, target.Unique),
+			ExpectRows: -1,
+		}}
+		plan.AffectedRows = 0
 
 	default:
 		return nil, fmt.Errorf("%w: 不支持的动作 %q", ErrInvalidDDL, req.Action)
