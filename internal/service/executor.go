@@ -86,6 +86,12 @@ type Outcome struct {
 	StatementHash string `json:"statement_hash,omitempty"`
 	// Err 是执行期错误的结构化表示。非 nil 时调用方应返回非 2xx。
 	Err *ExecError `json:"error,omitempty"`
+	// RowsAffected 是本次实际提交的行数。分批执行中途失败或中止时，
+	// 它是「已经落到库里、撤不回来」的那部分，必须如实报出来。
+	RowsAffected int64 `json:"rows_affected"`
+	// Aborted 表示执行被调用方中止（取消 ctx），不是失败也不是完成。
+	// 中止后已提交的批留在库里，预案仍然有效，可以重新提交改完剩下的行。
+	Aborted bool `json:"aborted,omitempty"`
 }
 
 // Executor 是执行门。

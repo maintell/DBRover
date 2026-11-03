@@ -478,8 +478,11 @@
     "/api/v1/changes/{pid}/apply": {
       "post": {
         "summary": "执行数据变更预案",
-        "description": "单事务执行；任一条影响行数不符即整体回滚并返回 409。",
-        "parameters": [{ "name": "pid", "in": "path", "required": true, "schema": { "type": "string" } }],
+        "description": "单事务执行；任一条影响行数不符即整体回滚并返回 409。影响行数超过单批上限的批量修改改为按主键键集分批执行：每批一个独立事务，中途失败或中止时已提交的批不回滚，返回的 rows_affected 是实际提交的行数。带 ?stream=1 时用 application/x-ndjson 逐批回报 {\"type\":\"progress\",\"done\",\"total\"}，最后一行是 {\"type\":\"result\"} 或 {\"type\":\"error\"}；一旦进度开始，状态码就固定为 200，错误只能出现在 error 行里。",
+        "parameters": [
+          { "name": "pid", "in": "path", "required": true, "schema": { "type": "string" } },
+          { "name": "stream", "in": "query", "description": "1 表示用 NDJSON 回报进度；没有进度可报时仍是普通 JSON", "schema": { "type": "string", "enum": ["0", "1"] } }
+        ],
         "requestBody": {
           "required": false,
           "content": {
@@ -505,6 +508,7 @@
                     "risk": { "type": "string" },
                     "friction": { "type": "string" },
                     "duration_ms": { "type": "integer" },
+                    "rows_affected": { "type": "integer", "description": "实际提交的行数" },
                     "undo": {
                       "description": "撤销预案（10 分钟内有效）；不可逆变更或撤销本身为 null",
                       "oneOf": [
@@ -521,11 +525,14 @@
                     }
                   }
                 }
-              }
+              },
+              "application/x-ndjson": { "schema": { "type": "string" } }
             }
           },
           "404": { "description": "预案不存在或已清理" },
-          "409": { "description": "行冲突（CHANGE_ROW_CONFLICT）或审批凭证不匹配" },
+          "409": {
+            "description": "行冲突（CHANGE_ROW_CONFLICT）、审批凭证不匹配，或分批执行被中止（CHANGE_APPLY_ABORTED：已提交的批不回滚，预案仍有效可重新提交）"
+          },
           "428": { "description": "需要确认（POLICY_APPROVAL_REQUIRED）" }
         }
       }
@@ -580,7 +587,9 @@
           }
         },
         "responses": {
-          "201": { "description": "预案已生成：plan（语句/回滚/风险/摩擦）+ affected + samples 前后对比 + note" },
+          "201": {
+            "description": "预案已生成：plan（语句/回滚/风险/摩擦）+ affected + samples 前后对比 + note；影响超过单批上限且是单列主键时 batched 为 true，并给出 batch_size 与 batches（执行时按主键键集分批，每批独立提交，中途失败或中止不回滚已提交的批）。复合主键与无主键表不分批，走单事务。"
+          },
           "400": { "description": "参数不合法（REQUEST_INVALID / FILTER_INVALID / BULK_PLAN_FAILED）" },
           "428": { "description": "需要额外确认（BULK_CONFIRM_TABLE_REQUIRED / BULK_NO_ROLLBACK_ACK）" }
         }

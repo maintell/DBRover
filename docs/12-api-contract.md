@@ -40,13 +40,33 @@ GET  /tasks/{id}    → {"status":"running","progress":{...}}
 
 `202 Accepted` 表示已受理，不表示完成。
 
+### 1.3.1 单请求内的进度流（`?stream=1`）
+
+分批批量修改要跑几十秒，用「202 + 轮询」要引入任务表与生命周期，代价远大于收益。因此执行类端点在同一个请求里改用 NDJSON：
+
+```
+POST /api/v1/changes/{pid}/apply?stream=1
+Content-Type: application/x-ndjson
+
+{"type":"progress","done":1000,"total":20000}
+{"type":"progress","done":2000,"total":20000}
+...
+{"type":"result","status":200,"body":{...}}      ← 或 {"type":"error","status":409,"error":{...}}
+```
+
+三条硬规则：
+
+1. **状态码只在还没发出第一条 `progress` 时才能改。** 被审批拦下、参数错误都发生在执行开始之前，所以仍然是普通 JSON + 正确状态码；一旦进度开始，HTTP 状态已经固定在 200，错误只能作为最后一行 `error` 出现。
+2. **没有进度可报就退回普通 JSON。** 请求了 `stream=1` 但这次执行不分批（影响行数 ≤ 1000、复合主键、无主键，或根本不是批量修改）时，响应仍是 `application/json` 单个对象。客户端按 `Content-Type` 分辨，不用猜。
+3. **客户端断开就是中止。** 取消请求（`AbortController` / 关闭连接）会让服务端在批与批之间停下，已提交的批不回滚，返回 `409 CHANGE_APPLY_ABORTED`（连接已断时这条只能落到审计里）。**预案不会被删除**——`SET` 是常量，重新提交是幂等的。
+
 ---
 
 ## 2. 资源与端点
 
 ### 2.0 M1 已实现子集
 
-当前代码只实现了下表中的一小部分。**未列出的端点仍未实现**，不要按本文其余章节假设它们可用。
+当前代码只实现了下表中的这一部分。**未列出的端点仍未实现**，不要按本文其余章节假设它们可用。这张表与 `internal/api/server.go` 的路由表由 `TestSpecMatchesRoutes` 双向强制——任一侧多一条，测试就失败。
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
@@ -57,11 +77,19 @@ GET  /tasks/{id}    → {"status":"running","progress":{...}}
 | `DELETE` | `/api/v1/connections/{id}` | 关闭并移除连接 |
 | `GET` | `/api/v1/connections/{id}/health` | 版本、只读状态、服务器身份 |
 | `GET` | `/api/v1/connections/{id}/tables` | 表与视图清单 |
-| `GET` | `/api/v1/connections/{id}/tables/{name}/rows` | 表数据浏览，**键集分页**（`limit`、`after`） |
+| `GET` | `/api/v1/connections/{id}/tables/{name}/rows` | 表数据浏览，**键集分页**（`limit`、`after`、`where`、`order`） |
+| `GET` | `/api/v1/connections/{id}/tables/{name}/schema` | 列、索引、外键、主键与建表原文；表不存在 → 404 |
+| `GET` | `/api/v1/connections/{id}/export` | 流式导出 CSV / NDJSON |
 | `POST` | `/api/v1/connections/{id}/exec` | 执行 SQL（一次性，行数有上限） |
 | `POST` | `/api/v1/connections/{id}/query` | 打开**流式游标**，只接受单条只读语句 |
 | `GET` | `/api/v1/results/{cid}/page` | 按页拉取，`limit` 可调 |
 | `DELETE` | `/api/v1/results/{cid}` | 主动关闭游标 |
+| `POST` | `/api/v1/connections/{id}/changes/plan` | 行数据变更预案 |
+| `POST` | `/api/v1/connections/{id}/schema/plan` | 结构变更预案（建表 / 加列 / 删列 / 改类型 / 索引建删） |
+| `POST` | `/api/v1/connections/{id}/bulk/plan` | 条件批量修改预案 |
+| `POST` | `/api/v1/connections/{id}/fk/precheck` | 加外键前的孤儿数据预检（只读） |
+| `POST` | `/api/v1/compare` | 两个连接的结构比对（只读） |
+| `POST` | `/api/v1/changes/{pid}/apply` | 执行上述任一预案；`?stream=1` 用 NDJSON 回报分批进度 |
 | `GET` | `/api/v1/audit` | 审计事件 |
 
 与下文契约的已知差异（随里程碑收敛）：
@@ -365,6 +393,13 @@ POST /connections
 | `POLICY_READ_ONLY` | policy | 403 | 只读连接拒绝写 |
 | `POLICY_APPROVAL_REQUIRED` | policy | 428 | 需要审批 |
 | `POLICY_APPROVAL_MISMATCH` | policy | 409 | 审批内容与实际语句不一致 |
+| `CHANGE_ROW_CONFLICT` | constraint | 409 | 按原值定位不到行，或影响行数与预案不符 |
+| `CHANGE_APPLY_ABORTED` | policy | 409 | 分批执行被中止：已提交的批不回滚，预案仍有效 |
+| `SCHEMA_CHANGED` | constraint | 409 | 表定义在生成预案后变过 |
+| `NARROWING_BLOCKED` | constraint | 409 | 改列类型会截断现存数据 |
+| `DUPLICATE_ROWS` | constraint | 409 | 唯一索引预检发现重复值 |
+| `BULK_CONFIRM_TABLE_REQUIRED` | policy | 428 | 无条件批量修改需回填表名 |
+| `BULK_NO_ROLLBACK_ACK` | policy | 428 | 影响行数超过回滚上限，需显式接受 |
 | `CURSOR_CLOSED` | resource | 410 | 游标已关闭 |
 | `CURSOR_BUSY` | resource | 409 | 游标正在被读取 |
 | `TASK_CONFLICT` | resource | 409 | 任务状态不允许该操作 |

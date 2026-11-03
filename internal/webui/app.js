@@ -17,6 +17,8 @@ const state = {
   pending: [],
   // 刚应用成功的变更对应的撤销预案（10 分钟窗口，服务端保管）
   undo: null,
+  // 分批执行中的进度与停止入口；null 表示没在跑
+  bulkRun: null,
   // 视图：data = 行数据，schema = 表结构
   view: 'data',
   schema: null,
@@ -66,16 +68,92 @@ async function api(p, opts = {}) {
   if (text) {
     try { body = JSON.parse(text); } catch { body = null; }
   }
-  if (!res.ok) {
-    const e = body && body.error ? body.error : {};
-    const err = new Error(e.message || res.statusText);
-    err.code = e.code || 'HTTP_' + res.status;
-    err.hint = e.hint || '';
-    err.status = res.status;
-    err.detail = e; // 保留完整错误体：需要审批时里面带 approval.token
-    throw err;
-  }
+  if (!res.ok) throw httpError(res.status, res.statusText, body);
   return body;
+}
+
+// httpError 把服务端的 errorBody 转成统一的异常形状。
+// 保留完整错误体：需要审批时里面带 approval.token。
+function httpError(status, statusText, body) {
+  const e = body && body.error ? body.error : {};
+  const err = new Error(e.message || statusText);
+  err.code = e.code || 'HTTP_' + status;
+  err.hint = e.hint || '';
+  err.status = status;
+  err.detail = e;
+  return err;
+}
+
+// readNDJSON 边到边解析：进度流的意义就是「先到先显示」，不能等整包下来。
+async function readNDJSON(res, onEvent) {
+  const reader = res.body.getReader();
+  const dec = new TextDecoder();
+  let buf = '';
+  const drain = (flush) => {
+    let i;
+    while ((i = buf.indexOf('\n')) >= 0) {
+      const line = buf.slice(0, i).trim();
+      buf = buf.slice(i + 1);
+      if (line) onEvent(JSON.parse(line));
+    }
+    if (flush && buf.trim()) {
+      onEvent(JSON.parse(buf.trim()));
+      buf = '';
+    }
+  };
+  for (;;) {
+    const { value, done } = await reader.read();
+    if (value) buf += dec.decode(value, { stream: true });
+    drain(false);
+    if (done) break;
+  }
+  drain(true);
+}
+
+// applyStream 执行预案并接收逐批进度。
+//
+// 服务端只在真的有进度可报时才用 NDJSON：被审批拦下、参数错误这些
+// 都还没开始执行，仍然是普通 JSON + 正确的状态码，所以这里两种形态都要认。
+async function applyStream(url, body, ctrl, onProgress) {
+  const headers = { 'Content-Type': 'application/json' };
+  if (state.token) headers['X-DBRover-Token'] = state.token;
+
+  const res = await fetch(url, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify(body),
+    signal: ctrl.signal,
+  });
+
+  const ctype = res.headers.get('Content-Type') || '';
+  if (!ctype.includes('ndjson')) {
+    const text = await res.text();
+    let parsed = null;
+    if (text) {
+      try { parsed = JSON.parse(text); } catch { parsed = null; }
+    }
+    if (!res.ok) throw httpError(res.status, res.statusText, parsed);
+    return parsed;
+  }
+
+  let result = null;
+  let failure = null;
+  await readNDJSON(res, (ev) => {
+    if (ev.type === 'progress') {
+      onProgress(ev.done, ev.total);
+      return;
+    }
+    if (ev.type === 'result') {
+      result = ev.body;
+      return;
+    }
+    if (ev.type === 'error') {
+      failure = httpError(ev.status || 409, '', { error: ev.error });
+    }
+  });
+  if (failure) throw failure;
+  if (!result) throw httpError(500, '', { error: { message: '进度流没有给出结果' } });
+  return result;
 }
 
 // ---------- 令牌 ----------
@@ -652,6 +730,24 @@ function cellKind(column) {
 function updatePendingBar() {
   const bar = $('pending-bar');
   bar.replaceChildren();
+
+  // 分批执行中，这条位置只讲一件事：进度到哪、怎么停。
+  if (state.bulkRun) {
+    bar.hidden = false;
+    const run = state.bulkRun;
+    const pct = run.total > 0 ? Math.floor((run.done / run.total) * 100) : 0;
+    const text = document.createElement('span');
+    text.textContent = run.total > 0
+      ? '正在分批执行 · 已提交 ' + run.done + ' / ' + run.total + ' 行（' + pct + '%）'
+      : '正在分批执行 · 已提交 ' + run.done + ' 行';
+    const stop = document.createElement('button');
+    stop.id = 'btn-stop-bulk';
+    stop.textContent = '停止';
+    stop.onclick = () => run.abort();
+    bar.append(text, stop);
+    return;
+  }
+
   if (!state.pending.length) {
     // 没有待提交改动时，这条位置留给「刚才那次变更还能撤销」。
     // 撤销窗口 10 分钟，由服务端持有反向预案，这里只拿 id。
@@ -767,30 +863,55 @@ function rollbackNote(plan) {
   return '<p>已生成回滚语句，可在需要时手动执行。</p>';
 }
 
-async function applyPlan(pid, token, after) {
+async function applyPlan(pid, token, after, batched) {
   // after 决定应用完回到哪个视图：数据变更回数据页，结构变更回结构页。
   const refresh = after || (() => loadTablePage(true));
-  try {
-    const body = {};
-    if (token) body.approval_token = token;
-    const out = await api(path(API.changeApply, { pid }), {
-      method: 'POST',
-      body: JSON.stringify(body),
-    });
-    showRisk(out.risk, out.friction);
-    state.pending = [];
-    // 服务端在应用成功后返回撤销预案；不可逆变更时是 null。
-    state.undo = out.undo && out.undo.id
-      ? { id: out.undo.id, expiresAt: out.undo.expires_at, after: refresh }
-      : null;
+  const body = {};
+  if (token) body.approval_token = token;
+  const url = path(API.changeApply, { pid }) + (batched ? '?stream=1' : '');
+
+  // 分批执行可能跑几十秒，必须能看见进度、也能停下来。
+  const ctrl = batched ? new AbortController() : null;
+  if (ctrl) {
+    state.bulkRun = {
+      done: 0,
+      total: 0,
+      abort: () => ctrl.abort(),
+    };
     updatePendingBar();
-    setStatus('变更已应用 · ' + out.duration_ms + ' ms');
-    await refresh();
+  }
+
+  let out;
+  try {
+    out = ctrl
+      ? await applyStream(url, body, ctrl, (done, total) => {
+        state.bulkRun = { done, total, abort: () => ctrl.abort() };
+        updatePendingBar();
+      })
+      : await api(url, { method: 'POST', body: JSON.stringify(body) });
   } catch (e) {
+    if (ctrl && e.name === 'AbortError') {
+      // 中止不是失败：服务端在批与批之间停下，已提交的批撤不回来。
+      showNotice('已停止。已提交的批不会回滚，预案仍然有效——再执行一次会把剩下的行改完。', 'warn');
+      state.pending = [];
+      state.bulkRun = null;
+      updatePendingBar();
+      await refresh();
+      return;
+    }
+    state.bulkRun = null;
     if (e.code === 'POLICY_APPROVAL_REQUIRED') {
+      updatePendingBar();
       const t = e.detail && e.detail.approval && e.detail.approval.token;
       if (!t) { showNotice('服务端未返回审批凭证', 'error'); return; }
-      return applyPlan(pid, t, after);
+      return applyPlan(pid, t, after, batched);
+    }
+    if (e.code === 'CHANGE_APPLY_ABORTED') {
+      showNotice(e.message + (e.hint ? ' ' + e.hint : ''), 'warn');
+      state.pending = [];
+      updatePendingBar();
+      await refresh();
+      return;
     }
     if (e.code === 'SCHEMA_CHANGED') {
       showNotice('表结构已被改动，本次未执行。已重新读取结构，请再生成一次预案。', 'warn');
@@ -798,14 +919,27 @@ async function applyPlan(pid, token, after) {
       return;
     }
     if (e.code === 'CHANGE_ROW_CONFLICT') {
-      showNotice('有行已被其他会话修改，整批未生效。已刷新数据，请重试。', 'warn');
+      showNotice('有行已被其他会话修改，该批未生效。已刷新数据，请重试。', 'warn');
       state.pending = [];
       updatePendingBar();
       await loadTablePage(true);
       return;
     }
     showNotice('应用变更失败：' + e.message, 'error');
+    return;
   }
+
+  state.bulkRun = null;
+  showRisk(out.risk, out.friction);
+  state.pending = [];
+  // 服务端在应用成功后返回撤销预案；不可逆变更时是 null。
+  state.undo = out.undo && out.undo.id
+    ? { id: out.undo.id, expiresAt: out.undo.expires_at, after: refresh }
+    : null;
+  updatePendingBar();
+  setStatus('变更已应用 · ' + out.duration_ms + ' ms' +
+    (out.rows_affected > 0 ? ' · ' + out.rows_affected + ' 行' : ''));
+  await refresh();
 }
 
 // ---------- 结构比对 ----------
@@ -998,6 +1132,7 @@ async function submitBulk(body) {
       '<span class="badge ' + String(plan.risk).toLowerCase() + '">风险 ' + plan.risk + '</span>' +
       '<span class="badge">打扰 ' + plan.friction + '</span>' +
       '<span class="badge">影响 ' + res.affected + ' 行</span>' +
+      (res.batched ? '<span class="badge">分 ' + res.batches + ' 批</span>' : '') +
       (plan.irreversible ? '<span class="badge r4">不可逆</span>' : '') +
     '</div>' +
     '<p>将执行 ' + (plan.statements || []).length + ' 条语句：</p>' +
@@ -1005,7 +1140,7 @@ async function submitBulk(body) {
     sampleHTML + noteHTML, '执行');
   if (!ok) return;
 
-  await applyPlan(plan.id);
+  await applyPlan(plan.id, undefined, undefined, !!res.batched);
 }
 
 // ---------- 建表 ----------

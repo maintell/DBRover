@@ -77,6 +77,9 @@ type ChangePlan struct {
 	// ExpectTableAbsent 为 true 时，执行前要求目标表仍然不存在。
 	// 这是建表预案的竞态保护：别人先建了同名表，就不该再按计划去建。
 	ExpectTableAbsent bool `json:"-"`
+	// Bulk 非空表示这是一次批量修改，且需要按主键分批执行。
+	// 只在服务端保管：客户端拿到的是行数与语句预览，不需要分批细节。
+	Bulk *BulkExecPlan `json:"-"`
 }
 
 // ChangeSetRequest 是构建预案的输入。
@@ -303,6 +306,20 @@ func (e *Executor) cfgSchema() string {
 
 // ApplyChangePlan 执行预案。摩擦与审批沿用统一执行门。
 func (e *Executor) ApplyChangePlan(ctx context.Context, plan *ChangePlan, req Request) (*Outcome, error) {
+	return e.ApplyChangePlanWithProgress(ctx, plan, req, nil)
+}
+
+// ApplyChangePlanWithProgress 与 ApplyChangePlan 相同，但可以拿到分批进度。
+//
+// 进度只对分批批量修改有意义（一次几万行、要跑几十秒）；其余预案在第一行
+// 进度回调之前就已经结束了。进度回调必须是廉价且不阻塞的：它在批与批之间被同步调用。
+func (e *Executor) ApplyChangePlanWithProgress(
+	ctx context.Context,
+	plan *ChangePlan,
+	req Request,
+	progress BulkProgress,
+) (*Outcome, error) {
+
 	started := time.Now()
 	actor := actorOf(req.Actor)
 	out := &Outcome{ExecutionID: newID()}
@@ -355,12 +372,17 @@ func (e *Executor) ApplyChangePlan(ctx context.Context, plan *ChangePlan, req Re
 		return out, nil
 	}
 
+	// 分批批量修改走另一条执行路径：每批一个独立事务，批间可中止。
+	// 其余预案仍然是「一个事务里全做完」，任何一条不符合预期就整体回滚。
+	if plan.Bulk != nil {
+		return e.applyBulkBatches(ctx, plan, req, out, started, progress)
+	}
+
 	sess, err := e.conn.Acquire(ctx)
 	if err != nil {
 		return e.fail(req, out, actor, started, plan.Risk, plan.Friction, err)
 	}
 	defer func() { _ = sess.Close() }()
-
 	// 单事务执行，任何一条不符合预期就整体回滚。
 	// 开不出事务就中止：降级成「逐条自动提交」会在中途失败时留下半改状态，
 	// 那正是变更集要避免的事。
@@ -393,6 +415,7 @@ func (e *Executor) ApplyChangePlan(ctx context.Context, plan *ChangePlan, req Re
 			e.record(actor, req, out, "error", st.SQL, out.Err.Message)
 			return out, nil
 		}
+		out.RowsAffected += res.RowsAffected
 	}
 
 	if err := sess.Commit(ctx); err != nil {

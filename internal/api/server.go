@@ -1038,6 +1038,61 @@ func (s *Server) buildUndoPlan(ctx context.Context, sp *storedPlan) *service.Cha
 	return undo
 }
 
+// applyWriter 把「普通 JSON 响应」与「NDJSON 进度流」统一起来。
+//
+// 关键约束：状态码只在还没发出第一条进度时才能改。一旦进度开始，
+// 响应头就已经定了，后续只能用一条 {"type":"error"} 行把问题讲清楚——
+// 不能在流里再插一个 HTTP 428，那时候前端已经在读 200 的 body 了。
+type applyWriter struct {
+	w       http.ResponseWriter
+	flusher http.Flusher
+	stream  bool
+	started bool
+}
+
+func (a *applyWriter) progress(done, total int64) {
+	if a == nil || !a.stream {
+		return
+	}
+	if !a.started {
+		a.started = true
+		h := a.w.Header()
+		h.Set("Content-Type", "application/x-ndjson; charset=utf-8")
+		h.Set("Cache-Control", "no-store")
+		// 反向代理不能把流缓冲起来，否则进度会一次性到达，等于没有进度。
+		h.Set("X-Accel-Buffering", "no")
+		a.w.WriteHeader(http.StatusOK)
+	}
+	_ = json.NewEncoder(a.w).Encode(map[string]any{"type": "progress", "done": done, "total": total})
+	a.flush()
+}
+
+func (a *applyWriter) flush() {
+	if a.flusher != nil {
+		a.flusher.Flush()
+	}
+}
+
+// send 返回最终结果。已进入流模式时改成一条 result 行，状态码放在行里。
+func (a *applyWriter) send(status int, v any) {
+	if a.stream && a.started {
+		_ = json.NewEncoder(a.w).Encode(map[string]any{"type": "result", "status": status, "body": v})
+		a.flush()
+		return
+	}
+	writeJSON(a.w, status, v)
+}
+
+// fail 返回错误。已进入流模式时降级为一条 error 行。
+func (a *applyWriter) fail(status int, body errorBody) {
+	if a.stream && a.started {
+		_ = json.NewEncoder(a.w).Encode(map[string]any{"type": "error", "status": status, "error": body.Error})
+		a.flush()
+		return
+	}
+	writeJSON(a.w, status, body)
+}
+
 func (s *Server) handleChangeApply(w http.ResponseWriter, r *http.Request) {
 	pid := r.PathValue("pid")
 
@@ -1066,18 +1121,27 @@ func (s *Server) handleChangeApply(w http.ResponseWriter, r *http.Request) {
 		approved = true
 	}
 
-	out, err := sp.exec.ApplyChangePlan(r.Context(), sp.plan, service.Request{
+	// ?stream=1 时用 NDJSON 逐批回报进度。只有分批批量修改会真的产生进度事件；
+	// 其余预案仍然得到一份普通 JSON 响应，前端按 Content-Type 分辨。
+	aw := &applyWriter{w: w, stream: r.URL.Query().Get("stream") == "1"}
+	if f, ok := w.(http.Flusher); ok {
+		aw.flusher = f
+	}
+
+	out, err := sp.exec.ApplyChangePlanWithProgress(r.Context(), sp.plan, service.Request{
 		Approval: approved, StatementHash: sp.plan.ID, Actor: "human:http",
-	})
+	}, aw.progress)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "CHANGE_APPLY_FAILED", "internal", err.Error(), "", false)
+		aw.fail(http.StatusBadRequest, errorBody{Error: errorDetail{
+			Code: "CHANGE_APPLY_FAILED", Category: "internal", Message: err.Error(),
+		}})
 		return
 	}
 
 	if out.Blocked {
 		if out.ApprovalRequired {
 			exp := time.Now().Add(approvalTTL)
-			writeJSON(w, http.StatusPreconditionRequired, errorBody{Error: errorDetail{
+			aw.fail(http.StatusPreconditionRequired, errorBody{Error: errorDetail{
 				Code: "POLICY_APPROVAL_REQUIRED", Category: "policy",
 				Message: out.Reason,
 				Hint:    "确认预案里的语句后，用返回的 token 重新提交",
@@ -1090,12 +1154,28 @@ func (s *Server) handleChangeApply(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		code, status, hint := classifyBlock(out)
-		writeError(w, status, code, "policy", out.Reason, hint, false)
+		aw.fail(status, errorBody{Error: errorDetail{
+			Code: code, Category: "policy", Message: out.Reason, Hint: hint,
+		}})
 		return
 	}
 	if out.Err != nil {
-		writeError(w, out.Err.HTTPStatus(), out.Err.Code, out.Err.Category,
-			out.Err.Message, out.Err.Hint, out.Err.Retryable)
+		aw.fail(out.Err.HTTPStatus(), errorBody{Error: errorDetail{
+			Code: out.Err.Code, Category: out.Err.Category,
+			Message: out.Err.Message, Hint: out.Err.Hint, Retryable: out.Err.Retryable,
+		}})
+		return
+	}
+
+	// 中止：已经提交的批留在库里。预案刻意保留，用户可以重新提交把剩下的行改完
+	// （SET 是常量，重复执行幂等），所以这里不能当成功把预案删掉。
+	if out.Aborted {
+		aw.fail(http.StatusConflict, errorBody{Error: errorDetail{
+			Code: "CHANGE_APPLY_ABORTED", Category: "policy",
+			Message: out.Reason,
+			Hint: fmt.Sprintf("已提交 %d 行且不回滚；预案仍有效，可重新提交改完剩余行",
+				out.RowsAffected),
+		}})
 		return
 	}
 
@@ -1105,10 +1185,11 @@ func (s *Server) handleChangeApply(w http.ResponseWriter, r *http.Request) {
 	s.mu.Unlock()
 
 	body := map[string]any{
-		"execution_id": out.ExecutionID,
-		"risk":         out.Risk.String(),
-		"friction":     out.Friction.String(),
-		"duration_ms":  out.Duration.Milliseconds(),
+		"execution_id":  out.ExecutionID,
+		"risk":          out.Risk.String(),
+		"friction":      out.Friction.String(),
+		"duration_ms":   out.Duration.Milliseconds(),
+		"rows_affected": out.RowsAffected,
 	}
 	// 撤销预案：反向语句申请时就算好了，这里只是登记成可执行预案。
 	// 没有反向语句时显式给 null，让前端知道「这次改不了回来」而不是留空猜。
@@ -1122,7 +1203,7 @@ func (s *Server) handleChangeApply(w http.ResponseWriter, r *http.Request) {
 		body["undo"] = nil
 	}
 
-	writeJSON(w, http.StatusOK, body)
+	aw.send(http.StatusOK, body)
 }
 
 // lazyWriteWriter 把响应头与状态码推迟到「第一次真正写出数据」时才发。

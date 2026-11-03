@@ -56,6 +56,13 @@ type BulkUpdateResult struct {
 	Samples  []BulkRowDiff `json:"samples,omitempty"`
 	// Note 是需要原样展示给用户的说明（例如「本批不生成回滚」）。
 	Note string `json:"note,omitempty"`
+	// Batched 表示执行时会按主键键集分批推进，而不是一个事务改完。
+	// 客户端据此决定是否用带进度的流式执行。
+	Batched bool `json:"batched"`
+	// BatchSize 是每批行数，Batched 为 false 时无意义。
+	BatchSize int `json:"batch_size,omitempty"`
+	// Batches 是预计的批次数。
+	Batches int64 `json:"batches,omitempty"`
 }
 
 // BuildBulkUpdatePlan 生成条件批量修改的预案。
@@ -149,7 +156,7 @@ func (e *Executor) BuildBulkUpdatePlan(ctx context.Context, req BulkUpdateReques
 	if len(plan.Rollback) == 0 {
 		plan.Irreversible = true
 		if affected > bulkUndoLimit {
-			res.Note = fmt.Sprintf("影响 %d 行，超过逐行回滚生成上限（%d），本批不生成回滚；"+
+			res.Note = fmt.Sprintf("影响 %d 行，超过逐行回滚生成上限（%d），本次修改不生成回滚；"+
 				"如需回滚请先备份这些行。", affected, bulkUndoLimit)
 			if !req.AcceptNoRollback {
 				return nil, fmt.Errorf("%w（影响 %d 行）", ErrBulkNeedsNoRollbackAck, affected)
@@ -158,6 +165,34 @@ func (e *Executor) BuildBulkUpdatePlan(ctx context.Context, req BulkUpdateReques
 			res.Note = "该表没有主键，无法逐行定位，本批不生成回滚。"
 		} else {
 			res.Note = "没有命中任何行，无需回滚。"
+		}
+	}
+
+	// 分批：影响行数超过单批上限时按主键键集推进（docs/06 §3.2）。
+	//
+	// 只有单列主键才启用。多列主键要么得拼出各引擎方言不一的行值比较，
+	// 要么让绑定参数个数按主键列数翻倍——都不如老老实实走一个大事务，
+	// 代价只是「中途失败整体回滚」，对几万行的量级是可接受的。
+	if affected > DefaultBulkBatchSize {
+		switch {
+		case len(pk) == 1:
+			plan.Bulk = &BulkExecPlan{
+				Set:       req.Set,
+				Filter:    req.Filter,
+				PK:        pk[0],
+				PKType:    known[strings.ToLower(pk[0])].typ,
+				BatchSize: DefaultBulkBatchSize,
+			}
+			res.Batched = true
+			res.BatchSize = DefaultBulkBatchSize
+			res.Batches = (affected + int64(DefaultBulkBatchSize) - 1) / int64(DefaultBulkBatchSize)
+			res.Note = appendNote(res.Note, fmt.Sprintf(
+				"将按主键分 %d 批执行（每批 %d 行），每批各自提交；"+
+					"中途失败或中止时，已提交的批不回滚。",
+				res.Batches, DefaultBulkBatchSize))
+		case len(pk) > 1:
+			res.Note = appendNote(res.Note,
+				"这张表是复合主键，无法按单列键集分批；将在一个事务里一次改完，中途失败会整体回滚。")
 		}
 	}
 
@@ -170,6 +205,14 @@ func (e *Executor) BuildBulkUpdatePlan(ctx context.Context, req BulkUpdateReques
 		ReadOnlyConnection: !e.mode.AllowsWrite(),
 	})
 	return res, nil
+}
+
+// appendNote 把一句说明接到已有说明后面，空说明时不留下前导空格。
+func appendNote(existing, add string) string {
+	if existing == "" {
+		return add
+	}
+	return existing + " " + add
 }
 
 // sortedSetKeys 让 SET 子句的列顺序稳定，便于测试与审计比对。
