@@ -33,6 +33,27 @@ func (t Tool) schema() ToolSchema {
 	return ToolSchema{Name: t.Name, Description: t.Description, Parameters: t.Parameters}
 }
 
+// ToolMeta 是一个工具的类别信息：名字、风险等级、是否会改数据。
+//
+// 刻意与 ToolSchema 分开：ToolSchema 是**给模型看的**契约，多发一个字段就是
+// 多发一份提示；而「哪些工具会写」是我们自己的判据。评测集与测试靠它判断
+// 「写操作有没有被执行」——任何地方都不该再手写一份写工具清单。
+type ToolMeta struct {
+	Name  string
+	Risk  policy.Level
+	Write bool
+}
+
+// ToolMetas 返回全部工具的元数据，按名字排序。
+func (r *Runtime) ToolMetas() []ToolMeta {
+	out := make([]ToolMeta, 0, len(r.tools))
+	for _, t := range r.tools {
+		out = append(out, ToolMeta{Name: t.Name, Risk: t.Risk, Write: t.Write})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	return out
+}
+
 // schemas 返回全部工具契约，顺序稳定（模型对工具顺序敏感）。
 func (r *Runtime) schemas() []ToolSchema {
 	names := make([]string, 0, len(r.tools))

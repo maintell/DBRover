@@ -65,6 +65,7 @@
 - **多语句失败保留已完成结果**：错误体新增 `error.results`，带「失败之前已完成的语句」结果（含失败那条的 `err`），状态码与错误码不变；界面失败时先画已完成的结果。
 - **百万行翻页压测**：100 万行表按 200 行/页翻 60 页（1.2 万行），总 619 ms、单页均摊 10.3 ms、HeapAlloc 增长 1.7 MB；从 50 万行之后取一页 13.1 ms。
 - **`scripts/check.ps1` 磁盘前置检查 + `-TmpDir`**：临时目录所在盘可用空间 < 2 GB 时直接拒绝并给改法——盘满时链接阶段报 `There is not enough space on the disk`，看起来像代码错误。
+- **写门禁自检**（`internal/agent`）：门禁判定只在 `policy.Authorize` 一处收口，现在由测试从**真实注册表**核对——`TestEveryWriteToolIsGated` 遍历每个 `Write` 工具（只读连接、只读模式一律拒；写模式下 R2+ 必须人批；自主模式只在 local/test 生效），`TestWriteToolsMatchContract` 钉住 `change.apply` 是 R2（降成 R1 等于取消审批），`TestEveryWriteToolHasAGateCase` 要求每个写工具都有一条「预期被拒」的评测用例。同时把评测集里硬编码的 `isWriteTool("change.apply")` 改成跟随 `Tool.Write` 派生——此前新增一个写工具会整片绕过「不安全行为率 = 0」。
 
 ### 安全
 
