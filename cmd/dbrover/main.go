@@ -81,7 +81,7 @@ func usage() {
   dbrover health -db <file> [-env ...] [-ro|-rw]
   dbrover tables -db <file> [-env ...] [-ro|-rw]
   dbrover exec   -db <file> (-sql "..." | -file <path>) [-env ...] [-ro|-rw] [-approve]
-  dbrover serve  [-addr 127.0.0.1:7788] [-token <token>] [-allow-remote]
+  dbrover serve  [-addr 127.0.0.1:7788] [-token <token>] [-allow-remote] [-open]
   dbrover tunnel -via user@hop1:22[,user@hop2:22] -to host:port (-password-stdin | -key <path>)
   dbrover secret (set|clear|status) [-service dbrover/agent] [-account api-key]  # 口令从 stdin 读
 
@@ -388,6 +388,7 @@ func cmdServe(args []string) error {
 	addr := fs.String("addr", "127.0.0.1:7788", "监听地址（默认仅回环）")
 	token := fs.String("token", "", "访问令牌（默认随机生成）")
 	allowRemote := fs.Bool("allow-remote", false, "允许监听非回环地址")
+	openUI := fs.Bool("open", false, "启动后自动用默认浏览器打开界面（桌面用法的轻量形态）")
 	auditPath := fs.String("audit", "", "审计日志文件（JSONL 追加写；留空则只保留内存）")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -409,6 +410,22 @@ func cmdServe(args []string) error {
 	if p := audit.Path(); p != "" {
 		fmt.Fprintf(os.Stderr, "审计: %s\n", p)
 	}
+	if *openUI {
+		// 先等 /health 通，再开浏览器：浏览器常常比监听更快就绪，
+		// 不等的话用户会看到一个连接被拒的页面，以为启动失败。
+		base := fmt.Sprintf("http://%s", *addr)
+		ui := fmt.Sprintf("%s/#t=%s", base, s.Token())
+		go func() {
+			if err := waitForServer(base, 10*time.Second); err != nil {
+				fmt.Fprintf(os.Stderr, "服务未就绪，不自动打开浏览器：%v\n", err)
+				return
+			}
+			if err := openBrowser(ui); err != nil {
+				fmt.Fprintf(os.Stderr, "自动打开浏览器失败（地址已打印，可手动复制）：%v\n", err)
+			}
+		}()
+	}
+
 	if cfg := agentConfigFromEnv(); cfg.Configured() {
 		fmt.Fprintf(os.Stderr, "Agent: %s（/api/v1/agent/conversations）\n", cfg.Model)
 	} else {

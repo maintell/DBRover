@@ -123,7 +123,7 @@ DBRover 面向同时维护多种数据库的工程师：一个人可能上午在
 | `internal/api` | 回环 HTTP 服务：token 鉴权、连接管理、`exec`、流式游标、键集分页、变更预案、结构变更、导出、审计查询、OpenAPI 契约 |
 | `internal/infra/tunnel` | SSH 隧道与跳板链：多跳、密码/私钥/agent 认证、主机密钥 TOFU |
 | `internal/webui` | **临时界面**：免构建的内嵌 Web UI（连接、对象树、SQL、结果网格、字段编辑、筛选排序、结构变更、导出、审批弹窗） |
-| `cmd/dbrover` | CLI：`version` / `health` / `tables` / `exec` / `serve` / `tunnel` / `secret`（把口令存进系统凭据库） |
+| `cmd/dbrover` | CLI：`version` / `health` / `tables` / `exec` / `serve`（`-open` 自动开浏览器）/ `tunnel` / `secret`（把口令存进系统凭据库） |
 
 > `internal/webui` 是为了「能点着验收」而做的最小实现，**不是最终前端**。最终前端仍是 [ADR-0001](docs/adr/0001-tech-stack.md) 规定的 React + TypeScript + Vite 栈；先做无构建版本是因为本机磁盘紧张，不装 node_modules。
 
