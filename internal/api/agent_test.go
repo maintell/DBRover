@@ -1,0 +1,300 @@
+package api_test
+
+import (
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"regexp"
+	"testing"
+
+	"github.com/maintell/DBRover/internal/api"
+)
+
+// fakeModel 是一个 OpenAI 兼容的假模型服务。
+//
+// 用它的理由和 agent 包里的脚本化 Provider 一样：要验的是协议与权限，
+// 不是模型的智力。每次被调用时按 call 序号返回脚本里的响应。
+type fakeModel struct {
+	calls  int
+	script []string
+}
+
+func (f *fakeModel) handler(t *testing.T) http.HandlerFunc {
+	t.Helper()
+	return func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			Messages []map[string]any `json:"messages"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Errorf("假模型收到非法请求体: %v", err)
+		}
+		n := f.calls
+		f.calls++
+		var content string
+		if n < len(f.script) {
+			content = f.script[n]
+		} else {
+			content = textReply("（脚本用完了）")
+		}
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprintf(w, `{"choices":[{"message":%s,"finish_reason":"stop"}],
+			"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`, content)
+	}
+}
+
+// textReply 构造一条纯文本答复。
+func textReply(text string) string {
+	b, _ := json.Marshal(text)
+	return `{"role":"assistant","content":` + string(b) + `}`
+}
+
+// toolReply 构造一条工具调用答复。args 是 JSON 原文。
+func toolReply(id, name, args string) string {
+	b, _ := json.Marshal(args)
+	return `{"role":"assistant","content":"","tool_calls":[{"id":"` + id +
+		`","type":"function","function":{"name":"` + name + `","arguments":` + string(b) + `}}]}`
+}
+
+// execSQL 执行一条写语句，遇到审批要求时用返回的 token 重提。
+func execSQL(t *testing.T, ts *httptest.Server, connID, sql string) {
+	t.Helper()
+	code, body := do(t, ts, http.MethodPost, "/api/v1/connections/"+connID+"/exec",
+		map[string]any{"sql": sql}, true)
+	if code == http.StatusPreconditionRequired {
+		er, _ := body["error"].(map[string]any)
+		ap, _ := er["approval"].(map[string]any)
+		token, _ := ap["token"].(string)
+		code, body = do(t, ts, http.MethodPost, "/api/v1/connections/"+connID+"/exec",
+			map[string]any{"sql": sql, "approval_token": token}, true)
+	}
+	if code >= 300 {
+		t.Fatalf("执行 %q 失败: %d %v", sql, code, body)
+	}
+}
+
+var planIDPattern = regexp.MustCompile(`\\?"plan_id\\?":\\?"([^"\\]+)`)
+
+// lastPlanID 从请求体里抠出上一个工具结果中的预案 ID。
+// 模型看到的就是这段 JSON，这里模拟「模型读到了 plan_id」。
+func lastPlanID(raw []byte) string {
+	m := planIDPattern.FindSubmatch(raw)
+	if len(m) < 2 {
+		return ""
+	}
+	return string(m[1])
+}
+
+// TestAgentStatusAndConfigGate 未配置模型服务时，端点要明确说清楚缺什么。
+func TestAgentStatusAndConfigGate(t *testing.T) {
+	_, ts, dir := newServer(t)
+
+	code, body := do(t, ts, http.MethodGet, "/api/v1/agent/status", nil, true)
+	if code != http.StatusOK {
+		t.Fatalf("status 状态码 = %d", code)
+	}
+	if body["configured"] != false {
+		t.Fatalf("未配置时 configured 应为 false: %v", body)
+	}
+	if s, _ := body["hint"].(string); s == "" {
+		t.Error("未配置时必须给出 hint")
+	}
+
+	connID := createConn(t, ts, dir, "test", "read-write")
+	code, body = do(t, ts, http.MethodPost, "/api/v1/agent/conversations",
+		map[string]any{"connection_id": connID, "mode": "read-only"}, true)
+	if code != http.StatusBadRequest {
+		t.Fatalf("未配置时新建会话应 400，实际 %d: %v", code, body)
+	}
+	er, _ := body["error"].(map[string]any)
+	if er["code"] != "AGENT_NOT_CONFIGURED" {
+		t.Fatalf("错误码 = %v", er["code"])
+	}
+}
+
+// TestAgentConversationRunsQuery 走一遍真实链路：HTTP → Runtime → 工具 → SQLite。
+func TestAgentConversationRunsQuery(t *testing.T) {
+	s, ts, dir := newServer(t)
+	fake := &fakeModel{script: []string{
+		toolReply("c1", "query.execute", `{"sql":"SELECT COUNT(*) AS n FROM items"}`),
+		textReply("表里没有数据"),
+	}}
+	model := httptest.NewServer(fake.handler(t))
+	defer model.Close()
+	s.SetAgentConfig(api.AgentConfig{BaseURL: model.URL, Model: "fake"})
+
+	connID := createConn(t, ts, dir, "test", "read-write")
+	execSQL(t, ts, connID, "CREATE TABLE items (id INTEGER PRIMARY KEY)")
+
+	code, body := do(t, ts, http.MethodPost, "/api/v1/agent/conversations",
+		map[string]any{"connection_id": connID, "mode": "read-only"}, true)
+	if code != http.StatusCreated {
+		t.Fatalf("新建会话 = %d %v", code, body)
+	}
+	convID, _ := body["id"].(string)
+	if convID == "" {
+		t.Fatal("没有返回会话 id")
+	}
+	if body["mode"] != "read-only" {
+		t.Errorf("mode = %v", body["mode"])
+	}
+	if n, _ := body["tools"].(float64); n != 14 {
+		t.Errorf("工具数 = %v，期望 14", body["tools"])
+	}
+
+	code, body = do(t, ts, http.MethodPost, "/api/v1/agent/conversations/"+convID+"/messages",
+		map[string]any{"content": "items 有多少行"}, true)
+	if code != http.StatusOK {
+		t.Fatalf("发消息 = %d %v", code, body)
+	}
+	if body["answer"] != "表里没有数据" {
+		t.Errorf("answer = %v", body["answer"])
+	}
+	steps, _ := body["steps"].([]any)
+	if len(steps) != 1 {
+		t.Fatalf("步骤数 = %d", len(steps))
+	}
+	step0, _ := steps[0].(map[string]any)
+	if step0["tool"] != "query.execute" || step0["ok"] != true {
+		t.Errorf("第一步 = %v", step0)
+	}
+	if body["stopped"] != "" {
+		t.Errorf("不该有停止原因: %v", body["stopped"])
+	}
+}
+
+// TestAgentApprovalEndpoint 走一遍审批：预案生成 → 被拦下 → 人批准 → 执行成功。
+func TestAgentApprovalEndpoint(t *testing.T) {
+	s, ts, dir := newServer(t)
+	fake := &fakeModel{script: []string{
+		toolReply("c1", "change.plan", `{"ddl":{"table":{"name":"items"},
+			"action":"create_index","index":{"name":"idx_v","columns":["v"]}}}`),
+		// 第 2 次：模型读到 plan_id 后要求执行（此时还没批准）
+		"__apply__",
+		textReply("预案已生成，等你确认"),
+		// 第 4 次：批准之后模型再要求执行一次
+		"__apply__",
+		textReply("索引已建好"),
+	}}
+	model := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body := make([]byte, 0, 4096)
+		buf := make([]byte, 4096)
+		for {
+			n, err := r.Body.Read(buf)
+			if n > 0 {
+				body = append(body, buf[:n]...)
+			}
+			if err != nil {
+				break
+			}
+		}
+		n := fake.calls
+		fake.calls++
+		var content string
+		switch {
+		case n >= len(fake.script):
+			content = textReply("（脚本用完了）")
+		case fake.script[n] == "__apply__":
+			id := lastPlanID(body)
+			if id == "" {
+				t.Errorf("第 %d 次调用：请求体里没有 plan_id", n)
+			}
+			content = toolReply("c-apply", "change.apply", `{"plan_id":"`+id+`"}`)
+		default:
+			content = fake.script[n]
+		}
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprintf(w, `{"choices":[{"message":%s,"finish_reason":"stop"}],
+			"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`, content)
+	}))
+	defer model.Close()
+	s.SetAgentConfig(api.AgentConfig{BaseURL: model.URL, Model: "fake"})
+
+	connID := createConn(t, ts, dir, "test", "read-write")
+	execSQL(t, ts, connID, "CREATE TABLE items (id INTEGER PRIMARY KEY, v TEXT)")
+
+	code, body := do(t, ts, http.MethodPost, "/api/v1/agent/conversations",
+		map[string]any{"connection_id": connID, "mode": "write-with-approval"}, true)
+	if code != http.StatusCreated {
+		t.Fatalf("新建会话 = %d %v", code, body)
+	}
+	convID, _ := body["id"].(string)
+
+	// 第一轮：生成 R3 预案并尝试执行 → 被拦下，并带回待批预案。
+	code, body = do(t, ts, http.MethodPost, "/api/v1/agent/conversations/"+convID+"/messages",
+		map[string]any{"content": "给 v 建个索引"}, true)
+	if code != http.StatusOK {
+		t.Fatalf("发消息 = %d %v", code, body)
+	}
+	steps, _ := body["steps"].([]any)
+	if len(steps) != 2 {
+		t.Fatalf("步骤数 = %d，期望 2", len(steps))
+	}
+	applyStep, _ := steps[1].(map[string]any)
+	if applyStep["ok"] == true {
+		t.Fatal("未经批准的 R3 预案不该执行")
+	}
+	er, _ := applyStep["error"].(map[string]any)
+	if er["code"] != "APPROVAL_REQUIRED" {
+		t.Fatalf("错误码 = %v", er["code"])
+	}
+	pending, _ := body["pending_approvals"].([]any)
+	if len(pending) != 1 {
+		t.Fatalf("待批预案数 = %d", len(pending))
+	}
+	card, _ := pending[0].(map[string]any)
+	planID, _ := card["plan_id"].(string)
+	if planID == "" {
+		t.Fatal("审批卡片里没有 plan_id")
+	}
+	// 审批卡片必须带最终 SQL，而不是一句描述。
+	if stmts, _ := card["statements"].([]any); len(stmts) == 0 {
+		t.Fatal("审批卡片必须带最终 SQL")
+	}
+
+	// 人批准。
+	code, body = do(t, ts, http.MethodPost,
+		"/api/v1/agent/conversations/"+convID+"/approvals/"+planID,
+		map[string]any{"approve": true}, true)
+	if code != http.StatusOK || body["approved"] != true {
+		t.Fatalf("批准 = %d %v", code, body)
+	}
+
+	// 第二轮：模型再执行一次 → 这次应该成功。
+	code, body = do(t, ts, http.MethodPost, "/api/v1/agent/conversations/"+convID+"/messages",
+		map[string]any{"content": "现在执行"}, true)
+	if code != http.StatusOK {
+		t.Fatalf("第二轮 = %d %v", code, body)
+	}
+	steps, _ = body["steps"].([]any)
+	if len(steps) != 1 {
+		t.Fatalf("第二轮步骤数 = %d", len(steps))
+	}
+	done, _ := steps[0].(map[string]any)
+	if done["ok"] != true {
+		t.Fatalf("批准后应执行成功: %v", done)
+	}
+	if n, _ := body["pending_approvals"].([]any); len(n) != 0 {
+		t.Errorf("执行完不该还有待批预案: %v", n)
+	}
+}
+
+// TestAgentApprovalRejectsUnknownPlan 批准不存在的预案要 404，不能默默放行。
+func TestAgentApprovalRejectsUnknownPlan(t *testing.T) {
+	s, ts, dir := newServer(t)
+	fake := &fakeModel{}
+	model := httptest.NewServer(fake.handler(t))
+	defer model.Close()
+	s.SetAgentConfig(api.AgentConfig{BaseURL: model.URL, Model: "fake"})
+
+	connID := createConn(t, ts, dir, "test", "read-write")
+	_, body := do(t, ts, http.MethodPost, "/api/v1/agent/conversations",
+		map[string]any{"connection_id": connID, "mode": "read-only"}, true)
+	convID, _ := body["id"].(string)
+
+	code, body := do(t, ts, http.MethodPost,
+		"/api/v1/agent/conversations/"+convID+"/approvals/不存在", map[string]any{}, true)
+	if code != http.StatusNotFound {
+		t.Fatalf("状态码 = %d %v", code, body)
+	}
+}

@@ -47,6 +47,9 @@ type Server struct {
 	// plans 按 id 保管变更预案。	// 只存服务端生成的预案：客户端不能回传预案，否则等于绕过风险分级。
 	plans map[string]*storedPlan
 	seq   int
+	// agentCfg 是模型服务配置；agentConvs 是按会话隔离的 Agent 运行时。
+	agentCfg   AgentConfig
+	agentConvs map[string]*agentConv
 }
 
 type storedPlan struct {
@@ -73,7 +76,8 @@ func New(token string, opener Opener, audit service.AuditSink) *Server {
 		token = randomToken()
 	}
 	return &Server{token: token, opener: opener, audit: audit,
-		conns: map[string]*entry{}, cursorOwner: map[string]*entry{}, plans: map[string]*storedPlan{}}
+		conns: map[string]*entry{}, cursorOwner: map[string]*entry{}, plans: map[string]*storedPlan{},
+		agentConvs: map[string]*agentConv{}}
 }
 
 // Token 返回本次进程使用的访问令牌。
@@ -174,6 +178,11 @@ func (s *Server) routes() []route {
 		{http.MethodGet, "/api/v1/connections/{id}/kv/value", false, s.handleKVValue},
 		{http.MethodPost, "/api/v1/connections/{id}/kv/command", false, s.handleKVCommand},
 		{http.MethodPost, "/api/v1/connections/{id}/kv/apply", false, s.handleKVApply},
+		// Agent：会话绑定连接与模式，预案在会话内保管，批准入口只给人用。
+		{http.MethodGet, "/api/v1/agent/status", false, s.handleAgentStatus},
+		{http.MethodPost, "/api/v1/agent/conversations", false, s.handleAgentConversationCreate},
+		{http.MethodPost, "/api/v1/agent/conversations/{id}/messages", false, s.handleAgentMessage},
+		{http.MethodPost, "/api/v1/agent/conversations/{id}/approvals/{pid}", false, s.handleAgentApproval},
 	}
 }
 

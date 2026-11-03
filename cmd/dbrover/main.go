@@ -397,6 +397,7 @@ func cmdServe(args []string) error {
 
 	s := api.New(*token, openConnector, audit)
 	defer s.Close()
+	s.SetAgentConfig(agentConfigFromEnv())
 
 	fmt.Fprintf(os.Stderr, "dbrover 监听 http://%s\n", *addr)
 	fmt.Fprintf(os.Stderr, "界面: http://%s/#t=%s\n", *addr, s.Token())
@@ -404,10 +405,28 @@ func cmdServe(args []string) error {
 	if p := audit.Path(); p != "" {
 		fmt.Fprintf(os.Stderr, "审计: %s\n", p)
 	}
+	if cfg := agentConfigFromEnv(); cfg.Configured() {
+		fmt.Fprintf(os.Stderr, "Agent: %s（/api/v1/agent/conversations）\n", cfg.Model)
+	} else {
+		fmt.Fprintf(os.Stderr, "Agent: 未配置（设 DBRover_AGENT_BASE_URL 与 DBRover_AGENT_MODEL 后重启）\n")
+	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
 	return s.Serve(ctx, *addr, *allowRemote)
+}
+
+// agentConfigFromEnv 从环境变量读模型服务配置。
+//
+// 用环境变量而不是命令行参数：API Key 出现在命令行里会被进程列表与 shell 历史看到。
+// 但环境变量同样是明文，真正该做的是 OS 凭据库（docs/11 §8.3）——这一步还没做，
+// 已在那份文档里标为已知限制，不要因为「现在能用」就当作已完成。
+func agentConfigFromEnv() api.AgentConfig {
+	return api.AgentConfig{
+		BaseURL: strings.TrimSpace(os.Getenv("DBROVER_AGENT_BASE_URL")),
+		Model:   strings.TrimSpace(os.Getenv("DBROVER_AGENT_MODEL")),
+		APIKey:  os.Getenv("DBROVER_AGENT_API_KEY"),
+	}
 }
 
 // parseHops 解析 -via 参数：user@host:port[,user@host:port]。

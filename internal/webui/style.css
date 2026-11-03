@@ -332,3 +332,18 @@ label.inline {
   cursor: pointer;
 }
 .col-row button.col-del:hover { color: var(--danger); border-color: #7c2f2b; }
+
+/* Agent 审批卡片：最终 SQL 必须比「谁提的、什么时候」更显眼——
+   签字的人要看的是这句话会改什么。 */
+.approval {
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--warn);
+  background: var(--panel-2);
+  border-radius: 4px;
+  padding: 8px 10px;
+  margin: 8px 0;
+}
+.approval > div:first-child {
+  color: var(--muted);
+  margin-bottom: 6px;
+}

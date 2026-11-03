@@ -50,6 +50,10 @@ const API = {
   kvValue: '/api/v1/connections/:id/kv/value',
   kvApply: '/api/v1/connections/:id/kv/apply',
   kvCommand: '/api/v1/connections/:id/kv/command',
+  agentStatus: '/api/v1/agent/status',
+  agentConvs: '/api/v1/agent/conversations',
+  agentMessages: '/api/v1/agent/conversations/:id/messages',
+  agentApproval: '/api/v1/agent/conversations/:id/approvals/:pid',
 };
 
 // path 把 :param 占位符替换为实际值。
@@ -2261,7 +2265,212 @@ $('token').addEventListener('keydown', (e) => {
 $('conn').onchange = (e) => selectConnection(e.target.value);
 $('btn-reload').onclick = () => loadTables();
 $('btn-new-conn').onclick = () => newConnection();
+// ---------- AI 助手 ----------
+
+// 会话是「一条连接 + 一个权限模式」的绑定。换连接就得换会话：
+// 共用会话会让上一条连接上批准过的预案在下一条连接上也能执行。
+let agentConvID = '';
+let agentConvConn = '';
+
+// showAgent 是 AI 助手的入口。未配置模型服务时直接说清楚缺什么，
+// 而不是给一个点了没反应的输入框。
+async function showAgent() {
+  if (!state.current) {
+    showNotice('先选一条连接。', 'warn');
+    return;
+  }
+  let st;
+  try {
+    st = await api(API.agentStatus);
+  } catch (e) {
+    showNotice('读不到 AI 状态：' + e.message, 'error');
+    return;
+  }
+  if (!st.configured) {
+    showNotice(st.hint || '未配置模型服务，AI 助手不可用。', 'warn');
+    return;
+  }
+  const html =
+    '<p>' + escapeHTML(st.model) + ' · ' + escapeHTML(state.current.name) + '</p>' +
+    '<label class="field">问题</label>' +
+    '<textarea id="agent-q" rows="3" style="width:100%" placeholder="例如：哪张表增长最快"></textarea>' +
+    '<label class="field">权限</label>' +
+    '<select id="agent-mode" style="width:100%">' +
+    '<option value="read-only">只读：只查不改</option>' +
+    '<option value="write-with-approval">可写：每次执行都要你确认</option>' +
+    '</select>';
+  dialog('AI 助手', html, '提问').then(async (ok) => {
+    if (!ok) return;
+    await askAgent($('agent-q').value, $('agent-mode').value);
+  });
+}
+
+async function askAgent(question, mode) {
+  const q = String(question || '').trim();
+  if (!q) {
+    showNotice('问题不能为空。', 'warn');
+    return;
+  }
+  const conn = state.current;
+  try {
+    if (!agentConvID || agentConvConn !== conn.id) {
+      const c = await api(API.agentConvs, {
+        method: 'POST',
+        body: JSON.stringify({ connection_id: conn.id, mode: mode }),
+      });
+      agentConvID = c.id;
+      agentConvConn = conn.id;
+    }
+    setStatus('AI 正在跑…');
+    const res = await api(path(API.agentMessages, { id: agentConvID }), {
+      method: 'POST',
+      body: JSON.stringify({ content: q }),
+    });
+    renderAgent(q, res);
+    setStatus('AI 完成');
+  } catch (e) {
+    showNotice('AI 失败：' + e.message, 'error');
+  }
+}
+
+// renderAgent 画出步骤时间线与结论。
+//
+// 步骤要能展开到 SQL：审批与复核的对象是语句本身，不是模型的描述。
+function renderAgent(question, res) {
+  const wrap = document.createElement('div');
+  wrap.className = 'schema';
+
+  const who = document.createElement('div');
+  who.className = 'notice';
+  who.textContent = '你：' + question;
+  wrap.appendChild(who);
+
+  const steps = res.steps || [];
+  if (steps.length) {
+    const h = document.createElement('div');
+    h.className = 'head';
+    h.textContent = '步骤（' + steps.length + '）';
+    wrap.appendChild(h);
+    const ol = document.createElement('ol');
+    for (const s of steps) {
+      const li = document.createElement('li');
+      const mark = s.denied ? '被拒绝' : (s.ok ? '完成' : '失败');
+      li.textContent = s.tool + ' · ' + mark + ' · ' + s.duration_ms + 'ms' +
+        (s.summary ? ' · ' + s.summary : '');
+      if (s.error && s.error.message) {
+        li.textContent += '｜' + s.error.message +
+          (s.error.hint ? '（' + s.error.hint + '）' : '');
+      }
+      const sql = sqlOfArgs(s.args);
+      if (sql) {
+        const pre = document.createElement('pre');
+        pre.className = 'preview';
+        pre.textContent = sql;
+        li.appendChild(pre);
+      }
+      ol.appendChild(li);
+    }
+    wrap.appendChild(ol);
+  }
+
+  if (res.answer) {
+    const h = document.createElement('div');
+    h.className = 'head';
+    h.textContent = '结论';
+    wrap.appendChild(h);
+    const p = document.createElement('div');
+    p.className = 'notice';
+    p.textContent = res.answer;
+    wrap.appendChild(p);
+  }
+
+  if (res.stop_message) {
+    const n = document.createElement('div');
+    n.className = 'notice warn';
+    n.textContent = res.stop_message;
+    wrap.appendChild(n);
+  }
+
+  const pending = res.pending_approvals || [];
+  if (pending.length) {
+    const h = document.createElement('div');
+    h.className = 'head';
+    h.textContent = '待你确认（' + pending.length + '）';
+    wrap.appendChild(h);
+    for (const p of pending) {
+      wrap.appendChild(approvalCard(p));
+    }
+  }
+
+  $('results').replaceChildren(wrap);
+}
+
+// sqlOfArgs 从工具参数里取出 SQL 供人复核；没有就返回空串。
+function sqlOfArgs(args) {
+  if (!args) return '';
+  let v = args;
+  if (typeof v === 'string') {
+    try { v = JSON.parse(v); } catch { return ''; }
+  }
+  return typeof v.sql === 'string' ? v.sql : '';
+}
+
+// approvalCard 画一张审批卡片：最终 SQL + 风险 + 影响行数 + 两个按钮。
+function approvalCard(p) {
+  const box = document.createElement('div');
+  box.className = 'approval';
+
+  const head = document.createElement('div');
+  head.textContent = p.table + ' · ' + p.risk + ' · 影响 ' +
+    (p.affected_rows < 0 ? '未知' : p.affected_rows) + ' 行' +
+    (p.irreversible ? ' · 不可逆' : '');
+  box.appendChild(head);
+
+  const sql = (p.statements || []).map((s) => s.sql).join('\n');
+  const pre = document.createElement('pre');
+  pre.className = 'preview';
+  pre.textContent = sql;
+  box.appendChild(pre);
+
+  const bar = document.createElement('div');
+  bar.className = 'toolbar';
+  const yes = document.createElement('button');
+  yes.className = 'primary';
+  yes.textContent = '批准并继续';
+  yes.onclick = async () => {
+    try {
+      await api(path(API.agentApproval, { id: agentConvID, pid: p.plan_id }), {
+        method: 'POST',
+        body: JSON.stringify({ approve: true }),
+      });
+      // 批准只是「允许执行」，执行仍要模型发起一次调用——把这一步明说出来，
+      // 而不是在背后替它执行。
+      await askAgent('用户已批准预案 ' + p.plan_id + '，请继续执行', 'write-with-approval');
+    } catch (e) {
+      showNotice('批准失败：' + e.message, 'error');
+    }
+  };
+  const no = document.createElement('button');
+  no.textContent = '拒绝';
+  no.onclick = async () => {
+    try {
+      await api(path(API.agentApproval, { id: agentConvID, pid: p.plan_id }), {
+        method: 'POST',
+        body: JSON.stringify({ approve: false }),
+      });
+      showNotice('已拒绝，这张预案作废。', 'ok');
+      box.remove();
+    } catch (e) {
+      showNotice('拒绝失败：' + e.message, 'error');
+    }
+  };
+  bar.appendChild(yes);
+  bar.appendChild(no);
+  box.appendChild(bar);
+  return box;
+}
 $('btn-compare').onclick = () => showCompare();
+$('btn-agent').onclick = () => showAgent();
 $('btn-new-table').onclick = () => showCreateTable();
 $('btn-forget').onclick = () => {
   forgetToken();

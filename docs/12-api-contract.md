@@ -311,14 +311,28 @@ POST /connections
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
-| `POST` | `/agent/conversations` | 新建会话（绑定连接 + 模式） |
-| `GET` | `/agent/conversations/{id}` | 会话详情 |
-| `POST` | `/agent/conversations/{id}/messages` | 发送消息（SSE 或 WS 流式返回） |
-| `POST` | `/agent/conversations/{id}/approvals/{aid}` | 批准/拒绝 |
-| `POST` | `/agent/conversations/{id}/abort` | 中止 |
-| `GET` | `/agent/conversations/{id}/export` | 导出（含全部步骤） |
-| `GET` | `/agent/tools` | 工具清单与 schema |
-| `GET/POST` | `/agent/providers` | Provider 配置 |
+| `GET` | `/agent/status` | 模型服务是否可用（不返回 key） | ✅ |
+| `POST` | `/agent/conversations` | 新建会话（绑定连接 + 模式） | ✅ |
+| `GET` | `/agent/conversations/{id}` | 会话详情 | ⛔ |
+| `POST` | `/agent/conversations/{id}/messages` | 发送消息 | ✅ 同步返回（未做 SSE 流式） |
+| `POST` | `/agent/conversations/{id}/approvals/{aid}` | 批准/拒绝（`aid` 为预案 ID） | ✅ |
+| `POST` | `/agent/conversations/{id}/abort` | 中止 | ⛔ |
+| `GET` | `/agent/conversations/{id}/export` | 导出（含全部步骤） | ⛔ |
+| `GET` | `/agent/tools` | 工具清单与 schema | ⛔（运行时有 `Tools()`，但还没端点） |
+| `GET/POST` | `/agent/providers` | Provider 配置 | ⛔（现在走环境变量，见 `docs/11 §8.3`） |
+
+`messages` 的响应形状（未流式时）：
+
+```json
+{"answer":"…","steps":[{"index":0,"tool":"query.execute","ok":true,"summary":"3 行 × 1 列",
+  "duration_ms":12,"args":{"sql":"SELECT …"}}],
+ "notes":[],"usage":{"total_tokens":15},"stopped":"",
+ "pending_approvals":[{"plan_id":"…","table":"t","risk":"R3",
+   "affected_rows":-1,"statements":[{"sql":"CREATE INDEX …"}],"rollback":[…]}]}
+```
+
+`stopped` 非空表示这一轮没走完（`step_budget` / `loop` / `tool_failures` / `duration`），
+此时 HTTP 仍是 200：结论与已完成的步骤都要带回去，`stop_message` 说明原因。
 
 ### 2.8 审计与设置
 

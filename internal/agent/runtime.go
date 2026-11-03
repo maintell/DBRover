@@ -171,6 +171,14 @@ func (r *Runtime) Approve(planID string) error {
 	return nil
 }
 
+// Reject 由人调用，表示拒绝执行这张预案：直接丢掉，之后 apply 会报预案不存在。
+func (r *Runtime) Reject(planID string) {
+	r.mu.Lock()
+	delete(r.plans, planID)
+	delete(r.approved, planID)
+	r.mu.Unlock()
+}
+
 // PendingPlans 返回还没有被批准的预案，供界面渲染审批卡片。
 func (r *Runtime) PendingPlans() []*service.ChangePlan {
 	r.mu.Lock()

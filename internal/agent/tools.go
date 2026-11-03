@@ -494,43 +494,94 @@ func (r *Runtime) toolSample() Tool {
 func (r *Runtime) toolChangePlan() Tool {
 	return Tool{
 		Name: "change.plan",
-		Description: "为行级变更生成预案（不执行）。返回 plan_id、最终 SQL、影响行数、回滚语句与风险。" +
-			"执行必须另走 change.apply 且经人工审批。",
+		Description: "生成变更预案（不执行）。changes 走行级变更，ddl 走结构变更，二选一。" +
+			"只读模式下也能用：预案只由服务端保管，可以带走给人看。" +
+			"执行必须另走 change.apply，且风险 R2 以上要经人工批准。",
 		Parameters: json.RawMessage(`{"type":"object","properties":{
-			"table":{"type":"object","description":"目标表引用","properties":{
+			"table":{"type":"object","description":"目标表引用（ddl 自带 table 时可省略）","properties":{
 				"kind":{"type":"string"},"catalog":{"type":"string"},
 				"schema":{"type":"string"},"name":{"type":"string"}},
-				"required":["name"],"additionalProperties":false},
-			"changes":{"type":"array","items":{"type":"object","properties":{
+				"additionalProperties":false},
+			"changes":{"type":"array","description":"行级变更","items":{"type":"object","properties":{
 				"op":{"type":"string","enum":["update","delete","insert"]},
 				"key":{"type":"object"},
 				"before":{"type":"object"},
 				"after":{"type":"object"}},
-				"required":["op"],"additionalProperties":false}}},
-			"required":["table","changes"],"additionalProperties":false}`),
-		Risk:  policy.R1,
-		Write: true,
+				"required":["op"],"additionalProperties":false}},
+			"ddl":{"type":"object","description":"结构变更请求（与 changes 二选一），形状同 /schema/plan 的请求体",
+				"properties":{
+					"table":{"type":"object","properties":{
+						"kind":{"type":"string"},"catalog":{"type":"string"},
+						"schema":{"type":"string"},"name":{"type":"string"}},"additionalProperties":false},
+					"action":{"type":"string","enum":["create_table","add_column","drop_column",
+						"alter_column_type","create_index","drop_index","add_foreign_key","drop_table","raw"]},
+					"column":{"type":"object"},"columns":{"type":"array"},"primary_key":{"type":"array"},
+					"index":{"type":"object"},"foreign_key":{"type":"object"},"sql":{"type":"string"}},
+				"additionalProperties":false}},"additionalProperties":false}`),
+		// 生成预案本身不写数据，所以算 R0 且不是写工具：只读模式下必须能用
+		// （docs/11 §5.1 硬约束 2——预案可以生成给人带走，只是不能执行）。
+		Risk:  policy.R0,
+		Write: false,
 		Handle: func(ctx context.Context, args json.RawMessage) Envelope {
-			var in service.ChangeSetRequest
+			var in struct {
+				Table   model.ObjectRef     `json:"table"`
+				Changes []service.RowChange `json:"changes"`
+				DDL     json.RawMessage     `json:"ddl"`
+			}
 			if bad := decodeArgs(args, &in); bad != nil {
 				return *bad
 			}
-			in.Table.Catalog = orDefault(in.Table.Catalog, r.catalog)
-			in.Table.Schema = orDefault(in.Table.Schema, r.schema)
-			if in.Table.Kind == "" {
-				in.Table.Kind = model.KindTable
+			hasDDL := len(in.DDL) > 0 && string(in.DDL) != "null"
+			if hasDDL && len(in.Changes) > 0 {
+				return fail("ARGS_INVALID", "changes 与 ddl 只能给一个",
+					"行级变更用 changes，结构变更用 ddl")
 			}
-			plan, err := r.exec.BuildChangePlan(ctx, in)
-			if err != nil {
-				return fail("PLAN_FAILED", err.Error(),
-					"变更集要求目标表有主键；key/before/after 里的值要与列类型匹配")
+
+			var plan *service.ChangePlan
+			var err error
+			if hasDDL {
+				var req service.DDLRequest
+				if bad := decodeArgs(in.DDL, &req); bad != nil {
+					return *bad
+				}
+				if req.Table.Name == "" {
+					req.Table = in.Table
+				}
+				req.Table.Catalog = orDefault(req.Table.Catalog, r.catalog)
+				req.Table.Schema = orDefault(req.Table.Schema, r.schema)
+				if req.Table.Kind == "" {
+					req.Table.Kind = model.KindTable
+				}
+				plan, err = r.exec.BuildDDLPlan(ctx, req)
+				if err != nil {
+					return fail("PLAN_FAILED", err.Error(),
+						"结构变更前会先跑依赖与收窄预检；被拦下时先解决原因再生成预案")
+				}
+			} else {
+				if len(in.Changes) == 0 {
+					return fail("ARGS_INVALID", "changes 与 ddl 都没有给",
+						"行级变更给 changes；建表/加列/改索引给 ddl")
+				}
+				cs := service.ChangeSetRequest{Table: in.Table, Changes: in.Changes}
+				cs.Table.Catalog = orDefault(cs.Table.Catalog, r.catalog)
+				cs.Table.Schema = orDefault(cs.Table.Schema, r.schema)
+				if cs.Table.Kind == "" {
+					cs.Table.Kind = model.KindTable
+				}
+				plan, err = r.exec.BuildChangePlan(ctx, cs)
+				if err != nil {
+					return fail("PLAN_FAILED", err.Error(),
+						"变更集要求目标表有主键；key/before/after 里的值要与列类型匹配")
+				}
 			}
+
 			r.rememberPlan(plan)
 			env := ok(fmt.Sprintf("预案 %s：%s，影响 %s 行，%s", plan.ID, plan.Risk,
 				rowsText(plan.AffectedRows), plan.Friction), map[string]any{
 				"plan_id":       plan.ID,
 				"risk":          plan.Risk,
 				"friction":      plan.Friction,
+				"ddl":           plan.DDL,
 				"affected_rows": plan.AffectedRows,
 				"irreversible":  plan.Irreversible,
 				"statements":    plan.Statements,
@@ -538,12 +589,16 @@ func (r *Runtime) toolChangePlan() Tool {
 				"notes":         plan.Notes,
 			})
 			env.NextActions = []string{"change.apply"}
-			env.Warnings = append(env.Warnings, "预案只由服务端保管；执行前需要用户确认")
+			if plan.Risk >= policy.R2 {
+				env.Warnings = append(env.Warnings,
+					"这张预案是 "+plan.Risk.String()+"，执行前必须由用户批准")
+			} else {
+				env.Warnings = append(env.Warnings, "预案只由服务端保管；执行会改数据")
+			}
 			return env
 		},
 	}
 }
-
 func (r *Runtime) toolChangeApply() Tool {
 	return Tool{
 		Name: "change.apply",

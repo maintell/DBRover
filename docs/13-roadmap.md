@@ -27,7 +27,7 @@
 | M0 文档基线 | ✅ 完成 | 14 份设计文档 + 7 份 ADR（0001 技术栈 / 0002 Agent 边界 / 0003 Plan-Apply / 0004 环境模型 / 0005 跨引擎差异 / 0006 依赖检查 / 0007 非关系型接口） |
 | M1 最小闭环 | 🚧 进行中 | SQLite / MySQL / PostgreSQL 三引擎端到端已通；API、临时前端、CLI 已可用；**SQL Server 未做**（磁盘已够，尚未开工） |
 | M2 写入与变更安全 | ✅ 基本完成 | 变更集、乐观并发、Plan/Apply、行内编辑、筛选排序、结构设计器、批量修改（含分批与中止）、一键撤销、导出、结构比对、依赖检查 —— 见下表 |
-| M3 AI Agent | 🚧 切片一完成 | `internal/agent`：Provider 抽象 + OpenAI 兼容客户端（DeepSeek / 通义 / Moonshot / vLLM / Ollama 都走同一套协议，用 `base_url` + `model` 区分）、14 个工具、权限三模式与环境上限、执行循环（步数 / 时长 / 循环检测 / 失败上限）、审批门（预案只由服务端保管，Agent 无法自批）。**未做**：上下文检索与压缩、评测集、HTTP 端点与界面（切片二）。不再被「接哪个模型服务」卡住——那是配置项，不是设计决策 |
+| M3 AI Agent | 🚧 切片一、二完成 | `internal/agent`：Provider 抽象 + OpenAI 兼容客户端（DeepSeek / 通义 / Moonshot / vLLM / Ollama 走同一套协议，用 `base_url` + `model` 区分）、14 个工具、权限三模式与环境上限、执行循环（步数 / 时长 / 循环检测 / 失败上限）、审批门（预案只由服务端保管，Agent 无法自批）。已接 HTTP（`/agent/status`、`/agent/conversations`、`/messages`、`/approvals`）与界面（步骤时间线、可展开 SQL、审批卡片），内置浏览器实测通过。**未做**：流式输出与会话导出、上下文检索与长会话压缩、评测集、API Key 存凭据库。不再被「接哪个模型服务」卡住——那是配置项，不是设计决策 |
 | M4 引擎补齐 | 🚧 进行中 | **Redis 第一版已通**（只读浏览 + 只读命令模式，真机 Redis 8.0.5 验证）；Mongo / ES / MSSQL / Oracle 未实现 |
 
 **验收状态（唯一权威在各自文档的验收清单）**
@@ -55,6 +55,7 @@ M1/M2 已完成并有测试覆盖的部分：
 | 流式导出 | `internal/service/export.go` | CSV / NDJSON，100 万行内存增长 10.6 MB |
 | 结构比对 | `internal/service/compare.go` | 表/列/索引/外键/检查约束/视图定义；类型同义归一；升级与回退脚本覆盖索引、外键与视图；每条差异带两侧原文 |
 | Agent 运行时 | `internal/agent` | Provider 抽象 + OpenAI 兼容客户端（httptest 验证协议编解码）；14 个工具（元数据 / 只读查询 / 执行计划 / 采样 / 变更预案与执行 / 会话快照 / 笔记）；权限三模式 × 环境上限 × 连接访问模式；执行循环含步数、时长、循环检测与同工具失败上限；`change.apply` 必须人工批准；只读判定在 service 侧（`ReadOnlyQuery`），不靠调用方自觉 |
+| Agent 端点与界面 | `internal/api/agent.go`、`internal/webui` | 会话按连接隔离（换连接换会话，防止跨连接复用已批预案）；`messages` 同步返回步骤与待批预案；审批卡片展示最终 SQL；界面画步骤时间线并可展开 SQL |
 | 依赖与预执行检查 | `internal/service`、`internal/driver/*` | 删表/删列前查视图与入向外键（`Exact` 标注）；锁等待阻断、长事务只提示 |
 | SSH 隧道 | `internal/infra/tunnel` | 8 项用例：单跳、双跳、私钥认证、错误密码、主机密钥不匹配拒绝、缺少信任库拒绝、跳数上限、TOFU 固定 |
 | 临时 Web 界面 | `internal/webui` | 免构建、随二进制内嵌；连接、对象树、SQL 执行、结果网格、审批弹窗、行内编辑、筛选排序、结构设计器、批量修改进度与停止、结构比对、导出 |

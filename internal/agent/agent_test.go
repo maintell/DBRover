@@ -218,23 +218,98 @@ func TestQueryExecuteRefusesWrites(t *testing.T) {
 	}
 }
 
-// TestReadOnlyModeDeniesWriteTool 只读模式下写类工具被授权层直接拦下。
-func TestReadOnlyModeDeniesWriteTool(t *testing.T) {
-	conn := newConn(t, `CREATE TABLE t (id INTEGER PRIMARY KEY, v TEXT)`)
-	prov := &scripted{steps: []func(agent.Request) (agent.Response, error){
+// TestReadOnlyModeAllowsPlanButDeniesApply 对应 docs/11 §5.1 硬约束 2：
+// 只读模式下生成预案仍可用（可以带走给人看），执行一律拒绝。
+func TestReadOnlyModeAllowsPlanButDeniesApply(t *testing.T) {
+	conn := newConn(t,
+		`CREATE TABLE t (id INTEGER PRIMARY KEY, v TEXT)`,
+		`INSERT INTO t (id, v) VALUES (1, 'before')`,
+	)
+	prov := &scripted{}
+	prov.steps = []func(agent.Request) (agent.Response, error){
 		callTool("change.plan", `{"table":{"name":"t"},"changes":[{"op":"update","key":{"id":1},"after":{"v":"x"}}]}`),
-		say("好的"),
-	}}
+		func(req agent.Request) (agent.Response, error) {
+			got := lastToolResult(req)
+			if !strings.Contains(got, `"plan_id"`) {
+				return agent.Response{}, errBad("只读模式下应能生成预案：" + got)
+			}
+			var env struct {
+				Data struct {
+					PlanID string `json:"plan_id"`
+				} `json:"data"`
+			}
+			if err := json.Unmarshal([]byte(got), &env); err != nil {
+				return agent.Response{}, errBad("工具结果不是合法 JSON：" + err.Error())
+			}
+			return agent.Response{ToolCalls: []agent.ToolCall{{
+				ID: "call-2", Name: "change.apply",
+				Arguments: json.RawMessage(`{"plan_id":"` + env.Data.PlanID + `"}`),
+			}}}, nil
+		},
+		say("执行不了"),
+	}
 	rt := newRuntime(t, prov, conn, agent.ModeReadOnly)
-	res, err := rt.Ask(context.Background(), "改一行")
+	res, err := rt.Ask(context.Background(), "把 v 改掉")
 	if err != nil {
 		t.Fatalf("Ask: %v", err)
 	}
-	if !res.Steps[0].Denied {
-		t.Fatalf("只读模式下 change.plan 应被拒: %+v", res.Steps[0])
+	if len(res.Steps) != 2 {
+		t.Fatalf("步骤数 = %d，期望 2", len(res.Steps))
 	}
-	if res.Steps[0].Error == nil || res.Steps[0].Error.Code != "DENIED" {
-		t.Fatalf("错误码 = %+v", res.Steps[0].Error)
+	if !res.Steps[0].OK {
+		t.Fatalf("只读模式下 change.plan 应可用: %+v", res.Steps[0])
+	}
+	if !res.Steps[1].Denied {
+		t.Fatalf("只读模式下 change.apply 应被拒: %+v", res.Steps[1])
+	}
+	if res.Steps[1].Error == nil || res.Steps[1].Error.Code != "DENIED" {
+		t.Fatalf("错误码 = %+v", res.Steps[1].Error)
+	}
+}
+
+// TestDDLPlanNeedsApproval 结构变更是 R3：预案能生成，执行必须人工批准。
+// 这条路径也正是「审批卡片」在真实使用中会出现的场景。
+func TestDDLPlanNeedsApproval(t *testing.T) {
+	conn := newConn(t,
+		`CREATE TABLE t (id INTEGER PRIMARY KEY, v TEXT)`,
+	)
+	prov := &scripted{}
+	prov.steps = []func(agent.Request) (agent.Response, error){
+		callTool("change.plan", `{"ddl":{"table":{"name":"t"},"action":"create_index",
+			"index":{"name":"idx_v","columns":["v"]}}}`),
+		func(req agent.Request) (agent.Response, error) {
+			got := lastToolResult(req)
+			if !strings.Contains(got, `"risk":"R3"`) {
+				return agent.Response{}, errBad("建索引预案应是 R3：" + got)
+			}
+			var env struct {
+				Data struct {
+					PlanID string `json:"plan_id"`
+				} `json:"data"`
+			}
+			if err := json.Unmarshal([]byte(got), &env); err != nil {
+				return agent.Response{}, errBad("工具结果不是合法 JSON：" + err.Error())
+			}
+			return agent.Response{ToolCalls: []agent.ToolCall{{
+				ID: "call-2", Name: "change.apply",
+				Arguments: json.RawMessage(`{"plan_id":"` + env.Data.PlanID + `"}`),
+			}}}, nil
+		},
+		say("等你确认"),
+	}
+	rt := newRuntime(t, prov, conn, agent.ModeWriteWithApproval)
+	res, err := rt.Ask(context.Background(), "给 v 建个索引")
+	if err != nil {
+		t.Fatalf("Ask: %v", err)
+	}
+	if !res.Steps[0].OK {
+		t.Fatalf("生成 DDL 预案失败: %+v", res.Steps[0])
+	}
+	if res.Steps[1].OK {
+		t.Fatal("R3 预案未经批准不该执行")
+	}
+	if res.Steps[1].Error == nil || res.Steps[1].Error.Code != "APPROVAL_REQUIRED" {
+		t.Fatalf("错误码 = %+v，期望 APPROVAL_REQUIRED", res.Steps[1].Error)
 	}
 }
 

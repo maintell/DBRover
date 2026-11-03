@@ -159,3 +159,20 @@ func innerValue(t *testing.T, conn driver.Connector, id int64) string {
 	v, _ := out.Results[0].Rows[0][0].(string)
 	return v
 }
+
+// TestToolSchemasAreValidJSON 是一条便宜但必要的门禁：
+// schema 是拼出来的字符串，坏一个字符就会让整次模型调用失败，
+// 而且错误信息出现在运行时（invalid character ... after top-level value），
+// 完全不指向是哪个工具。
+func TestToolSchemasAreValidJSON(t *testing.T) {
+	conn := openInnerConn(t, `CREATE TABLE t (id INTEGER PRIMARY KEY)`)
+	rt := newInnerRuntime(t, conn, ModeReadOnly)
+	for _, s := range rt.Tools() {
+		if !json.Valid(s.Parameters) {
+			t.Errorf("工具 %s 的 schema 不是合法 JSON：%s", s.Name, s.Parameters)
+		}
+		if s.Name == "" || s.Description == "" {
+			t.Errorf("工具 %q 缺名称或说明", s.Name)
+		}
+	}
+}

@@ -829,6 +829,40 @@
           }
         }
       }
+    },
+    "/api/v1/agent/status": {
+      "get": {
+        "summary": "Agent 是否可用（模型服务配置状态）",
+        "responses": { "200": { "description": "ok" } }
+      }
+    },
+    "/api/v1/agent/conversations": {
+      "post": {
+        "summary": "新建 Agent 会话（绑定连接与权限模式）",
+        "responses": {
+          "201": { "description": "created" },
+          "400": { "description": "未配置模型服务，或连接/模式不合法" }
+        }
+      }
+    },
+    "/api/v1/agent/conversations/{id}/messages": {
+      "post": {
+        "summary": "发一条消息并等这一轮跑完（含步骤、结论与待批预案）",
+        "responses": {
+          "200": { "description": "ok（stopped 非空表示没走完，原因在 stop_message）" },
+          "404": { "description": "会话不存在或已过期" },
+          "502": { "description": "模型服务不可用" }
+        }
+      }
+    },
+    "/api/v1/agent/conversations/{id}/approvals/{pid}": {
+      "post": {
+        "summary": "批准或拒绝一张预案（人类签字口，模型无法调用）",
+        "responses": {
+          "200": { "description": "ok" },
+          "404": { "description": "会话或预案不存在" }
+        }
+      }
     }
   }
 }
