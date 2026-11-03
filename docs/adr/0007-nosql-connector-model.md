@@ -106,6 +106,10 @@ POST /api/v1/connections/{id}/kv/command               # 命令模式
 
 ---
 
+## 依赖选择
+
+Redis 客户端选 `github.com/redis/go-redis/v9`（纯 Go、无 CGO、社区事实标准）。备选是自己实现 RESP2：协议本身不复杂，但 TLS、超时、连接池、`SCAN` 游标重试都要自己写，收益不明显而风险集中在自己不熟的协议细节上。ADR-0004 之后新增依赖只需过「纯 Go」这一条，它满足。
+
 ## 后果
 
 ### 必须做
