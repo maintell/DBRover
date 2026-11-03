@@ -154,3 +154,40 @@ func TestExplainUsesCursor(t *testing.T) {
 		t.Errorf("解释的语句不对: %q", sqlText)
 	}
 }
+
+// TestExecMultiStatementKeepsResultsOnError 对应 docs/05 验收 4 的接口侧：
+// 第 2 条失败时状态码仍是错误，但**已完成语句的结果要带回来**。
+//
+// 以前这里只返回一个错误对象，第 1 条明明成功、数据也取回来了，用户却看不到。
+func TestExecMultiStatementKeepsResultsOnError(t *testing.T) {
+	_, ts, dir := newServer(t)
+	connID := createConn(t, ts, dir, "test", "read-write")
+
+	code, body := do(t, ts, http.MethodPost, "/api/v1/connections/"+connID+"/exec",
+		map[string]any{"sql": "SELECT 1 AS a; SELECT * FROM no_such_table;"}, true)
+	if code == http.StatusOK {
+		t.Fatalf("失败的脚本不该返回 200：%v", body)
+	}
+	er, _ := body["error"].(map[string]any)
+	if er == nil {
+		t.Fatalf("错误体缺失：%v", body)
+	}
+	// 两条：成功的那条（带行数据）与失败的那条（带 err），这样界面既能看到结果、
+	// 也知道是哪一条挂的。
+	results, _ := er["results"].([]any)
+	if len(results) != 2 {
+		t.Fatalf("错误体里应带 2 条结果（成功 + 失败），实际 %d：%v", len(results), er)
+	}
+	first, _ := results[0].(map[string]any)
+	if first["err"] != nil {
+		t.Errorf("第 1 条不该有错误: %v", first)
+	}
+	rows, _ := first["rows"].([]any)
+	if len(rows) != 1 {
+		t.Fatalf("第 1 条应带回 1 行: %v", first)
+	}
+	second, _ := results[1].(map[string]any)
+	if second["err"] == nil {
+		t.Errorf("第 2 条应带错误信息: %v", second)
+	}
+}

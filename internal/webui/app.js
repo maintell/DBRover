@@ -2254,7 +2254,14 @@ async function runSQL(approvalToken) {
       showNotice('已取消这条语句。', 'ok');
       setStatus('已取消');
     } else {
-      showNotice(e.message, 'error');
+      // 多语句脚本里前面的语句可能已经成功：把已完成的结果画出来，再提示失败在哪。
+      // 只报错误会让用户以为一条都没跑（docs/05 验收 4）。
+      const done = e.detail && e.detail.results;
+      if (done && done.length) {
+        renderExec({ results: done });
+      } else {
+        showNotice(e.message, 'error');
+      }
       setStatus('失败');
     }
   } finally {

@@ -383,6 +383,7 @@ POST /connections
 | 字段 | 用途 |
 |---|---|
 | `code` | 稳定枚举，前端/Agent 据此分支（**不要匹配 message**） |
+| `results` | 仅 `/exec` 多语句失败时出现：失败之前已完成的语句结果（含失败那条的 `err`）。错误仍是错误，只是不把已完成的部分丢掉 |
 | `category` | `connection` `auth` `permission` `syntax` `constraint` `timeout` `canceled` `resource` `policy` `internal` |
 | `message` | 面向人，已脱敏 |
 | `hint` | 可执行建议 |

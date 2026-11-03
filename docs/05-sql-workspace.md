@@ -243,7 +243,7 @@
 | 1 | 光标在语句中间按 `Ctrl+Enter` 只执行该语句 | 手动 + 单测 | ✅ `TestStatementAt`、`TestExecuteRunsOnlyStatementAtCursor`、`TestExecWithCursorRunsOneStatement`（API 端到端）+ 浏览器实测（光标放在第 2 条语句里点执行，只跑了第 2 条，值未变）。**偏移由界面换算成 UTF-8 字节后再送**：`selectionStart` 是 UTF-16 码元下标，光标前有中文就会挑错语句 |
 | 2 | 光标在两条语句之间执行前一条 | 单测 | ✅ `TestStatementAt`（空白处归前一条）、`TestCursorBetweenStatementsRunsPrevious` |
 | 3 | 含 `;` 的字符串不被切开 | 表驱动单测（各引擎） | ✅ `dialect` 切分用例（dollar-quote / `DELIMITER` / `GO` / 嵌套注释） |
-| 4 | 多语句中第 2 条失败，第 1 条结果保留且可见 | 集成 | ⚠️ 执行器逐条返回结果（失败那条带 `err`，前面的保留）；尚未补一条专门的失败用例 |
+| 4 | 多语句中第 2 条失败，第 1 条结果保留且可见 | 集成 | ✅ 执行器逐条返回（成功那条带行数据、失败那条带 `err`，第 3 条不执行）；**接口侧以前会把已完成的结果丢掉**——现在错误体带 `error.results`，状态码仍是错误码、错误语义不变。界面在失败时先画已完成的结果再提示。用例：`TestMultiStatementKeepsEarlierResults`、`TestExecMultiStatementKeepsResultsOnError` |
 | 5 | 100 万行结果翻页不 OOM，内存增长 < 200MB | 压测 | ✅ `TestMillionRowPagination`：100 万行表上按 200 行/页翻 60 页（1.2 万行），总耗时 619 ms、单页均摊 10.3 ms，**HeapAlloc 增长 1.7 MB**。断言只防「灾难性泄漏」（>200MB 才红），细微增长它抓不到 |
 | 6 | 深分页第 10000 页 < 500ms（有主键表） | 基准 | ✅ `TestDeepKeysetPageLatency`：键集分页没有 OFFSET，「第 10000 页」的代价等价于「从很靠后的键取一页」——从 50 万行之后取 200 行，**13.1 ms**。不翻一万次是因为那测的是循环不是查询 |
 | 7 | `Decimal(38,10)` 读回与写入完全一致 | 类型保真测试 | ✅ 见 `docs/06` 精度守卫与真机验收 |

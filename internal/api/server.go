@@ -361,6 +361,12 @@ type errorDetail struct {
 	RequestID string `json:"request_id,omitempty"`
 	// Approval 只在 POLICY_APPROVAL_REQUIRED 时出现，携带绑定语句指纹的凭证。
 	Approval *approvalInfo `json:"approval,omitempty"`
+	// Results 是「多语句脚本里，失败之前已经跑完的那几条」的结果。
+	//
+	// 没有它的话，`SELECT 1; SELECT * FROM 不存在; SELECT 3` 只会返回一个错误，
+	// 第一条明明已经成功了、数据也取回来了，用户却看不到（docs/05 验收 4）。
+	// 错误仍走错误模型（非 2xx + 结构化 code），只是把已完成的部分一并带回来。
+	Results []service.StatementResult `json:"results,omitempty"`
 }
 
 type approvalInfo struct {
@@ -617,8 +623,8 @@ func (s *Server) handleExec(w http.ResponseWriter, r *http.Request) {
 
 	// 执行期错误必须走错误模型，不能塞进 200 响应里让客户端自己猜。
 	if out.Err != nil {
-		writeError(w, out.Err.HTTPStatus(), out.Err.Code, out.Err.Category,
-			out.Err.Message, out.Err.Hint, out.Err.Retryable)
+		writeErrorWithResults(w, out.Err.HTTPStatus(), out.Err.Code, out.Err.Category,
+			out.Err.Message, out.Err.Hint, out.Err.Retryable, out.Results)
 		return
 	}
 
@@ -1534,6 +1540,18 @@ func writeError(w http.ResponseWriter, status int, code, category, msg, hint str
 	writeJSON(w, status, errorBody{Error: errorDetail{
 		Code: code, Category: category, Message: msg, Hint: hint,
 		Retryable: retryable, RequestID: randomToken()[:12],
+	}})
+}
+
+// writeErrorWithResults 与 writeError 相同，但把「失败之前已完成的部分」一并带回去。
+//
+// 状态码仍是错误码：错误语义不变，只是不再把已完成的语句结果丢掉。
+func writeErrorWithResults(w http.ResponseWriter, status int, code, category, msg, hint string,
+	retryable bool, results []service.StatementResult) {
+	writeJSON(w, status, errorBody{Error: errorDetail{
+		Code: code, Category: category, Message: msg, Hint: hint,
+		Retryable: retryable, RequestID: randomToken()[:12],
+		Results: results,
 	}})
 }
 
