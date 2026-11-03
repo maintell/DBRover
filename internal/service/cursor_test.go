@@ -412,3 +412,85 @@ func TestTableRowsSortPaginatesWithoutLoss(t *testing.T) {
 		}
 	}
 }
+
+// TestTableRowsFilterInAndBetween 覆盖 docs/06 §4.1 里此前一直没做的两个操作符。
+//
+// IN 用 Values 而不是把逗号拼进 Value：「值里带逗号」是真实数据，
+// 拼起来就没法还原成一个还是两个值。
+func TestTableRowsFilterInAndBetween(t *testing.T) {
+	e := setup(t)
+	ctx := context.Background()
+	ex := newTestExecutor(t, e)
+
+	s, err := e.rw.Acquire(ctx)
+	if err != nil {
+		t.Fatalf("Acquire: %v", err)
+	}
+	for i, v := range []string{"a", "b", "c", "a,b", "d"} {
+		if _, err := s.Execute(ctx, `INSERT INTO t (id, v) VALUES (?, ?)`, []any{i + 2, v}); err != nil {
+			t.Fatalf("造数: %v", err)
+		}
+	}
+	_ = s.Close()
+
+	ids := func(res *service.TableRowsResult) []int64 {
+		out := make([]int64, 0, len(res.Rows))
+		for _, r := range res.Rows {
+			if n, ok := r[0].(int64); ok {
+				out = append(out, n)
+			}
+		}
+		return out
+	}
+
+	// IN：三个值，其中一个是「带逗号的单个值」，必须当成一个值而不是两个。
+	res, err := ex.TableRows(ctx, service.TableRowsRequest{
+		Table: "t",
+		Filter: []service.FilterCond{{
+			Column: "v", Op: service.FilterIn, Values: []string{"a", "c", "a,b"},
+		}},
+	})
+	if err != nil {
+		t.Fatalf("IN 查询: %v", err)
+	}
+	// setup() 已经插了一行 (1,'a')，所以命中是 1、2、4、5。
+	got := ids(res)
+	want := []int64{1, 2, 4, 5}
+	if len(got) != len(want) {
+		t.Fatalf("IN 命中 %v, 期望 %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("IN 命中 %v, 期望 %v", got, want)
+		}
+	}
+
+	// BETWEEN：闭区间。
+	res, err = ex.TableRows(ctx, service.TableRowsRequest{
+		Table: "t",
+		Filter: []service.FilterCond{{
+			Column: "id", Op: service.FilterBetween, Values: []string{"2", "4"},
+		}},
+	})
+	if err != nil {
+		t.Fatalf("BETWEEN 查询: %v", err)
+	}
+	got = ids(res)
+	if len(got) != 3 || got[0] != 2 || got[2] != 4 {
+		t.Errorf("BETWEEN 命中 %v, 期望 id 2..4", got)
+	}
+
+	// 参数不合法要报 ErrInvalidFilter，而不是悄悄变成「不过滤」。
+	if _, err := ex.TableRows(ctx, service.TableRowsRequest{
+		Table:  "t",
+		Filter: []service.FilterCond{{Column: "v", Op: service.FilterIn}},
+	}); !errors.Is(err, service.ErrInvalidFilter) {
+		t.Errorf("空 IN 应报 ErrInvalidFilter, 实际 %v", err)
+	}
+	if _, err := ex.TableRows(ctx, service.TableRowsRequest{
+		Table:  "t",
+		Filter: []service.FilterCond{{Column: "id", Op: service.FilterBetween, Values: []string{"1"}}},
+	}); !errors.Is(err, service.ErrInvalidFilter) {
+		t.Errorf("BETWEEN 少一个值应报 ErrInvalidFilter, 实际 %v", err)
+	}
+}

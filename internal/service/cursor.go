@@ -327,6 +327,11 @@ const (
 	FilterLike    FilterOp = "like"
 	FilterIsNull  FilterOp = "is_null"
 	FilterNotNull FilterOp = "is_not_null"
+	// FilterIn 用 Values 而不是 Value：`IN ('a,b')` 会把「一个带逗号的字符串」
+	// 和「两个值」混成一件事，这种歧义在数据工具里迟早出事。
+	FilterIn FilterOp = "in"
+	// FilterBetween 用 Values[0]..Values[1]，闭区间，与 SQL 的 BETWEEN 一致。
+	FilterBetween FilterOp = "between"
 )
 
 // filterSQL 把操作符映射到 SQL 记号。写法固定，不接受调用方传入的符号，
@@ -341,11 +346,16 @@ var filterSQL = map[FilterOp]string{
 	FilterLike: "LIKE",
 }
 
-// FilterCond 是一个筛选条件。Value 对 is_null / is_not_null 无意义。
+// FilterCond 是一个筛选条件。
+//
+// Value 用于单值操作符；Values 用于 in / between。分两个字段而不是一个字符串
+// 拼逗号：「值里带逗号」是真实存在的数据，拼起来就没法还原。
 type FilterCond struct {
 	Column string   `json:"column"`
 	Op     FilterOp `json:"op"`
 	Value  string   `json:"value"`
+	// Values 供 in（任意个）与 between（恰好两个）使用。
+	Values []string `json:"values,omitempty"`
 }
 
 // OrderSpec 是单列排序。未指定时按主键排序。
@@ -414,6 +424,22 @@ func (e *Executor) filterClause(known map[string]columnRef, filter []FilterCond)
 			where = append(where, ident+" IS NULL")
 		case FilterNotNull:
 			where = append(where, ident+" IS NOT NULL")
+		case FilterIn:
+			if len(f.Values) == 0 {
+				return nil, nil, fmt.Errorf("%w: IN 至少要给一个值", ErrInvalidFilter)
+			}
+			marks := make([]string, len(f.Values))
+			for i, v := range f.Values {
+				marks[i] = "?"
+				args = append(args, coerceKey(v, ci.typ))
+			}
+			where = append(where, ident+" IN ("+strings.Join(marks, ", ")+")")
+		case FilterBetween:
+			if len(f.Values) != 2 {
+				return nil, nil, fmt.Errorf("%w: BETWEEN 需要恰好两个值（闭区间）", ErrInvalidFilter)
+			}
+			where = append(where, ident+" BETWEEN ? AND ?")
+			args = append(args, coerceKey(f.Values[0], ci.typ), coerceKey(f.Values[1], ci.typ))
 		default:
 			sym, ok := filterSQL[f.Op]
 			if !ok {

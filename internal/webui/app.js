@@ -461,6 +461,8 @@ const OPS = [
   ['lt', '<'],
   ['le', '≤'],
   ['like', '匹配'],
+  ['in', '在列表里'],
+  ['between', '介于'],
   ['is_null', '为空'],
   ['is_not_null', '不为空'],
 ];
@@ -525,6 +527,10 @@ function renderToolbar() {
   fVal.className = 'narrow';
   fOp.onchange = () => {
     fVal.hidden = fOp.value === 'is_null' || fOp.value === 'is_not_null';
+    // IN 与 BETWEEN 要多个值：用一个输入框、逗号分隔，但提交时拆成数组——
+    // 服务端按数组收，才能把「值里本身带逗号」区分开。
+    fVal.placeholder = fOp.value === 'in' ? '值（逗号分隔）'
+      : fOp.value === 'between' ? '下限,上限（闭区间）' : '值';
   };
   const addBtn = document.createElement('button');
   addBtn.id = 'filter-add';
@@ -532,7 +538,22 @@ function renderToolbar() {
   addBtn.onclick = () => {
     const op = fOp.value;
     const needVal = op !== 'is_null' && op !== 'is_not_null';
-    state.filter.push({ column: fCol.value, op: op, value: needVal ? fVal.value : '' });
+    const cond = { column: fCol.value, op: op, value: '' };
+    if (op === 'in' || op === 'between') {
+      const parts = fVal.value.split(',').map((s) => s.trim()).filter((s) => s !== '');
+      if (!parts.length) {
+        showNotice(op === 'in' ? 'IN 至少要填一个值。' : 'BETWEEN 要填下限和上限。', 'warn');
+        return;
+      }
+      if (op === 'between' && parts.length !== 2) {
+        showNotice('BETWEEN 要恰好两个值（下限,上限）。', 'warn');
+        return;
+      }
+      cond.values = parts;
+    } else if (needVal) {
+      cond.value = fVal.value;
+    }
+    state.filter.push(cond);
     loadTablePage(true);
   };
 
@@ -576,7 +597,10 @@ function renderToolbar() {
   state.filter.forEach((f, i) => {
     const chip = document.createElement('span');
     chip.className = 'chip';
-    chip.textContent = f.column + ' ' + opLabel(f.op) + (f.value ? ' ' + f.value : '');
+    const shown = (f.values && f.values.length)
+      ? f.values.join(', ')
+      : (f.value || '');
+    chip.textContent = f.column + ' ' + opLabel(f.op) + (shown ? ' ' + shown : '');
     const x = document.createElement('button');
     x.textContent = '×';
     x.title = '移除该条件';

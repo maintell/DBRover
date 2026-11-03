@@ -2,6 +2,7 @@ package service_test
 
 import (
 	"context"
+	"errors"
 	"os"
 	"strconv"
 	"strings"
@@ -302,6 +303,69 @@ func TestTableRowsFilterNullOnRealEngines(t *testing.T) {
 			}
 			if len(res.Rows) != 2 {
 				t.Errorf("v IS NOT NULL 应为 2 行（含空串）, 实际 %d", len(res.Rows))
+			}
+		})
+	}
+}
+
+// TestTableRowsInAndBetweenOnRealEngines 验证 IN / BETWEEN 在两个真实引擎上的
+// 形态：字符串型 IN 的值绑定要按列类型还原，BETWEEN 是闭区间。
+//
+// 单独一条用例而不是塞进上面那条：它验的是「值数组怎么绑」，与排序分页无关，
+// 混在一起失败时看不出是哪一半坏了。
+func TestTableRowsInAndBetweenOnRealEngines(t *testing.T) {
+	for _, tgt := range rowsTargets(t) {
+		t.Run(tgt.name, func(t *testing.T) {
+			ctx := context.Background()
+			tgt.prepareTable(t, []string{
+				"DROP TABLE IF EXISTS it_inprobe",
+				"CREATE TABLE it_inprobe (id INT PRIMARY KEY, v VARCHAR(32))",
+			}, func(ctx context.Context, s driver.Session) {
+				for i, v := range []string{"a", "b", "c", "a,b", "d", "b"} {
+					if _, err := s.Execute(ctx, "INSERT INTO it_inprobe (id, v) VALUES (?, ?)", []any{i + 1, v}); err != nil {
+						t.Fatalf("插入: %v", err)
+					}
+				}
+			})
+
+			ex := service.NewExecutor(tgt.open(t), model.EnvTest, model.AccessReadWrite, nil)
+			defer ex.Close()
+
+			// IN：三个值，其中 "a,b" 是一个值而不是两个。
+			res, err := ex.TableRows(ctx, service.TableRowsRequest{
+				Table: "it_inprobe", Limit: 100,
+				Filter: []service.FilterCond{{
+					Column: "v", Op: service.FilterIn, Values: []string{"a", "c", "a,b"},
+				}},
+			})
+			if err != nil {
+				t.Fatalf("IN: %v", err)
+			}
+			if len(res.Rows) != 3 {
+				t.Fatalf("IN 命中 %d 行, 期望 3（a、c、a,b 各一行）", len(res.Rows))
+			}
+
+			// BETWEEN：闭区间，1..3 应命中 3 行。
+			res, err = ex.TableRows(ctx, service.TableRowsRequest{
+				Table: "it_inprobe", Limit: 100,
+				Filter: []service.FilterCond{{
+					Column: "id", Op: service.FilterBetween, Values: []string{"1", "3"},
+				}},
+			})
+			if err != nil {
+				t.Fatalf("BETWEEN: %v", err)
+			}
+			if len(res.Rows) != 3 {
+				t.Fatalf("BETWEEN 1..3 命中 %d 行, 期望 3", len(res.Rows))
+			}
+
+			// 边界：IN 空数组、BETWEEN 单值是调用方错误，必须报 ErrInvalidFilter
+			// 而不是悄悄退化成「不过滤」。
+			if _, err := ex.TableRows(ctx, service.TableRowsRequest{
+				Table:  "it_inprobe",
+				Filter: []service.FilterCond{{Column: "v", Op: service.FilterIn}},
+			}); !errors.Is(err, service.ErrInvalidFilter) {
+				t.Errorf("空 IN 应报 ErrInvalidFilter, 实际 %v", err)
 			}
 		})
 	}

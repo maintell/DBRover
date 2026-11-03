@@ -283,7 +283,7 @@ UI 上是两个不同入口，文案必须区分「修改选中的 12 行」与�
 | 项 | v1 做法 | 与目标的差距 |
 |---|---|---|
 | 条件组合 | 仅 `AND` | 无 `OR`、无分组 |
-| 操作符 | `=` `≠` `>` `≥` `<` `≤` `LIKE` `IS NULL` `IS NOT NULL` | 无 `IN` `BETWEEN`、无正则（正则跨引擎语义不一致） |
+| 操作符 | `=` `≠` `>` `≥` `<` `≤` `LIKE` `IN` `BETWEEN` `IS NULL` `IS NOT NULL` | 无正则（跨引擎语义不一致）。`IN`/`BETWEEN` 用 `values` 数组传值，不用「逗号拼进 value」——值里本身带逗号是真实数据 |
 | 原始 SQL 模式 | 不做 | 允许手写 `WHERE` 就必须做表达式校验，否则等于开了注入面 |
 | 排序 | 单列 + 升降序；主键**始终**追加在排序键末尾 | 无多列拖拽 |
 | 分页 | 键集分页；`after` 是「排序列…, 主键…」的完整元组 | 与目标一致 |
@@ -405,7 +405,7 @@ GET /api/v1/connections/{id}/tables/{name}/rows
 | 能力 | 契约位置 | 实现 | 验证 |
 |---|---|---|---|
 | 显式列清单 + 键集分页浏览 | §1.1 | `service.TableRows`：`SELECT <列…> … ORDER BY <主键> LIMIT n`，`after` 续页 | `cursor_test.go` |
-| 筛选与排序（v1 口径见 §4.3） | §4 | `where` 条件 AND 组合 + 单列排序；主键恒为末位排序键；列名与操作符均走白名单 | `TestTableRowsFilter`、`TestTableRowsSortPaginatesWithoutLoss`、`TestTableRowsEndpointFilterAndOrder`、`TestTableRowsFilterAndSortOnRealEngines`（MySQL 5.7 / PostgreSQL 17 真实实例）、浏览器实测 |
+| 筛选与排序（v1 口径见 §4.3） | §4 | `where` 条件 AND 组合 + 单列排序；主键恒为末位排序键；列名与操作符均走白名单。操作符含 `=` `≠` `>` `≥` `<` `≤` `LIKE` `IN` `BETWEEN` `IS NULL` `IS NOT NULL`；`IN`/`BETWEEN` 用 `values` 数组传值（值里带逗号也不会被拆错） | `TestTableRowsFilter`、`TestTableRowsSortPaginatesWithoutLoss`、`TestTableRowsEndpointFilterAndOrder`、`TestTableRowsFilterAndSortOnRealEngines`（MySQL 5.7 / PostgreSQL 17 真实实例）、浏览器实测 |
 | 切换视图前拦截未提交改动 | §2.2 引申 | 改筛选/排序/页大小时若有待提交改动，弹确认框；取消则保持原视图与原改动 | 浏览器实测（取消与继续两条路径） |
 | 一键撤销（10 分钟窗口） | §2.6 / 验收 5 | 应用成功后服务端登记 `undo-` 预案；撤销复用 `apply` 端点，同风险同摩擦；不可逆时 `undo: null`；撤销不可再撤销 | `TestChangePlanUndoRestoresValue`、`TestChangePlanUndoIsNullWhenIrreversible` |
 | `NULL` 与空串区分 | §1.4 / 验收 7 | NULL 显示为 `NULL`、空串显示为 `''`；右键菜单「设为 NULL」/「设为空串」显式二选一；NULL 单元格可直接输入取消 NULL，但清空输入框不会变成空串 | 浏览器实测 |
@@ -434,6 +434,6 @@ GET /api/v1/connections/{id}/tables/{name}/rows
 | 分批提交与阈值分档（500/2000/5000） | §2.3 | 变更集（逐行编辑）仍一律单事务；批量修改已按 1000 行分批 | 待实现；需先有影响面估计 |
 | 批量修改的「多单元格」路径 | §3.1 | 条件批量修改与分批都已实现（见 §3.4）；无「选中同列多行改同值」这条路径 | 待实现 |
 
-| 筛选与排序的完整形态 | §4.1 / §4.2 | 只有 AND；无 `OR`、分组、`IN`、`BETWEEN`、正则、原始 SQL 模式、多列拖拽排序 | 待实现；原始 SQL 模式需先有表达式校验，否则等于开注入面 |
+| 筛选与排序的完整形态 | §4.1 / §4.2 | 只有 AND；无 `OR`、分组、正则、原始 SQL 模式、多列拖拽排序（`IN`/`BETWEEN` 已支持） | 待实现；原始 SQL 模式需先有表达式校验，否则等于开注入面 |
 | 导出与测试数据生成 | §5 / 验收 10 | CSV / NDJSON 已实现并压测通过（100 万行内存增长 10.6 MB）；xlsx、SQL INSERT、Markdown 与测试数据生成未做 | 待实现 |
 
