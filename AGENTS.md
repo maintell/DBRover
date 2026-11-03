@@ -46,7 +46,7 @@ DBRover/
 │  │  ├─ sqlite/          # 已实现
 │  │  └─ pg/ mysql/ mssql/ oracle/ redis/ mongo/ es/   # 待实现
 │  ├─ policy/             # 风险分级 R0–R4、摩擦分级 F0–F5
-│  ├─ agent/              # Agent 运行时（待实现）
+│  ├─ agent/              # Agent 运行时：Provider、工具面、执行循环（切片一已实现）
 │  ├─ infra/              # SSH 隧道、凭据库、元数据存储（待实现）
 │  └─ model/              # 领域模型与 DTO
 ├─ web/                   # 前端（待实现）
@@ -61,6 +61,8 @@ DBRover/
 
 ```
 cmd/dbrover → service → {driver, driver/sqlite, policy}
+agent → {service, policy, model}          # 与 api 并列，只经 service 触达数据
+api → {service, agent, driver, policy, model}
 driver/sqlite → {driver, driver/dialect, model}
 policy → {driver/dialect, model}
 dialect → model

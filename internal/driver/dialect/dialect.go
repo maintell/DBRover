@@ -81,6 +81,11 @@ type Dialect interface {
 	// MySQL 用 DROP FOREIGN KEY，PostgreSQL 用 DROP CONSTRAINT——同一件事两个名字。
 	DropForeignKeySQL(table, name string) string
 
+	// ExplainSQL 渲染「只看计划、不执行」的语句；第二个返回 false 表示该引擎
+	// 没法用一条语句表达执行计划（需要先开开关或查另一张表）。
+	// 刻意不渲染 EXPLAIN ANALYZE：那会真的把语句跑一遍。
+	ExplainSQL(sqlText string) (string, bool)
+
 	// DropViewSQL 渲染删视图语句。name 应当是已引用好的限定名。
 	//
 	// 视图是独立对象，不带 ON <table>。默认带 IF EXISTS：重复执行不该炸。
@@ -199,6 +204,23 @@ func (d impl) DropIndexSQL(table, name string) string {
 		return "DROP INDEX " + d.quote(name) + " ON " + table
 	default:
 		return "DROP INDEX " + d.quote(name)
+	}
+}
+
+// ExplainSQL 渲染执行计划语句。
+//
+// PostgreSQL 与 MySQL 都能直接 EXPLAIN 一条语句；SQLite 要用 EXPLAIN QUERY PLAN
+// 才给出人可读的计划（裸 EXPLAIN 是字节码级跟踪，等于没用）。
+// MSSQL 要先开 SET SHOWPLAN_ALL，Oracle 要 EXPLAIN PLAN FOR 再查 PLAN_TABLE——
+// 这两者都不是「一条语句」，所以明确说不支持，而不是拼一条执行会失败的语句。
+func (d impl) ExplainSQL(sqlText string) (string, bool) {
+	switch d.engine {
+	case model.EnginePostgres, model.EngineMySQL, model.EngineMariaDB:
+		return "EXPLAIN " + sqlText, true
+	case model.EngineSQLite:
+		return "EXPLAIN QUERY PLAN " + sqlText, true
+	default:
+		return "", false
 	}
 }
 
