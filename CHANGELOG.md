@@ -33,6 +33,7 @@
 - **连接级展示时区（`display_timezone`）**：时间值按连接配置的 IANA 时区渲染，空 = UTC；在驱动返回行时统一换算，所以表浏览、查询分页、导出、游标续页看到的是同一个时区。写回按列类型归一：带时区的列换算到 UTC（保住瞬间），不带时区的列保留墙上时钟（保住用户看到的 12:00），`DATE`/`TIME` 取字面值不跨零点。时区名拼错直接 400，不静默退回 UTC。详见 docs/06 §1.4。
 - **修掉两处会让时间静默挪 hour 的缺陷**：① MySQL 的 `TIMESTAMP` 在 SELECT 时按**会话**时区换算，之前会话是服务器默认（可能 +08:00）而驱动按 `loc=UTC` 解析，取出来整体偏 8 小时——现在握手时 `time_zone='+00:00'`，PG 同理 `timezone=UTC`。② 接口读出去的是带偏移的 RFC3339，原样写回 MySQL 会报 `1292 Incorrect datetime value`——「读出来再存回去」这条最普通的编辑动作之前根本走不通。
 - **PG 只读改到连接参数**：`default_transaction_read_only=on` 之前是开完池再 `SET` 一次，而 `sql.DB` 是连接池——那条 SET 只作用于恰好被选中的物理连接，池里其余连接仍然可写。现在写进 DSN，每条连接都带上。
+- **删除前的依赖检查 + `drop_table` 动作**（ADR-0006）：`driver.Metadata` 新增 `Dependents`，每项带 `Exact`——入向外键三个引擎都精确（`key_column_usage` / `pg_constraint` / `PRAGMA foreign_key_list`），视图依赖在 PostgreSQL 上走 `view_table_usage`（精确）、在 MySQL / SQLite 上只能拿定义文本做词边界匹配（标「可能误报」）。删表被任一依赖引用即 `409 DEPENDENCY_BLOCKED` 并点名引用方；删列只按**精确**信息阻断（引用该列的入向外键），视图依赖写进预案 `notes` 让人自查——这条不对称是有意的，视图里可能只是 `SELECT *`，用猜的规则会把正常操作挡死。删表必然不可逆，回滚语句只是把空表建回来，预案里明说「数据不会回来」。
 - **流式导出**（`internal/service/export.go` + `GET /export`）：CSV 与 NDJSON，单条 SELECT 走游标分批取、边取边写；复用 `where`/`order`，导出的就是当前视图且不受分页限制；不要求主键，视图与无主键表也能导。大整数以字符串输出、二进制 base64、NULL 在 NDJSON 里是真正的 `null`。响应头推迟到首次写出，开跑前失败返回结构化错误而不是空文件配 200。界面加「导出」入口与格式下拉（状态栏给出字节数与首行，便于确认内容）。
 - **回环 HTTP 服务**（`internal/api`）：token 鉴权、Origin 校验、连接管理、`exec`、`query`、`results/{id}/page`、`tables/{name}/rows`、审计查询、OpenAPI 契约（`/api/v1/openapi.json`）。
 - **审计落盘**：JSONL 追加写（0600）+ 内存热区，`serve -audit <path>` 开启。

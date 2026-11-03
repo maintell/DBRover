@@ -380,3 +380,121 @@ func sqliteQualifier(catalog string) string {
 	}
 	return dialect.For(model.EngineSQLite).QuoteIdent(catalog)
 }
+
+// Dependents 返回依赖 ref 的其他对象。
+//
+// SQLite 没有系统级的依赖视图，两条路都是「自己算」：
+//   - 入向外键：逐表跑 PRAGMA foreign_key_list，找 table 指向 ref 的；
+//     这是精确的（PRAGMA 给的是真的解析结果）。
+//   - 视图：只能拿 sqlite_master.sql 做词边界文本匹配，标 Exact=false。
+func (c *Connector) Dependents(ctx context.Context, ref model.ObjectRef) ([]model.Dependent, error) {
+	h, err := c.handle()
+	if err != nil {
+		return nil, err
+	}
+	qual := sqliteQualifier(ref.Catalog)
+
+	// 先把所有表与视图列出来，后面两条路都要用。
+	type obj struct{ name, kind, sql string }
+	var objs []obj
+	rows, err := h.QueryContext(ctx,
+		"SELECT name, type, COALESCE(sql,'') FROM "+qual+".sqlite_master WHERE type IN ('table','view')")
+	if err != nil {
+		return nil, err
+	}
+	for rows.Next() {
+		var o obj
+		if err := rows.Scan(&o.name, &o.kind, &o.sql); err != nil {
+			_ = rows.Close()
+			return nil, err
+		}
+		objs = append(objs, o)
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return nil, err
+	}
+	_ = rows.Close()
+
+	var out []model.Dependent
+
+	// 入向外键：逐表扫 PRAGMA。SQLite 的 PRAGMA 只回答「本表引用谁」，
+	// 没有反向查询，所以只能全表扫一遍。
+	for _, o := range objs {
+		if o.kind != "table" {
+			continue
+		}
+		fkRows, err := h.QueryContext(ctx,
+			"PRAGMA "+qual+".foreign_key_list("+dialect.For(model.EngineSQLite).QuoteIdent(o.name)+")")
+		if err != nil {
+			return nil, err
+		}
+		// 同一组外键会有多行（每列一行），按 id 聚合。
+		type agg struct {
+			cols, refCols []string
+			refTable      string
+		}
+		byID := map[int64]*agg{}
+		var order []int64
+		for fkRows.Next() {
+			var (
+				id, seq        int64
+				refTable, from string
+				to             sql.NullString
+				onUpdate       sql.NullString
+				onDelete       sql.NullString
+				match          sql.NullString
+			)
+			if err := fkRows.Scan(&id, &seq, &refTable, &from, &to, &onUpdate, &onDelete, &match); err != nil {
+				_ = fkRows.Close()
+				return nil, err
+			}
+			if !strings.EqualFold(refTable, ref.Name) {
+				continue
+			}
+			a, ok := byID[id]
+			if !ok {
+				a = &agg{refTable: refTable}
+				byID[id] = a
+				order = append(order, id)
+			}
+			a.cols = append(a.cols, from)
+			if to.Valid {
+				a.refCols = append(a.refCols, to.String)
+			}
+		}
+		if err := fkRows.Err(); err != nil {
+			_ = fkRows.Close()
+			return nil, err
+		}
+		_ = fkRows.Close()
+
+		for _, id := range order {
+			a := byID[id]
+			out = append(out, model.Dependent{
+				Kind: "foreign_key",
+				Name: fmt.Sprintf("fk_%s_%d", o.name, id),
+				Detail: fmt.Sprintf("%s(%s) → %s(%s)", o.name,
+					strings.Join(a.cols, ", "), a.refTable, strings.Join(a.refCols, ", ")),
+				Columns: a.refCols,
+				Exact:   true,
+			})
+		}
+	}
+
+	// 视图依赖：文本匹配，标 Exact=false。
+	for _, o := range objs {
+		if o.kind != "view" {
+			continue
+		}
+		if driver.ViewReferencesTable(o.sql, ref.Name) {
+			out = append(out, model.Dependent{
+				Kind:   "view",
+				Name:   o.name,
+				Detail: "视图定义里出现了 " + ref.Name,
+				Exact:  false,
+			})
+		}
+	}
+	return out, nil
+}

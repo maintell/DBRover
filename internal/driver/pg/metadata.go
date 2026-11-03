@@ -561,3 +561,99 @@ func pgArray(items []string) string {
 	}
 	return "{" + strings.Join(quoted, ",") + "}"
 }
+
+// Dependents 返回依赖 ref 的其他对象。
+//
+// PostgreSQL 两条路都是精确的：
+//   - 入向外键：pg_constraint 的 conkey/confkey 直接给出列对应关系。
+//   - 视图：information_schema.view_table_usage 是解析后的依赖，不是文本匹配。
+func (c *Connector) Dependents(ctx context.Context, ref model.ObjectRef) ([]model.Dependent, error) {
+	h, err := c.handle()
+	if err != nil {
+		return nil, err
+	}
+	schema := ref.Schema
+	if schema == "" {
+		schema = c.config().Schema
+	}
+	if schema == "" {
+		schema = "public"
+	}
+
+	var out []model.Dependent
+
+	fkRows, err := h.QueryContext(ctx, `
+		SELECT c.conname, t.relname, a.attname, ra.attname
+		FROM pg_constraint c
+		JOIN pg_class t      ON t.oid  = c.conrelid
+		JOIN pg_class rt     ON rt.oid = c.confrelid
+		JOIN pg_namespace n  ON n.oid  = rt.relnamespace
+		CROSS JOIN LATERAL unnest(c.conkey, c.confkey) AS k(attnum, refattnum)
+		JOIN pg_attribute a  ON a.attrelid  = t.oid  AND a.attnum  = k.attnum
+		JOIN pg_attribute ra ON ra.attrelid = rt.oid AND ra.attnum = k.refattnum
+		WHERE c.contype = 'f' AND rt.relname = $1 AND n.nspname = $2
+		ORDER BY c.conname, k.attnum`, ref.Name, schema)
+	if err != nil {
+		return nil, err
+	}
+	type agg struct {
+		table         string
+		cols, refCols []string
+	}
+	byName := map[string]*agg{}
+	var order []string
+	for fkRows.Next() {
+		var name, table, col, refCol string
+		if err := fkRows.Scan(&name, &table, &col, &refCol); err != nil {
+			_ = fkRows.Close()
+			return nil, err
+		}
+		a, ok := byName[name]
+		if !ok {
+			a = &agg{table: table}
+			byName[name] = a
+			order = append(order, name)
+		}
+		a.cols = append(a.cols, col)
+		a.refCols = append(a.refCols, refCol)
+	}
+	if err := fkRows.Err(); err != nil {
+		_ = fkRows.Close()
+		return nil, err
+	}
+	_ = fkRows.Close()
+	for _, name := range order {
+		a := byName[name]
+		out = append(out, model.Dependent{
+			Kind: "foreign_key",
+			Name: name,
+			Detail: fmt.Sprintf("%s(%s) → %s(%s)", a.table,
+				strings.Join(a.cols, ", "), ref.Name, strings.Join(a.refCols, ", ")),
+			Columns: a.refCols,
+			Exact:   true,
+		})
+	}
+
+	viewRows, err := h.QueryContext(ctx, `
+		SELECT DISTINCT view_name
+		FROM information_schema.view_table_usage
+		WHERE table_catalog = current_database() AND table_schema = $1 AND table_name = $2
+		ORDER BY view_name`, schema, ref.Name)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = viewRows.Close() }()
+	for viewRows.Next() {
+		var name string
+		if err := viewRows.Scan(&name); err != nil {
+			return nil, err
+		}
+		out = append(out, model.Dependent{
+			Kind:   "view",
+			Name:   name,
+			Detail: "视图 " + name + " 引用了 " + ref.Name,
+			Exact:  true,
+		})
+	}
+	return out, viewRows.Err()
+}

@@ -239,7 +239,7 @@
     "/api/v1/connections/{id}/schema/plan": {
       "post": {
         "summary": "生成结构变更预案",
-        "description": "v1 支持 create_table / add_column / drop_column / alter_column_type / create_index / drop_index / add_foreign_key。执行走同一个 /changes/{pid}/apply；预案带表定义哈希（建表则要求执行时表仍不存在），变了就返回 409 SCHEMA_CHANGED。建表必须给主键。改列类型前会做收窄预检，装不下现存数据返回 409 NARROWING_BLOCKED；SQLite 不支持原地改类型，返回 400。加外键前先查孤儿数据与父表列唯一性，不通过返回 409 FK_PRECHECK_BLOCKED 并带样本；SQLite 不支持 ALTER TABLE 加约束，返回 400。",
+        "description": "v1 支持 create_table / add_column / drop_column / alter_column_type / create_index / drop_index / add_foreign_key / drop_table。执行走同一个 /changes/{pid}/apply；预案带表定义哈希（建表则要求执行时表仍不存在），变了就返回 409 SCHEMA_CHANGED。建表必须给主键。改列类型前会做收窄预检，装不下现存数据返回 409 NARROWING_BLOCKED；SQLite 不支持原地改类型，返回 400。加外键前先查孤儿数据与父表列唯一性，不通过返回 409 FK_PRECHECK_BLOCKED 并带样本；SQLite 不支持 ALTER TABLE 加约束，返回 400。删表/删列前先查依赖（视图与入向外键），仍被引用返回 409 DEPENDENCY_BLOCKED；删表必然不可逆，回滚语句只是把空表建回来。",
         "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "string" } }],
         "requestBody": {
           "required": true,
@@ -250,7 +250,7 @@
                 "required": ["table", "action"],
                 "properties": {
                   "table": { "type": "object" },
-                  "action": { "type": "string", "enum": ["create_table", "add_column", "drop_column", "alter_column_type", "create_index", "drop_index", "add_foreign_key"] },
+                  "action": { "type": "string", "enum": ["create_table", "add_column", "drop_column", "alter_column_type", "create_index", "drop_index", "add_foreign_key", "drop_table"] },
                   "column": {
                     "type": "object",
                     "required": ["name"],
@@ -293,7 +293,7 @@
         "responses": {
           "201": { "description": "预案已生成（语句 / 回滚 / 风险 / 摩擦 / 不可逆标记）" },
           "400": { "description": "参数不合法（INVALID_COLUMN）或生成失败（SCHEMA_PLAN_FAILED）；引擎不支持该动作也走 400（例如 SQLite 的 alter_column_type 与 add_foreign_key）" },
-          "409": { "description": "收窄预检不通过（NARROWING_BLOCKED）、唯一索引前发现重复值（DUPLICATE_ROWS），或外键预检不通过（FK_PRECHECK_BLOCKED：有孤儿数据或父表列不唯一，带样本）" },
+          "409": { "description": "收窄预检不通过（NARROWING_BLOCKED）、唯一索引前发现重复值（DUPLICATE_ROWS）、外键预检不通过（FK_PRECHECK_BLOCKED：有孤儿数据或父表列不唯一，带样本），或目标仍被引用（DEPENDENCY_BLOCKED：被视图或入向外键引用，提示里带近似标记）" },
           "404": { "description": "连接不存在" }
         }
       }

@@ -411,3 +411,97 @@ func (c *Connector) Search(ctx context.Context, pattern string, limit int) ([]mo
 func quoteIdent(s string) string {
 	return "`" + strings.ReplaceAll(s, "`", "``") + "`"
 }
+
+// Dependents 返回依赖 ref 的其他对象。
+//
+//   - 入向外键：information_schema.key_column_usage 是精确的。
+//   - 视图：MySQL 5.7 的 view_table_usage 不可靠（经常为空），只能回落
+//     到 views.view_definition 做词边界文本匹配，标 Exact=false。
+func (c *Connector) Dependents(ctx context.Context, ref model.ObjectRef) ([]model.Dependent, error) {
+	h, err := c.handle()
+	if err != nil {
+		return nil, err
+	}
+	db := ref.Catalog
+	if db == "" {
+		db = c.config().Catalog
+	}
+	if db == "" {
+		return nil, fmt.Errorf("mysql: 未指定库名，无法查询依赖关系")
+	}
+
+	var out []model.Dependent
+
+	// 入向外键：按约束名聚合多列。
+	fkRows, err := h.QueryContext(ctx, `
+		SELECT CONSTRAINT_NAME, TABLE_NAME, COLUMN_NAME, REFERENCED_COLUMN_NAME
+		FROM information_schema.KEY_COLUMN_USAGE
+		WHERE TABLE_SCHEMA = ? AND REFERENCED_TABLE_SCHEMA = ? AND REFERENCED_TABLE_NAME = ?
+		ORDER BY CONSTRAINT_NAME, ORDINAL_POSITION`, db, db, ref.Name)
+	if err != nil {
+		return nil, err
+	}
+	type agg struct {
+		table         string
+		cols, refCols []string
+	}
+	byName := map[string]*agg{}
+	var order []string
+	for fkRows.Next() {
+		var name, table, col string
+		var refCol sql.NullString
+		if err := fkRows.Scan(&name, &table, &col, &refCol); err != nil {
+			_ = fkRows.Close()
+			return nil, err
+		}
+		a, ok := byName[name]
+		if !ok {
+			a = &agg{table: table}
+			byName[name] = a
+			order = append(order, name)
+		}
+		a.cols = append(a.cols, col)
+		if refCol.Valid {
+			a.refCols = append(a.refCols, refCol.String)
+		}
+	}
+	if err := fkRows.Err(); err != nil {
+		_ = fkRows.Close()
+		return nil, err
+	}
+	_ = fkRows.Close()
+	for _, name := range order {
+		a := byName[name]
+		out = append(out, model.Dependent{
+			Kind: "foreign_key",
+			Name: name,
+			Detail: fmt.Sprintf("%s(%s) → %s(%s)", a.table,
+				strings.Join(a.cols, ", "), ref.Name, strings.Join(a.refCols, ", ")),
+			Columns: a.refCols,
+			Exact:   true,
+		})
+	}
+
+	// 视图依赖：文本匹配。
+	viewRows, err := h.QueryContext(ctx,
+		"SELECT TABLE_NAME, COALESCE(VIEW_DEFINITION,'') FROM information_schema.VIEWS WHERE TABLE_SCHEMA = ?", db)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = viewRows.Close() }()
+	for viewRows.Next() {
+		var name, def string
+		if err := viewRows.Scan(&name, &def); err != nil {
+			return nil, err
+		}
+		if driver.ViewReferencesTable(def, ref.Name) {
+			out = append(out, model.Dependent{
+				Kind:   "view",
+				Name:   name,
+				Detail: "视图定义里出现了 " + ref.Name,
+				Exact:  false,
+			})
+		}
+	}
+	return out, viewRows.Err()
+}

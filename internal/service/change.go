@@ -97,6 +97,9 @@ type ChangePlan struct {
 	RollsBackAsCompensation bool `json:"rolls_back_as_compensation,omitempty"`
 	// AffectedRows 是影响行数；-1 表示未知（不假装是 0）。
 	AffectedRows int64 `json:"affected_rows"`
+	// Notes 是需要原样展示给用户的补充说明（不阻断，但会影响判断）。
+	// 例如「该表还有 2 个视图依赖，删列前请自查」——这类信息不能只写进日志。
+	Notes []string `json:"notes,omitempty"`
 	// ExpectDDLHash 是生成预案时看到的表定义哈希，执行前比对。
 	// 只在服务端保管，不对外暴露（客户端不需要，也不该能改）。
 	ExpectDDLHash string `json:"-"`

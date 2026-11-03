@@ -14,6 +14,25 @@ type ObjectRef struct {
 	Name    string     `json:"name"`
 }
 
+// Dependent 是「另一个对象依赖我」的一条记录，用于删除前的阻断。
+//
+// Exact 的语义很重要：外键依赖三个引擎都能精确回答（true）；视图依赖在
+// SQLite / MySQL 5.7 上只能文本匹配（false，可能误报）。宁可多报也不漏报——
+// 多报的代价是一次人工确认，漏报的代价是删掉一张被引用的表且没有回滚。
+type Dependent struct {
+	// Kind 是依赖类型：foreign_key | view。
+	Kind string `json:"kind"`
+	// Name 是约束名或视图名。
+	Name string `json:"name"`
+	// Detail 是给人看的一句话，例如 "orders.customer_id → customers.id"。
+	Detail string `json:"detail"`
+	// Columns 是本对象被引用到的列。外键依赖有值，视图依赖为空
+	// （视图引用的列无法可靠判定）。删列时靠它做精确阻断。
+	Columns []string `json:"columns,omitempty"`
+	// Exact 为 false 时，提示文案必须注明「按文本匹配得到，可能误报」。
+	Exact bool `json:"exact"`
+}
+
 // Column 是中立列描述。Type.Raw 保留引擎原始类型串。
 type Column struct {
 	Name        string     `json:"name"`

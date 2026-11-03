@@ -37,10 +37,16 @@ const (
 	DDLCreateIndex     DDLAction = "create_index"
 	DDLDropIndex       DDLAction = "drop_index"
 	DDLAddForeignKey   DDLAction = "add_foreign_key"
+	DDLDropTable       DDLAction = "drop_table"
 )
 
 // ErrForeignKeyBlocked 表示既有数据不满足要加的外键（有孤儿行，或父表列不唯一）。
 var ErrForeignKeyBlocked = errors.New("既有数据不满足该外键，加约束会失败")
+
+// ErrDependencyBlocked 表示目标对象仍被别的对象引用，删除会连带打断它们。
+//
+// 只在生成预案时阻断：错误信息里必须列出「谁在引用」，否则用户无从下手。
+var ErrDependencyBlocked = errors.New("目标仍被其他对象引用，删除会打断它们")
 
 // ForeignKeySpec 是加外键的描述。Name 为空时按表名与列名生成一个确定的名字。
 type ForeignKeySpec struct {
@@ -355,6 +361,17 @@ func (e *Executor) BuildDDLPlan(ctx context.Context, req DDLRequest) (*ChangePla
 		if col.IsPrimary {
 			return nil, fmt.Errorf("%w: 主键列不能删除", ErrInvalidDDL)
 		}
+		// 引用这一列的外键必须先拆：引擎会拒绝，而报错里不会说清是谁在引用。
+		if err := e.blockColumnDependents(ctx, req.Table, col.Name); err != nil {
+			return nil, err
+		}
+		// 视图依赖只能按表级文本匹配发现，无法判断是否引用了**这一列**
+		// （视图体里可能只是 SELECT *）。这条不阻断，但必须让用户知道。
+		if deps := e.viewDependents(ctx, req.Table); len(deps) > 0 {
+			plan.Notes = append(plan.Notes, fmt.Sprintf(
+				"该表还有 %d 个视图依赖（%s），删列前请自查视图是否用到 %q",
+				len(deps), strings.Join(deps, "、"), col.Name))
+		}
 		plan.Statements = []PlanStatement{{
 			SQL:        "ALTER TABLE " + table + " DROP COLUMN " + e.dialect.QuoteIdent(col.Name),
 			ExpectRows: -1,
@@ -516,6 +533,25 @@ func (e *Executor) BuildDDLPlan(ctx context.Context, req DDLRequest) (*ChangePla
 			plan.AffectedRows = -1
 		}
 
+	case DDLDropTable:
+		// 删除前先查引用：视图与外键都会在 DROP 之后才报错，而没有回滚。
+		if deps, derr := e.conn.Meta().Dependents(ctx, req.Table); derr == nil && len(deps) > 0 {
+			return nil, fmt.Errorf("%w：%s", ErrDependencyBlocked, describeDependents(deps))
+		}
+		plan.Statements = []PlanStatement{{
+			SQL:        "DROP TABLE " + table,
+			ExpectRows: -1,
+		}}
+		// 回滚只是补偿：结构能建回来，里面的数据回不来。
+		plan.Rollback = []PlanStatement{{
+			SQL:        e.recreateTableSQL(table, td),
+			ExpectRows: -1,
+		}}
+		plan.Irreversible = true
+		plan.Notes = append(plan.Notes,
+			"删表不可逆：回滚语句只会把空表建回来，数据不会回来。需要保留数据请先导出。")
+		plan.AffectedRows = -1
+
 	default:
 		return nil, fmt.Errorf("%w: 不支持的动作 %q", ErrInvalidDDL, req.Action)
 	}
@@ -665,6 +701,92 @@ func defaultFKName(table string, cols []string) string {
 	// 太长就截断再补一个短哈希，避免不同外键撞名。
 	sum := sha256.Sum256([]byte(name))
 	return name[:55] + "_" + hex.EncodeToString(sum[:4])
+}
+
+// blockColumnDependents 拦住「删一列，但还有外键引用这一列」。
+//
+// 引擎会拒绝，但报错只说约束名不合法或外键冲突，不会告诉你上游是谁；
+// 在这里挡下并列出引用方，用户才知道该先改哪张表。
+func (e *Executor) blockColumnDependents(ctx context.Context, ref model.ObjectRef, column string) error {
+	deps, err := e.conn.Meta().Dependents(ctx, ref)
+	if err != nil {
+		return nil // 查不到就不阻断：宁可让引擎报错，也不要因为元数据查询失败挡住正常操作
+	}
+	var hit []model.Dependent
+	for _, d := range deps {
+		if d.Kind != "foreign_key" {
+			continue
+		}
+		for _, c := range d.Columns {
+			if strings.EqualFold(c, column) {
+				hit = append(hit, d)
+				break
+			}
+		}
+	}
+	if len(hit) == 0 {
+		return nil
+	}
+	return fmt.Errorf("%w：%s", ErrDependencyBlocked, describeDependents(hit))
+}
+
+// viewDependents 返回引用该表的视图名（只用于提示，不阻断）。
+func (e *Executor) viewDependents(ctx context.Context, ref model.ObjectRef) []string {
+	deps, err := e.conn.Meta().Dependents(ctx, ref)
+	if err != nil {
+		return nil
+	}
+	var out []string
+	for _, d := range deps {
+		if d.Kind == "view" {
+			out = append(out, d.Name)
+		}
+	}
+	return out
+}
+
+// describeDependents 把依赖列表写成一句能照着做的话。
+// 近似结果必须显式标注，否则用户会以为那是精确结论。
+func describeDependents(deps []model.Dependent) string {
+	parts := make([]string, 0, len(deps))
+	approx := false
+	for _, d := range deps {
+		label := d.Name
+		if d.Kind == "view" {
+			label = "视图 " + d.Name
+		} else if d.Kind == "foreign_key" {
+			label = "外键 " + d.Name
+		}
+		if d.Detail != "" {
+			label += "（" + d.Detail + "）"
+		}
+		if !d.Exact {
+			approx = true
+			label += "[按文本匹配得到，可能误报]"
+		}
+		parts = append(parts, label)
+	}
+	out := strings.Join(parts, "；")
+	if approx {
+		out += "。近似匹配可能包含无关对象，确认不需要它们之后再删"
+	}
+	return out
+}
+
+// recreateTableSQL 用元数据拼一条补偿用的建表语句。
+//
+// 它只保证「结构大致回来」：约束、注释、引擎特有项都可能丢失，
+// 所以调用方必须同时标 Irreversible。不假装能还原。
+func (e *Executor) recreateTableSQL(table string, td *model.TableDetail) string {
+	cols := make([]string, 0, len(td.Columns))
+	for _, c := range td.Columns {
+		def := e.columnDefinitionFromColumn(c)
+		cols = append(cols, def)
+	}
+	if pk := td.PrimaryKeyColumns(); len(pk) > 0 {
+		cols = append(cols, "PRIMARY KEY ("+strings.Join(e.quoteAll(pk), ", ")+")")
+	}
+	return "CREATE TABLE " + table + " (" + strings.Join(cols, ", ") + ")"
 }
 
 // finishDDLPlan 补上风险、摩擦与回滚语义。// 结构变更与数据变更共用同一套分级：不因为「是 DDL」就给个特例等级。

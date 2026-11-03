@@ -47,7 +47,87 @@ func Run(t *testing.T, cfg Config) {
 	t.Run("TransactionRollback", func(t *testing.T) { testTxRollback(t, cfg) })
 	t.Run("ReadOnlyRejectsWrite", func(t *testing.T) { testReadOnlyRejectsWrite(t, cfg) })
 	t.Run("DescribeMissingObjectErrors", func(t *testing.T) { testDescribeMissingObject(t, cfg) })
+	t.Run("DependentsReported", func(t *testing.T) { testDependents(t, cfg) })
 	t.Run("DDLRoundTrip", func(t *testing.T) { testDDLRoundTrip(t, cfg) })
+}
+
+// testDependents 锁住「删除前的依赖查询」：造一张父表、一张引用它的子表、
+// 一个引用它的视图，三者都必须被报出来；入向外键那条必须是精确的。
+//
+// 为什么必须测：这是删表/删列唯一的阻断依据。漏报一次就是删掉一张被引用的表，
+// 而且 DROP TABLE 没有回滚（docs/07 §5.1、ADR-0006）。
+func testDependents(t *testing.T, cfg Config) {
+	c := open(t, cfg, false)
+	s := session(t, c)
+	ctx := context.Background()
+
+	for _, q := range []string{
+		"DROP VIEW IF EXISTS dbv_dep_view",
+		"DROP TABLE IF EXISTS dbv_dep_child",
+		"DROP TABLE IF EXISTS dbv_dep_parent",
+	} {
+		_, _ = s.Execute(ctx, q, nil)
+	}
+	mustExec(t, s, "CREATE TABLE dbv_dep_parent (id INT NOT NULL PRIMARY KEY)")
+	mustExec(t, s, "CREATE TABLE dbv_dep_child (id INT NOT NULL PRIMARY KEY, pid INT)")
+	mustExec(t, s, "CREATE VIEW dbv_dep_view AS SELECT id FROM dbv_dep_parent")
+	t.Cleanup(func() {
+		_, _ = s.Execute(ctx, "DROP VIEW IF EXISTS dbv_dep_view", nil)
+		_, _ = s.Execute(ctx, "DROP TABLE IF EXISTS dbv_dep_child", nil)
+		_, _ = s.Execute(ctx, "DROP TABLE IF EXISTS dbv_dep_parent", nil)
+	})
+
+	deps, err := c.Meta().Dependents(ctx, model.ObjectRef{Kind: model.KindTable, Name: "dbv_dep_parent"})
+	if err != nil {
+		t.Fatalf("Dependents: %v", err)
+	}
+
+	var views, fks []model.Dependent
+	for _, d := range deps {
+		switch d.Kind {
+		case "view":
+			views = append(views, d)
+		case "foreign_key":
+			fks = append(fks, d)
+		}
+	}
+	if len(views) == 0 {
+		t.Errorf("视图依赖没被报出来: %+v", deps)
+	}
+	for _, v := range views {
+		if v.Name == "" {
+			t.Errorf("视图依赖缺少名字: %+v", v)
+		}
+	}
+
+	// 外键要等加了约束才会出现；加不上的引擎（例如不支持 ALTER TABLE ADD
+	// CONSTRAINT 的 SQLite）用能力位判断，而不是假装测过。
+	if c.Capabilities().AddForeignKey {
+		mustExec(t, s, "ALTER TABLE dbv_dep_child ADD CONSTRAINT fk_dep FOREIGN KEY (pid) REFERENCES dbv_dep_parent (id)")
+		deps, err = c.Meta().Dependents(ctx, model.ObjectRef{Kind: model.KindTable, Name: "dbv_dep_parent"})
+		if err != nil {
+			t.Fatalf("Dependents（加外键后）: %v", err)
+		}
+		exact := 0
+		for _, d := range deps {
+			if d.Kind == "foreign_key" && d.Exact {
+				exact++
+			}
+		}
+		if exact == 0 {
+			t.Errorf("入向外键必须是精确的（Exact=true）且被报出来: %+v", deps)
+		}
+	}
+
+	// 不存在的对象返回空列表而不是错误：删一个已经被别人删掉的对象，
+	// 不该变成一个看不懂的报错。
+	got, err := c.Meta().Dependents(ctx, model.ObjectRef{Kind: model.KindTable, Name: "dbv_no_such_table_zzz"})
+	if err != nil {
+		t.Errorf("不存在的对象不该报错: %v", err)
+	}
+	if len(got) != 0 {
+		t.Errorf("不存在的对象不该有依赖: %+v", got)
+	}
 }
 
 // testDescribeMissingObject 锁住一条契约：描述不存在的对象必须返回错误。

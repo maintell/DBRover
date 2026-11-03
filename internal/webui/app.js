@@ -854,6 +854,7 @@ async function confirmPlan(plan) {
     '<p>将执行 ' + list.length + ' 条语句：</p>' +
     '<pre>' + escapeHTML(list.map((s) => s.sql).join(';\n')) + '</pre>' +
     (plan.affected_rows > 0 ? '<p>影响 ' + plan.affected_rows + ' 行。</p>' : '') +
+    (plan.notes || []).map((n) => '<p class="warn">' + escapeHTML(n) + '</p>').join('') +
     rollbackNote(plan);
   return dialog('确认变更', html, '执行');
 }
@@ -1519,6 +1520,21 @@ function renderSchema(out) {
     wrap.appendChild(ddl);
   }
 
+  // 删表放在最后，且与上面所有「改结构」的入口分开：它不可逆，
+  // 不该和「加一列」长成一排，让人顺手点到。
+  const dangerHead = document.createElement('div');
+  dangerHead.className = 'head';
+  dangerHead.textContent = '删除';
+  wrap.appendChild(dangerHead);
+  const dangerBar = document.createElement('div');
+  dangerBar.className = 'toolbar';
+  const dropBtn = document.createElement('button');
+  dropBtn.id = 'sch-droptable';
+  dropBtn.textContent = '删表';
+  dropBtn.onclick = () => planDropTable();
+  dangerBar.append(dropBtn);
+  wrap.appendChild(dangerBar);
+
   $('results').replaceChildren(wrap);
 
   const onInput = () => schedulePreview();
@@ -1685,6 +1701,29 @@ async function planAddForeignKey() {
   }
   if (!(await confirmPlan(plan))) return;
   await applyPlan(plan.id, undefined, refreshSchema);
+}
+
+// ---------- 删表 ----------
+
+// planDropTable 先让服务端查依赖，再出预案。
+// 被视图或外键引用时服务端返回 409 并列出引用方——就地贴出来，
+// 比让人对着「DROP TABLE 失败」猜要好。
+async function planDropTable() {
+  if (!state.current || !state.tableName) return;
+  let plan;
+  try {
+    plan = await postSchemaPlan({ action: 'drop_table' }, false);
+  } catch (e) {
+    showNotice(e.message + (e.hint ? '（' + e.hint + '）' : ''), 'error');
+    return;
+  }
+  if (!(await confirmPlan(plan))) return;
+  // 删表后这一页已经没有对象可看，回到对象树第一张表。
+  await applyPlan(plan.id, undefined, async () => {
+    await loadTables();
+    state.tableName = '';
+    showNotice('表已删除。数据不会回来。', 'warn');
+  });
 }
 
 // ---------- 改列类型 ----------

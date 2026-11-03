@@ -810,6 +810,11 @@ func (s *Server) handleSchemaPlan(w http.ResponseWriter, r *http.Request) {
 		Columns: req.Columns, PrimaryKey: req.PrimaryKey, Index: req.Index,
 		ForeignKey: req.ForeignKey,
 	})
+	if errors.Is(err, service.ErrDependencyBlocked) {
+		writeError(w, http.StatusConflict, "DEPENDENCY_BLOCKED", "policy",
+			err.Error(), "先删掉引用它的视图或外键，再删这个对象", false)
+		return
+	}
 	if errors.Is(err, service.ErrForeignKeyBlocked) {
 		writeError(w, http.StatusConflict, "FK_PRECHECK_BLOCKED", "policy",
 			err.Error(), "先清理孤儿数据，或改成能对上父表的引用列", false)

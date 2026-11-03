@@ -9,6 +9,8 @@ package driver
 import (
 	"context"
 	"errors"
+	"regexp"
+	"strings"
 	"time"
 
 	"github.com/maintell/DBRover/internal/model"
@@ -49,7 +51,24 @@ type ConnectConfig struct {
 	DisplayTimeZone string
 }
 
-// DisplayLocation 把 DisplayTimeZone 解析成 *time.Location。
+// ViewReferencesTable 判断一段视图定义是否引用了某张表。
+//
+// 这是给「引擎拿不到精确依赖关系」的驱动器用的兜底（SQLite、MySQL 5.7），
+// 结果必须标 Dependent.Exact=false。匹配用词边界且大小写不敏感：宁可多报
+// 一次人工确认，也不要漏掉一个真的引用——删表没有回滚。
+func ViewReferencesTable(viewSQL, table string) bool {
+	if strings.TrimSpace(viewSQL) == "" || strings.TrimSpace(table) == "" {
+		return false
+	}
+	// 表名里的正则元字符先转义，再用词边界包起来。
+	pat := `(?i)\b` + regexp.QuoteMeta(table) + `\b`
+	re, err := regexp.Compile(pat)
+	if err != nil {
+		return false
+	}
+	return re.MatchString(viewSQL)
+}
+
 // 空值或非法名一律退回 UTC：宁可显示成 UTC，也不要按服务器本地时区猜——
 // 猜错的时区会让人对着差 8 小时的数据排查半天。
 func (c ConnectConfig) DisplayLocation() *time.Location {
@@ -129,6 +148,14 @@ type Metadata interface {
 	DescribeTable(ctx context.Context, ref model.ObjectRef) (*model.TableDetail, error)
 	DDL(ctx context.Context, ref model.ObjectRef) (string, error)
 	Search(ctx context.Context, pattern string, limit int) ([]model.ObjectRef, error)
+	// Dependents 返回依赖 ref 的其他对象（入向外键、引用它的视图）。
+	//
+	// 删除前的阻断靠它（docs/07 §5.1 / §AD-0006）。实现必须「能精确就精确」：
+	// 入向外键三个引擎都有精确来源，视图依赖可能只能文本匹配——后者要带
+	// Exact=false，让提示文案能如实标注「可能误报」。
+	// ref 不存在时返回空列表而不是错误：删除一个已经被别人删掉的对象，
+	// 不该因为依赖查询失败而变成一个看不懂的报错。
+	Dependents(ctx context.Context, ref model.ObjectRef) ([]model.Dependent, error)
 }
 
 // Session 是一条逻辑会话。事务进行中时，后续语句必须落在同一条物理连接上。

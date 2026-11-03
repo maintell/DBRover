@@ -117,3 +117,37 @@ func TestSchemaPlanAddForeignKeyNeedsCapability(t *testing.T) {
 		t.Errorf("动作已被识别，不该落到「未知动作」分支: %q", msg)
 	}
 }
+
+// TestSchemaPlanDropTableBlockedByDependency 验证接口层把依赖阻断映射成 409：
+// 用户需要据此知道「先删谁」，而不是拿到一句 SCHEMA_PLAN_FAILED。
+func TestSchemaPlanDropTableBlockedByDependency(t *testing.T) {
+	_, ts, dir := newServer(t)
+	id := createConn(t, ts, dir, "test", "read-write")
+	for _, q := range []string{
+		"CREATE TABLE dep_t (id INTEGER PRIMARY KEY)",
+		"CREATE VIEW dep_v AS SELECT id FROM dep_t",
+	} {
+		if code := execApproved(t, ts, id, q); code != http.StatusOK {
+			t.Fatalf("准备 %q 失败: %d", q, code)
+		}
+	}
+
+	code, body := do(t, ts, http.MethodPost, "/api/v1/connections/"+id+"/schema/plan", map[string]any{
+		"table":  map[string]any{"kind": "table", "name": "dep_t"},
+		"action": "drop_table",
+	}, true)
+	if code != http.StatusConflict {
+		t.Fatalf("status = %d, 期望 409, body=%v", code, body)
+	}
+	errObj, _ := body["error"].(map[string]any)
+	if errObj["code"] != "DEPENDENCY_BLOCKED" {
+		t.Errorf("code = %v, 期望 DEPENDENCY_BLOCKED", errObj["code"])
+	}
+	msg, _ := errObj["message"].(string)
+	if !strings.Contains(msg, "dep_v") {
+		t.Errorf("阻断信息应指出引用方: %q", msg)
+	}
+	if errObj["hint"] == "" {
+		t.Error("必须给出「先删谁」的提示")
+	}
+}
