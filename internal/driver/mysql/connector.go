@@ -175,10 +175,43 @@ func (c *Connector) Stats() driver.PoolStats {
 
 // Acquire 借出一条逻辑会话。
 func (c *Connector) Acquire(ctx context.Context) (driver.Session, error) {
-	if _, err := c.handle(); err != nil {
+	db, err := c.handle()
+	if err != nil {
 		return nil, err
 	}
-	return &session{c: c}, nil
+	// 钉一条物理连接：取消要用 KILL QUERY <id>，而 id 只对某一条连接有意义。
+	// 代价是每次取会话多一个往返（SELECT CONNECTION_ID()）——换的是
+	// 「取消真的能让服务端停下来」，值得。
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		return nil, err
+	}
+	s := &session{c: c, conn: conn}
+	if err := conn.QueryRowContext(ctx, "SELECT CONNECTION_ID()").Scan(&s.threadID); err != nil {
+		_ = conn.Close()
+		return nil, err
+	}
+	return s, nil
+}
+
+// killQuery 用另一条连接把正在跑的那条语句杀掉。
+//
+// 1094（ER_NO_SUCH_THREAD）表示线程已经结束——那正是我们想要的结果，不算错误：
+// 语句可能在 KILL 发出去之前刚好跑完。
+func (c *Connector) killQuery(id int64) error {
+	db, err := c.handle()
+	if err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	if _, err := db.ExecContext(ctx, fmt.Sprintf("KILL QUERY %d", id)); err != nil {
+		if strings.Contains(err.Error(), "1094") || strings.Contains(err.Error(), "Unknown thread id") {
+			return nil
+		}
+		return err
+	}
+	return nil
 }
 
 func (c *Connector) handle() (*sql.DB, error) {

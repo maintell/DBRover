@@ -51,12 +51,11 @@ func (e *Executor) beginRun(ctx context.Context, sess driver.Session) (context.C
 // 两件事都做：先让会话自己取消（驱动层中断当前调用），再取消 ctx
 // （让还阻塞在客户端的那一步立刻返回）。
 //
-// 引擎侧的实效性不一样，这点必须在文档里说准，不能含糊成「已支持取消」：
+// 三个引擎都做到「引擎侧真的停」，但原理不同：
 //   - SQLite：interrupt，立刻停。
-//   - PostgreSQL：客户端断开后服务端在下一个检查点发现 EOF 并终止语句，实测立即消失。
-//   - MySQL：**客户端立刻返回，但服务端语句可能跑到自然结束**——SLEEP() 期间
-//     不读 socket，要真正终止得用 KILL QUERY <id>，而那要求会话钉在单条连接上
-//     （当前用连接池，无法确定 id）。真机实测：取消后 1.5 秒 processlist 里仍在。
+//   - PostgreSQL：客户端断开后服务端在检查点发现 EOF 并终止语句。
+//   - MySQL：SLEEP() 之类不读 socket 的语句不会因为客户端断开而停止，
+//     所以驱动侧另发一条 KILL QUERY <id>（会话为此钉在单条物理连接上）。
 func (e *Executor) Cancel(ctx context.Context) bool {
 	e.runMu.Lock()
 	recs := make([]*runningExec, 0, len(e.running))

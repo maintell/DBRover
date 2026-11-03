@@ -18,6 +18,11 @@ type querier interface {
 
 type session struct {
 	c *Connector
+	// conn 是钉住的一条物理连接。取消要靠 KILL QUERY <id>，而 id 只在
+	// 「同一条连接」上有意义——用连接池的话，下一次查询可能落在别的连接上。
+	conn *sql.Conn
+	// threadID 是 MySQL 侧的会话 id（CONNECTION_ID()），取消时用它。
+	threadID int64
 
 	mu     sync.Mutex
 	tx     *sql.Tx
@@ -34,7 +39,10 @@ func (s *session) q() (querier, error) {
 	if s.tx != nil {
 		return s.tx, nil
 	}
-	return s.c.handle()
+	if s.conn == nil {
+		return nil, fmt.Errorf("mysql: 会话没有可用连接")
+	}
+	return s.conn, nil
 }
 
 func (s *session) setCancel(fn context.CancelFunc) {
@@ -114,11 +122,10 @@ func (s *session) Begin(ctx context.Context) error {
 	if s.tx != nil {
 		return fmt.Errorf("mysql: 已在事务中")
 	}
-	db, err := s.c.handle()
-	if err != nil {
-		return err
+	if s.conn == nil {
+		return fmt.Errorf("mysql: 会话没有可用连接")
 	}
-	tx, err := db.BeginTx(ctx, nil)
+	tx, err := s.conn.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
@@ -154,16 +161,26 @@ func (s *session) InTx() bool {
 	return s.tx != nil
 }
 
-// Cancel 中断在途语句。go-sql-driver 在 ctx 取消时会关闭底层连接，从而终止查询。
+// Cancel 中断在途语句。
+//
+// 只取消本地 ctx 不够：go-sql-driver 会因此关掉连接，但服务端在 SLEEP() 之类
+// 不读 socket 的语句里**不会**立刻发现，语句会继续跑到自然结束。真机实测过
+// （docs/05 验收 9）：取消 1.5 秒后 processlist 里仍在。
+// 所以这里两件事都做：本地取消让客户端立刻返回，再发 KILL QUERY <id>
+// 让服务端真的停下来。KILL 走连接池里的另一条连接，不占用正在跑的那条。
 func (s *session) Cancel(ctx context.Context) error {
 	s.mu.Lock()
 	c := s.cancel
+	id := s.threadID
 	s.mu.Unlock()
-	if c == nil {
+
+	if c != nil {
+		c()
+	}
+	if id == 0 {
 		return nil
 	}
-	c()
-	return nil
+	return s.c.killQuery(id)
 }
 
 func (s *session) Close() error {
@@ -183,7 +200,10 @@ func (s *session) Close() error {
 		c()
 	}
 	if tx != nil {
-		return tx.Rollback()
+		_ = tx.Rollback()
+	}
+	if s.conn != nil {
+		return s.conn.Close()
 	}
 	return nil
 }
