@@ -45,12 +45,36 @@ type IndexDiff struct {
 	Status CompareStatus `json:"status"`
 }
 
+// ForeignKeyDiff 描述一个外键的差异。
+//
+// 按「本表列 → 引用表 + 引用列」为键匹配，不按名字（名字不同不构成功能差异）。
+// 动作子句（ON DELETE / ON UPDATE）参与比较但不参与键：同一个关系改了删除行为
+// 应当报成「同一外键有差异」，而不是变成两条互不相干的新增与删除。
+type ForeignKeyDiff struct {
+	Key    string            `json:"key"`
+	Left   *model.ForeignKey `json:"left,omitempty"`
+	Right  *model.ForeignKey `json:"right,omitempty"`
+	Reason []string          `json:"reason,omitempty"`
+	Status CompareStatus     `json:"status"`
+}
+
+// CheckDiff 描述一个检查约束的差异。按归一化后的表达式为键。
+type CheckDiff struct {
+	Key    string        `json:"key"`
+	Left   *model.Check  `json:"left,omitempty"`
+	Right  *model.Check  `json:"right,omitempty"`
+	Reason []string      `json:"reason,omitempty"`
+	Status CompareStatus `json:"status"`
+}
+
 // TableDiff 描述一张表的差异。
 type TableDiff struct {
-	Name    string        `json:"name"`
-	Status  CompareStatus `json:"status"`
-	Columns []ColumnDiff  `json:"columns,omitempty"`
-	Indexes []IndexDiff   `json:"indexes,omitempty"`
+	Name        string           `json:"name"`
+	Status      CompareStatus    `json:"status"`
+	Columns     []ColumnDiff     `json:"columns,omitempty"`
+	Indexes     []IndexDiff      `json:"indexes,omitempty"`
+	ForeignKeys []ForeignKeyDiff `json:"foreign_keys,omitempty"`
+	Checks      []CheckDiff      `json:"checks,omitempty"`
 	// LeftDDL / RightDDL 供人眼对照；只在状态不是 same 时给出。
 	LeftDDL  string `json:"left_ddl,omitempty"`
 	RightDDL string `json:"right_ddl,omitempty"`
@@ -132,6 +156,8 @@ func Compare(ctx context.Context, left, right driver.Connector) (*CompareResult,
 			appendColumnScripts(&res.Upgrade, &res.Downgrade, &res.NeedReview,
 				td, leftDialect, rightDialect)
 			appendIndexScripts(&res.Upgrade, &res.Downgrade, &res.NeedReview, td, leftDialect)
+			appendForeignKeyScripts(&res.Upgrade, &res.Downgrade, &res.NeedReview,
+				td, leftDialect, rightDialect, left.Capabilities().AddForeignKey)
 		}
 	}
 	return res, nil
@@ -210,8 +236,10 @@ func compareTable(left, right *model.TableDetail, crossEngine bool) TableDiff {
 	}
 
 	td.Indexes = compareIndexes(left, right)
+	td.ForeignKeys = compareForeignKeys(left, right)
+	td.Checks = compareChecks(left, right)
 
-	if len(td.Columns) == 0 && len(td.Indexes) == 0 {
+	if len(td.Columns) == 0 && len(td.Indexes) == 0 && len(td.ForeignKeys) == 0 && len(td.Checks) == 0 {
 		td.Status = CompareSame
 		return td
 	}
@@ -229,7 +257,171 @@ func compareTable(left, right *model.TableDetail, crossEngine bool) TableDiff {
 			td.Status = CompareChanged
 		}
 	}
+	for _, fk := range td.ForeignKeys {
+		if fk.Status != CompareSame {
+			td.Status = CompareChanged
+		}
+		if fk.Status == CompareNeedReview {
+			td.Status = CompareNeedReview
+		}
+	}
+	for _, ck := range td.Checks {
+		if ck.Status != CompareSame {
+			td.Status = CompareChanged
+		}
+		if ck.Status == CompareNeedReview {
+			td.Status = CompareNeedReview
+		}
+	}
 	return td
+}
+
+// diffByKey 是「按 key 对齐两份集合」的通用骨架。
+//
+// 索引、外键、检查约束的比对骨架完全一样，只有「同一个 key 下怎么判差异」不同。
+// 写成一个泛型函数而不是复制三遍：三份几乎相同的循环最容易在改一处时漏掉另外两处。
+func diffByKey[V any, D any](
+	left, right map[string]V,
+	same func(l, r V) ([]string, CompareStatus),
+	leftOnly func(k string, l V) D,
+	rightOnly func(k string, r V) D,
+	changed func(k string, l, r V, reasons []string, st CompareStatus) D,
+) []D {
+
+	seen := make(map[string]bool, len(left)+len(right))
+	keys := make([]string, 0, len(left)+len(right))
+	for k := range left {
+		if !seen[k] {
+			seen[k] = true
+			keys = append(keys, k)
+		}
+	}
+	for k := range right {
+		if !seen[k] {
+			seen[k] = true
+			keys = append(keys, k)
+		}
+	}
+	sort.Strings(keys)
+
+	var out []D
+	for _, k := range keys {
+		l, lok := left[k]
+		r, rok := right[k]
+		switch {
+		case lok && !rok:
+			out = append(out, leftOnly(k, l))
+		case !lok && rok:
+			out = append(out, rightOnly(k, r))
+		default:
+			reasons, st := same(l, r)
+			if st == CompareSame && len(reasons) == 0 {
+				continue
+			}
+			out = append(out, changed(k, l, r, reasons, st))
+		}
+	}
+	return out
+}
+
+// fkKey 是外键的比对键：本表列 → 引用表 + 引用列。
+// 动作子句不进键（同一关系改了删除行为是「有差异」，不是「一删一增」）。
+func fkKey(fk model.ForeignKey) string {
+	cols := make([]string, len(fk.Columns))
+	for i, c := range fk.Columns {
+		cols[i] = strings.ToLower(strings.TrimSpace(c))
+	}
+	refs := make([]string, len(fk.RefColumns))
+	for i, c := range fk.RefColumns {
+		refs[i] = strings.ToLower(strings.TrimSpace(c))
+	}
+	return strings.Join(cols, ",") + "->" +
+		strings.ToLower(strings.TrimSpace(fk.RefTable)) + "(" + strings.Join(refs, ",") + ")"
+}
+
+// compareForeignKeys 对齐两侧外键。
+func compareForeignKeys(left, right *model.TableDetail) []ForeignKeyDiff {
+	collect := func(td *model.TableDetail) map[string]model.ForeignKey {
+		out := make(map[string]model.ForeignKey, len(td.ForeignKeys))
+		for _, fk := range td.ForeignKeys {
+			out[fkKey(fk)] = fk
+		}
+		return out
+	}
+	return diffByKey(collect(left), collect(right),
+		func(l, r model.ForeignKey) ([]string, CompareStatus) {
+			var reasons []string
+			if !strings.EqualFold(strings.TrimSpace(l.OnDelete), strings.TrimSpace(r.OnDelete)) {
+				reasons = append(reasons, "ON DELETE 不同: "+actionOrNone(l.OnDelete)+" → "+actionOrNone(r.OnDelete))
+			}
+			if !strings.EqualFold(strings.TrimSpace(l.OnUpdate), strings.TrimSpace(r.OnUpdate)) {
+				reasons = append(reasons, "ON UPDATE 不同: "+actionOrNone(l.OnUpdate)+" → "+actionOrNone(r.OnUpdate))
+			}
+			if len(reasons) > 0 {
+				return reasons, CompareChanged
+			}
+			// 名字不同不影响语义，但要说出来，免得人以为漏了。
+			if !strings.EqualFold(l.Name, r.Name) {
+				return []string{"外键名不同: " + l.Name + " → " + r.Name}, CompareChanged
+			}
+			return nil, CompareSame
+		},
+		func(k string, l model.ForeignKey) ForeignKeyDiff {
+			v := l
+			return ForeignKeyDiff{Key: k, Left: &v, Status: CompareOnlyLeft}
+		},
+		func(k string, r model.ForeignKey) ForeignKeyDiff {
+			v := r
+			return ForeignKeyDiff{Key: k, Right: &v, Status: CompareOnlyRight}
+		},
+		func(k string, l, r model.ForeignKey, reasons []string, st CompareStatus) ForeignKeyDiff {
+			lv, rv := l, r
+			return ForeignKeyDiff{Key: k, Left: &lv, Right: &rv, Reason: reasons, Status: st}
+		},
+	)
+}
+
+func actionOrNone(s string) string {
+	if strings.TrimSpace(s) == "" {
+		return "NO ACTION"
+	}
+	return strings.ToUpper(strings.TrimSpace(s))
+}
+
+// checkKey 是检查约束的比对键：归一化后的表达式（名字不同不算差异）。
+func checkKey(c model.Check) string {
+	return normalizeTypeText(c.Expr)
+}
+
+// compareChecks 对齐两侧检查约束。
+func compareChecks(left, right *model.TableDetail) []CheckDiff {
+	collect := func(td *model.TableDetail) map[string]model.Check {
+		out := make(map[string]model.Check, len(td.Checks))
+		for _, c := range td.Checks {
+			out[checkKey(c)] = c
+		}
+		return out
+	}
+	return diffByKey(collect(left), collect(right),
+		func(l, r model.Check) ([]string, CompareStatus) {
+			if !strings.EqualFold(strings.TrimSpace(l.Name), strings.TrimSpace(r.Name)) {
+				return []string{"约束名不同: " + l.Name + " → " + r.Name}, CompareChanged
+			}
+			return nil, CompareSame
+		},
+		func(k string, l model.Check) CheckDiff {
+			v := l
+			return CheckDiff{Key: k, Left: &v, Status: CompareOnlyLeft}
+		},
+		func(k string, r model.Check) CheckDiff {
+			v := r
+			return CheckDiff{Key: k, Right: &v, Status: CompareOnlyRight}
+		},
+		func(k string, l, r model.Check, reasons []string, st CompareStatus) CheckDiff {
+			lv, rv := l, r
+			return CheckDiff{Key: k, Left: &lv, Right: &rv, Reason: reasons, Status: st}
+		},
+	)
 }
 
 // indexKey 是索引的比对键：唯一性 + 谓词 + 列序列。
@@ -383,6 +575,71 @@ func yesNo(b bool) string {
 		return "是"
 	}
 	return "否"
+}
+
+// appendForeignKeyScripts 生成外键与检查约束的差异结论。
+//
+// 外键：右侧有的生成加约束语句，左侧多的生成删约束语句（两个方向都给，因为
+// 摘约束不动数据）；检查约束目前没有 DDL 动作，一律进 need_review。
+//
+// 加外键虽然能生成语句，但它在左侧能不能落地还取决于「父表存在、子表无孤儿」，
+// 这两件事比对本身不查，所以额外给一条可执行的核对路径（/fk/precheck）。
+func appendForeignKeyScripts(upgrade, downgrade, needReview *[]string, td TableDiff,
+	leftDialect, rightDialect dialect.Dialect, leftCanAddFK bool) {
+
+	table := leftDialect.QuoteQualified("", td.Name)
+	refTable := func(fk *model.ForeignKey) string {
+		// 引用表也要按左侧方言引用；schema 由 quoteQualified 的第二个参数给空，
+		// 与列脚本保持一致（跨 schema 场景请人工确认）。
+		return leftDialect.QuoteQualified("", fk.RefTable)
+	}
+
+	for _, fk := range td.ForeignKeys {
+		switch fk.Status {
+		case CompareOnlyRight:
+			// 左侧引擎不支持加约束时不能给一条必然失败的语句（SQLite 只能重建表）。
+			if !leftCanAddFK {
+				*needReview = append(*needReview,
+					td.Name+"：右侧有外键 "+fk.Key+"，但左侧引擎不支持用 ALTER TABLE 加约束，需重建表或手写迁移")
+				continue
+			}
+			name := fk.Right.Name
+			if name == "" {
+				name = "fk_" + td.Name + "_" + strings.Join(fk.Right.Columns, "_")
+			}
+			*upgrade = append(*upgrade,
+				leftDialect.AddForeignKeySQL(table, name, fk.Right.Columns,
+					refTable(fk.Right), fk.Right.RefColumns, fk.Right.OnDelete, fk.Right.OnUpdate)+";")
+			*downgrade = append(*downgrade, leftDialect.DropForeignKeySQL(table, name)+";")
+			*needReview = append(*needReview,
+				td.Name+"："+fk.Key+" 加外键前先确认父表存在且子表没有孤儿数据（可用 /fk/precheck 预检）")
+		case CompareOnlyLeft:
+			*upgrade = append(*upgrade, leftDialect.DropForeignKeySQL(table, fk.Left.Name)+";")
+			if leftCanAddFK {
+				*downgrade = append(*downgrade,
+					leftDialect.AddForeignKeySQL(table, fk.Left.Name, fk.Left.Columns,
+						refTable(fk.Left), fk.Left.RefColumns, fk.Left.OnDelete, fk.Left.OnUpdate)+";")
+			}
+		default:
+			*needReview = append(*needReview,
+				td.Name+"."+fk.Key+"：外键定义不同（"+strings.Join(fk.Reason, "；")+"), "+
+					"改外键动作需人工决策")
+		}
+	}
+
+	for _, ck := range td.Checks {
+		switch ck.Status {
+		case CompareOnlyRight:
+			*needReview = append(*needReview,
+				td.Name+"：右侧多了检查约束 "+ck.Key+"，本工具还没有加检查约束的动作，需手写 DDL")
+		case CompareOnlyLeft:
+			*needReview = append(*needReview,
+				td.Name+"：左侧多出的检查约束 "+ck.Key+"，删除前请确认没有依赖它拦数据")
+		default:
+			*needReview = append(*needReview,
+				td.Name+"."+ck.Key+"：检查约束定义不同（"+strings.Join(ck.Reason, "；")+"）")
+		}
+	}
 }
 
 // appendIndexScripts 生成索引的升级与回退语句。

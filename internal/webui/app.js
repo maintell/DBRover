@@ -1030,7 +1030,19 @@ function renderCompare(res) {
         if (x.status === 'only_right') return '索引 ' + name + '：仅在右侧';
         return '索引 ' + name + '：' + (x.reason || []).join('；');
       });
-      tr.appendChild(cell(colLines.concat(idxLines).join('\n')));
+      const fkLines = (td.foreign_keys || []).map((x) => {
+        const label = x.right || x.left;
+        const name = label ? (label.name || x.key) : x.key;
+        if (x.status === 'only_left') return '外键 ' + name + '：仅在左侧';
+        if (x.status === 'only_right') return '外键 ' + name + '：仅在右侧';
+        return '外键 ' + name + '：' + (x.reason || []).join('；');
+      });
+      const ckLines = (td.checks || []).map((x) => {
+        if (x.status === 'only_left') return '检查约束 ' + x.key + '：仅在左侧';
+        if (x.status === 'only_right') return '检查约束 ' + x.key + '：仅在右侧';
+        return '检查约束 ' + x.key + '：' + (x.reason || []).join('；');
+      });
+      tr.appendChild(cell(colLines.concat(idxLines, fkLines, ckLines).join('\n')));
       tb.appendChild(tr);
     }
     t.appendChild(tb);

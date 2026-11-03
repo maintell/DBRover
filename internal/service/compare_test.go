@@ -203,3 +203,44 @@ func TestCompareIndexNameOnlyDifference(t *testing.T) {
 		t.Errorf("状态 = %s, 期望 changed", res.Tables[0].Indexes[0].Status)
 	}
 }
+
+// TestCompareForeignKeysEndToEnd 走一遍真实结构：右侧多一个外键。
+// SQLite 不支持 ALTER TABLE 加约束，所以结论必须是 need_review（说明要重建表），
+// 而不是给一条必然失败的语句。
+func TestCompareForeignKeysEndToEnd(t *testing.T) {
+	dir := t.TempDir()
+	left := openCompareSide(t, dir, "fkl.db",
+		`CREATE TABLE parent (id INTEGER PRIMARY KEY)`,
+		`CREATE TABLE child (id INTEGER PRIMARY KEY, pid INTEGER)`,
+	)
+	right := openCompareSide(t, dir, "fkr.db",
+		`CREATE TABLE parent (id INTEGER PRIMARY KEY)`,
+		`CREATE TABLE child (id INTEGER PRIMARY KEY, pid INTEGER REFERENCES parent(id))`,
+	)
+
+	res, err := service.Compare(context.Background(), left, right)
+	if err != nil {
+		t.Fatalf("Compare: %v", err)
+	}
+	var child *service.TableDiff
+	for i := range res.Tables {
+		if res.Tables[i].Name == "child" {
+			child = &res.Tables[i]
+		}
+	}
+	if child == nil {
+		t.Fatalf("child 应有差异: %+v", res.Tables)
+	}
+	if len(child.ForeignKeys) != 1 || child.ForeignKeys[0].Status != service.CompareOnlyRight {
+		t.Fatalf("应报一条「仅右侧」的外键: %+v", child.ForeignKeys)
+	}
+
+	upgrade := strings.Join(res.Upgrade, "\n")
+	if strings.Contains(upgrade, "FOREIGN KEY") {
+		t.Errorf("SQLite 不支持加外键，不该生成该语句:\n%s", upgrade)
+	}
+	review := strings.Join(res.NeedReview, "\n")
+	if !strings.Contains(review, "不支持用 ALTER TABLE 加约束") {
+		t.Errorf("应说明左侧引擎不支持: %s", review)
+	}
+}
