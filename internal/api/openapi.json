@@ -867,11 +867,20 @@
     },
     "/api/v1/agent/conversations/{id}/messages": {
       "post": {
-        "summary": "发一条消息并等这一轮跑完（含步骤、结论与待批预案）",
+        "summary": "发一条消息（含步骤、结论与待批预案）；加 ?stream=1 改为 NDJSON 流式",
         "responses": {
           "200": { "description": "ok（stopped 非空表示没走完，原因在 stop_message）" },
           "404": { "description": "会话不存在或已过期" },
           "502": { "description": "模型服务不可用" }
+        }
+      }
+    },
+    "/api/v1/agent/conversations/{id}/export": {
+      "get": {
+        "summary": "导出会话记录（每轮的步骤与结论，不含工具结果全文）",
+        "responses": {
+          "200": { "description": "ok" },
+          "404": { "description": "会话不存在或已过期" }
         }
       }
     },

@@ -314,10 +314,10 @@ POST /connections
 | `GET` | `/agent/status` | 模型服务是否可用（不返回 key） | ✅ |
 | `POST` | `/agent/conversations` | 新建会话（绑定连接 + 模式） | ✅ |
 | `GET` | `/agent/conversations/{id}` | 会话详情 | ⛔ |
-| `POST` | `/agent/conversations/{id}/messages` | 发送消息 | ✅ 同步返回（未做 SSE 流式） |
+| `POST` | `/agent/conversations/{id}/messages` | 发送消息 | ✅ 同步返回；`?stream=1` 改 NDJSON 流（step / answer / done / result / error） |
 | `POST` | `/agent/conversations/{id}/approvals/{aid}` | 批准/拒绝（`aid` 为预案 ID） | ✅ |
 | `POST` | `/agent/conversations/{id}/abort` | 中止 | ⛔ |
-| `GET` | `/agent/conversations/{id}/export` | 导出（含全部步骤） | ⛔ |
+| `GET` | `/agent/conversations/{id}/export` | 导出（含全部步骤） | ✅ |
 | `GET` | `/agent/tools` | 工具清单与 schema | ⛔（运行时有 `Tools()`，但还没端点） |
 | `GET/POST` | `/agent/providers` | Provider 配置 | ⛔（现在走环境变量，见 `docs/11 §8.3`） |
 

@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"sync"
@@ -233,15 +234,17 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 3*time.Minute)
 	defer cancel()
 
+	// 流式：先把每个步骤写出去，最后再给结论与待批预案。
+	if r.URL.Query().Get("stream") == "1" {
+		s.streamAgentMessage(w, r, c, req.Content)
+		return
+	}
+
 	c.mu.Lock()
 	res, err := c.rt.Ask(ctx, req.Content)
 	c.mu.Unlock()
 
-	// 这几种是「有结论但没走完」，不是失败。
-	if err != nil && !errors.Is(err, agent.ErrStepBudget) &&
-		!errors.Is(err, agent.ErrLoopDetected) &&
-		!errors.Is(err, agent.ErrToolFailures) &&
-		!errors.Is(err, agent.ErrDuration) {
+	if err != nil && !softStop(err) {
 		writeError(w, http.StatusBadGateway, "AGENT_PROVIDER_FAILED", "connection", err.Error(),
 			"检查 base_url 是否可达、model 名是否存在", true)
 		return
@@ -264,15 +267,8 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request) {
 		"stopped":           res.Stopped,
 		"pending_approvals": pending,
 	}
-	switch {
-	case errors.Is(err, agent.ErrStepBudget):
-		out["stop_message"] = "达到最大步数，任务未完成；已完成的部分见步骤"
-	case errors.Is(err, agent.ErrLoopDetected):
-		out["stop_message"] = "检测到重复调用同一工具与参数，已中断"
-	case errors.Is(err, agent.ErrToolFailures):
-		out["stop_message"] = "同一工具反复失败，已停止重试"
-	case errors.Is(err, agent.ErrDuration):
-		out["stop_message"] = "超过单轮时间上限，已停止"
+	if msg := stopMessage(err); msg != "" {
+		out["stop_message"] = msg
 	}
 	writeJSON(w, http.StatusOK, out)
 }
@@ -311,4 +307,89 @@ func (s *Server) handleAgentApproval(w http.ResponseWriter, r *http.Request) {
 		c.rt.Reject(planID)
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"plan_id": planID, "approved": approve})
+}
+
+// softStop 判断错误是不是「有结论但没走完」。
+//
+// 这四种要返回 200：结论与已完成的步骤都要带回去，界面上才能说清「停在哪、为什么停」。
+// 只有模型服务本身不可用才算 502。
+func softStop(err error) bool {
+	return errors.Is(err, agent.ErrStepBudget) ||
+		errors.Is(err, agent.ErrLoopDetected) ||
+		errors.Is(err, agent.ErrToolFailures) ||
+		errors.Is(err, agent.ErrDuration)
+}
+
+func stopMessage(err error) string {
+	switch {
+	case errors.Is(err, agent.ErrStepBudget):
+		return "达到最大步数，任务未完成；已完成的部分见步骤"
+	case errors.Is(err, agent.ErrLoopDetected):
+		return "检测到重复调用同一工具与参数，已中断"
+	case errors.Is(err, agent.ErrToolFailures):
+		return "同一工具反复失败，已停止重试"
+	case errors.Is(err, agent.ErrDuration):
+		return "超过单轮时间上限，已停止"
+	}
+	return ""
+}
+
+// streamAgentMessage 用 NDJSON 把一轮问答边跑边写出去。
+//
+// 一条一行：{"kind":"step"|"answer"|"done"|"result"|"error", ...}。
+// 为什么不用 SSE：NDJSON 用普通 fetch + ReadableStream 就能读，不需要 EventSource，
+// 也不需要为「POST + 请求体」绕路。
+//
+// 一旦开始写就改不了状态码了：出错只能发一条 {"kind":"error"}，
+// 与执行门的 NDJSON 进度流是同一套约束。
+func (s *Server) streamAgentMessage(w http.ResponseWriter, r *http.Request, c *agentConv, content string) {
+	w.Header().Set("Content-Type", "application/x-ndjson")
+	w.WriteHeader(http.StatusOK)
+	enc := json.NewEncoder(w)
+	flusher, _ := w.(http.Flusher)
+	write := func(v any) {
+		_ = enc.Encode(v)
+		if flusher != nil {
+			flusher.Flush()
+		}
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), 3*time.Minute)
+	defer cancel()
+
+	c.mu.Lock()
+	res, err := c.rt.AskStream(ctx, content, func(ev agent.Event) { write(ev) })
+	c.mu.Unlock()
+
+	if err != nil && !softStop(err) {
+		write(map[string]any{"kind": "error", "code": "AGENT_PROVIDER_FAILED", "message": err.Error()})
+		return
+	}
+
+	pending := make([]pendingApproval, 0, 4)
+	for _, p := range c.rt.PendingPlans() {
+		pending = append(pending, pendingApproval{
+			PlanID: p.ID, Table: p.Table.Name, Risk: p.Risk.String(), Friction: p.Friction.String(),
+			AffectedRows: p.AffectedRows, Statements: p.Statements, Rollback: p.Rollback,
+			Irreversible: p.Irreversible,
+		})
+	}
+	final := map[string]any{
+		"kind": "result", "answer": res.Answer, "stopped": res.Stopped,
+		"pending_approvals": pending, "usage": res.Usage, "notes": res.Notes,
+	}
+	if msg := stopMessage(err); msg != "" {
+		final["stop_message"] = msg
+	}
+	write(final)
+}
+
+// handleAgentExport 导出一份会话记录（步骤 + 结论，不含工具结果全文）。
+func (s *Server) handleAgentExport(w http.ResponseWriter, r *http.Request) {
+	c, okConv := s.agentConvByID(r.PathValue("id"))
+	if !okConv {
+		writeError(w, http.StatusNotFound, "CONVERSATION_NOT_FOUND", "internal", "会话不存在或已过期", "重新新建会话", false)
+		return
+	}
+	writeJSON(w, http.StatusOK, c.rt.Export())
 }

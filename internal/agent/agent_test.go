@@ -607,3 +607,54 @@ func TestLargeResultIsTruncated(t *testing.T) {
 		t.Fatalf("Ask: %v", err)
 	}
 }
+
+// TestAskStreamEmitsEvents 流式只改变「什么时候给出去」，不改变结论。
+func TestAskStreamEmitsEvents(t *testing.T) {
+	conn := newConn(t,
+		`CREATE TABLE items (id INTEGER PRIMARY KEY, v TEXT)`,
+	)
+	prov := &scripted{steps: []func(agent.Request) (agent.Response, error){
+		callTool("meta.objects", `{}`),
+		say("就这些"),
+	}}
+	rt := newRuntime(t, prov, conn, agent.ModeReadOnly)
+
+	var kinds []string
+	var stepTool string
+	res, err := rt.AskStream(context.Background(), "有哪些对象", func(ev agent.Event) {
+		kinds = append(kinds, ev.Kind)
+		if ev.Kind == "step" && ev.Step != nil {
+			stepTool = ev.Step.Tool
+		}
+	})
+	if err != nil {
+		t.Fatalf("AskStream: %v", err)
+	}
+	if res.Answer != "就这些" {
+		t.Errorf("Answer = %q", res.Answer)
+	}
+	want := []string{"step", "answer", "done"}
+	if len(kinds) != len(want) {
+		t.Fatalf("事件序列 = %v，期望 %v", kinds, want)
+	}
+	for i := range want {
+		if kinds[i] != want[i] {
+			t.Fatalf("事件序列 = %v，期望 %v", kinds, want)
+		}
+	}
+	if stepTool != "meta.objects" {
+		t.Errorf("step 事件的工具名 = %q", stepTool)
+	}
+
+	// 导出里必须留下这一轮。
+	tr := rt.Export()
+	if len(tr.Turns) != 1 {
+		t.Fatalf("导出回合数 = %d", len(tr.Turns))
+	}
+	if tr.Turns[0].Question != "有哪些对象" || tr.Turns[0].Answer != "就这些" {
+		t.Errorf("导出内容不对: %+v", tr.Turns[0])
+	}
+	if len(tr.Turns[0].Steps) != 1 {
+		t.Errorf("导出的步骤数 = %d", len(tr.Turns[0].Steps))
+	}
+}

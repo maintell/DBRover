@@ -1,11 +1,13 @@
 package api_test
 
 import (
+	"bufio"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"regexp"
+	"strings"
 	"testing"
 
 	"github.com/maintell/DBRover/internal/api"
@@ -296,5 +298,107 @@ func TestAgentApprovalRejectsUnknownPlan(t *testing.T) {
 		"/api/v1/agent/conversations/"+convID+"/approvals/不存在", map[string]any{}, true)
 	if code != http.StatusNotFound {
 		t.Fatalf("状态码 = %d %v", code, body)
+	}
+}
+
+// TestAgentStreamIsNDJSON 流式：一条一行，步骤边跑边出，最后给结果与待批预案。
+func TestAgentStreamIsNDJSON(t *testing.T) {
+	s, ts, dir := newServer(t)
+	fake := &fakeModel{script: []string{
+		toolReply("c1", "meta.objects", `{}`),
+		textReply("只有一张表"),
+	}}
+	model := httptest.NewServer(fake.handler(t))
+	defer model.Close()
+	s.SetAgentConfig(api.AgentConfig{BaseURL: model.URL, Model: "fake"})
+
+	connID := createConn(t, ts, dir, "test", "read-write")
+	execSQL(t, ts, connID, "CREATE TABLE items (id INTEGER PRIMARY KEY)")
+	_, body := do(t, ts, http.MethodPost, "/api/v1/agent/conversations",
+		map[string]any{"connection_id": connID, "mode": "read-only"}, true)
+	convID, _ := body["id"].(string)
+
+	req, err := http.NewRequest(http.MethodPost,
+		ts.URL+"/api/v1/agent/conversations/"+convID+"/messages?stream=1",
+		strings.NewReader(`{"content":"有哪些表"}`))
+	if err != nil {
+		t.Fatalf("构造请求: %v", err)
+	}
+	req.Header.Set("X-DBRover-Token", testToken)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("请求失败: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("状态码 = %d", resp.StatusCode)
+	}
+	if ct := resp.Header.Get("Content-Type"); !strings.Contains(ct, "ndjson") {
+		t.Errorf("Content-Type = %q，期望 ndjson", ct)
+	}
+
+	var kinds []string
+	sc := bufio.NewScanner(resp.Body)
+	for sc.Scan() {
+		if len(strings.TrimSpace(sc.Text())) == 0 {
+			continue
+		}
+		var line map[string]any
+		if err := json.Unmarshal(sc.Bytes(), &line); err != nil {
+			t.Fatalf("不是合法 JSON 行: %q", sc.Text())
+		}
+		k, _ := line["kind"].(string)
+		kinds = append(kinds, k)
+	}
+	want := []string{"step", "answer", "done", "result"}
+	if len(kinds) != len(want) {
+		t.Fatalf("行序列 = %v，期望 %v", kinds, want)
+	}
+	for i := range want {
+		if kinds[i] != want[i] {
+			t.Fatalf("行序列 = %v，期望 %v", kinds, want)
+		}
+	}
+}
+
+// TestAgentExport 导出会话：每轮的步骤与结论都在，且不含工具结果全文。
+func TestAgentExport(t *testing.T) {
+	s, ts, dir := newServer(t)
+	fake := &fakeModel{script: []string{
+		textReply("没什么可说的"),
+	}}
+	model := httptest.NewServer(fake.handler(t))
+	defer model.Close()
+	s.SetAgentConfig(api.AgentConfig{BaseURL: model.URL, Model: "fake"})
+
+	connID := createConn(t, ts, dir, "test", "read-write")
+	_, body := do(t, ts, http.MethodPost, "/api/v1/agent/conversations",
+		map[string]any{"connection_id": connID, "mode": "read-only"}, true)
+	convID, _ := body["id"].(string)
+
+	if code, b := do(t, ts, http.MethodPost,
+		"/api/v1/agent/conversations/"+convID+"/messages",
+		map[string]any{"content": "说点什么"}, true); code != http.StatusOK {
+		t.Fatalf("发消息失败: %d %v", code, b)
+	}
+
+	code, body := do(t, ts, http.MethodGet,
+		"/api/v1/agent/conversations/"+convID+"/export", nil, true)
+	if code != http.StatusOK {
+		t.Fatalf("导出失败: %d %v", code, body)
+	}
+	turns, _ := body["turns"].([]any)
+	if len(turns) != 1 {
+		t.Fatalf("回合数 = %d", len(turns))
+	}
+	t0, _ := turns[0].(map[string]any)
+	if t0["question"] != "说点什么" || t0["answer"] != "没什么可说的" {
+		t.Errorf("导出内容不对: %v", t0)
+	}
+
+	// 导出必须能被序列化成一段干净的 JSON（供人存盘复核）。
+	if _, err := json.Marshal(body); err != nil {
+		t.Errorf("导出不可序列化: %v", err)
 	}
 }

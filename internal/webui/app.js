@@ -55,6 +55,7 @@ const API = {
   agentStatus: '/api/v1/agent/status',
   agentConvs: '/api/v1/agent/conversations',
   agentMessages: '/api/v1/agent/conversations/:id/messages',
+  agentExport: '/api/v1/agent/conversations/:id/export',
   agentApproval: '/api/v1/agent/conversations/:id/approvals/:pid',
 };
 
@@ -2394,21 +2395,76 @@ async function askAgent(question, mode) {
       agentConvConn = conn.id;
     }
     setStatus('AI 正在跑…');
-    const res = await api(path(API.agentMessages, { id: agentConvID }), {
+  } catch (e) {
+    showNotice('AI 失败：' + e.message, 'error');
+    return;
+  }
+
+  // 流式：一条一行（NDJSON）。步骤到一条画一条，用户不用等整轮跑完。
+  const steps = [];
+  let answer = '';
+  let stopMessage = '';
+  let pending = [];
+  const paint = () => renderAgent(q, steps, answer, stopMessage, pending);
+  paint();
+
+  try {
+    const resp = await fetch(path(API.agentMessages, { id: agentConvID }) + '?stream=1', {
       method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-DBRover-Token': state.token },
       body: JSON.stringify({ content: q }),
     });
-    renderAgent(q, res);
+    if (!resp.ok) {
+      const text = await resp.text();
+      let msg = text;
+      try {
+        const body = JSON.parse(text);
+        if (body && body.error && body.error.message) msg = body.error.message;
+      } catch { /* 非 JSON 就原样显示 */ }
+      throw new Error(msg);
+    }
+
+    const reader = resp.body.getReader();
+    const dec = new TextDecoder();
+    let buf = '';
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buf += dec.decode(value, { stream: true });
+      let i;
+      while ((i = buf.indexOf('\n')) >= 0) {
+        const line = buf.slice(0, i).trim();
+        buf = buf.slice(i + 1);
+        if (!line) continue;
+        let ev;
+        try { ev = JSON.parse(line); } catch { continue; }
+        if (ev.kind === 'step') {
+          steps.push(ev.step);
+          paint();
+        } else if (ev.kind === 'answer') {
+          answer = ev.text || answer;
+          paint();
+        } else if (ev.kind === 'result') {
+          answer = ev.answer || answer;
+          pending = ev.pending_approvals || pending;
+          stopMessage = ev.stop_message || '';
+          paint();
+        } else if (ev.kind === 'error') {
+          throw new Error(ev.message || '模型服务不可用');
+        }
+      }
+    }
     setStatus('AI 完成');
   } catch (e) {
     showNotice('AI 失败：' + e.message, 'error');
   }
 }
-
 // renderAgent 画出步骤时间线与结论。
 //
-// 步骤要能展开到 SQL：审批与复核的对象是语句本身，不是模型的描述。
-function renderAgent(question, res) {
+// 参数是「零件」而不是一个响应对象：流式时这些零件是分批到的，
+// 每到一个就重画一次，不流式时一次性给全——同一个渲染函数两用，
+// 免得流式与非流式两套画法慢慢长歪。
+function renderAgent(question, steps, answer, stopMessage, pending) {
   const wrap = document.createElement('div');
   wrap.className = 'schema';
 
@@ -2417,7 +2473,6 @@ function renderAgent(question, res) {
   who.textContent = '你：' + question;
   wrap.appendChild(who);
 
-  const steps = res.steps || [];
   if (steps.length) {
     const h = document.createElement('div');
     h.className = 'head';
@@ -2445,26 +2500,25 @@ function renderAgent(question, res) {
     wrap.appendChild(ol);
   }
 
-  if (res.answer) {
+  if (answer) {
     const h = document.createElement('div');
     h.className = 'head';
     h.textContent = '结论';
     wrap.appendChild(h);
     const p = document.createElement('div');
     p.className = 'notice';
-    p.textContent = res.answer;
+    p.textContent = answer;
     wrap.appendChild(p);
   }
 
-  if (res.stop_message) {
+  if (stopMessage) {
     const n = document.createElement('div');
     n.className = 'notice warn';
-    n.textContent = res.stop_message;
+    n.textContent = stopMessage;
     wrap.appendChild(n);
   }
 
-  const pending = res.pending_approvals || [];
-  if (pending.length) {
+  if (pending && pending.length) {
     const h = document.createElement('div');
     h.className = 'head';
     h.textContent = '待你确认（' + pending.length + '）';
@@ -2474,9 +2528,35 @@ function renderAgent(question, res) {
     }
   }
 
+  // 导出：只给「做了哪些步、得出了什么结论」，不含工具结果全文。
+  const bar = document.createElement('div');
+  bar.className = 'toolbar';
+  const btn = document.createElement('button');
+  btn.textContent = '导出会话';
+  btn.onclick = () => exportAgent();
+  bar.appendChild(btn);
+  wrap.appendChild(bar);
+
   $('results').replaceChildren(wrap);
 }
 
+// exportAgent 把会话下载成一份 JSON，供人复核或贴进工单。
+async function exportAgent() {
+  if (!agentConvID) return;
+  try {
+    const data = await api(path(API.agentExport, { id: agentConvID }));
+    const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = 'dbrover-agent-' + agentConvID + '.json';
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(a.href);
+  } catch (e) {
+    showNotice('导出失败：' + e.message, 'error');
+  }
+}
 // sqlOfArgs 从工具参数里取出 SQL 供人复核；没有就返回空串。
 function sqlOfArgs(args) {
   if (!args) return '';

@@ -85,6 +85,7 @@ type Runtime struct {
 
 	mu       sync.Mutex
 	history  []Message
+	turns    []Turn
 	plans    map[string]*service.ChangePlan
 	approved map[string]bool
 	notes    []string
@@ -225,11 +226,85 @@ func (r *Runtime) forgetPlan(id string) {
 	r.mu.Unlock()
 }
 
-// Ask 执行一轮问答。
+// Event 是一轮对话里对外可见的一次变化，供流式输出使用。
+//
+// 只给「发生了什么」，不给「为什么」：界面要画的是步骤时间线，不是思考过程。
+type Event struct {
+	// Kind 取 step（一次工具调用结束）/ answer（给出结论）/ done（这一轮结束）。
+	Kind    string `json:"kind"`
+	Step    *Step  `json:"step,omitempty"`
+	Text    string `json:"text,omitempty"`
+	Usage   *Usage `json:"usage,omitempty"`
+	Stopped string `json:"stopped,omitempty"`
+}
+
+// Turn 是一轮问答的留存记录，供会话导出。
+type Turn struct {
+	Question string    `json:"question"`
+	Answer   string    `json:"answer"`
+	Steps    []Step    `json:"steps,omitempty"`
+	Usage    Usage     `json:"usage"`
+	Stopped  string    `json:"stopped,omitempty"`
+	At       time.Time `json:"at"`
+}
+
+// Transcript 是导出会话时的形状。
+type Transcript struct {
+	Provider string   `json:"provider"`
+	Mode     string   `json:"mode"`
+	Turns    []Turn   `json:"turns"`
+	Notes    []string `json:"notes,omitempty"`
+}
+
+// Ask 执行一轮问答（不流式）。
+func (r *Runtime) Ask(ctx context.Context, question string) (*Result, error) {
+	return r.AskStream(ctx, question, nil)
+}
+
+// AskStream 执行一轮问答，并在过程中把事件推给 emit（可为 nil）。
+//
+// 流式只影响「什么时候把东西给出去」，不影响循环本身：中途停下、预算、审批
+// 这些语义与不流式时完全一致——否则同一个任务用两种调用方式会得到两种结论。
+func (r *Runtime) AskStream(ctx context.Context, question string, emit func(Event)) (*Result, error) {
+	res, err := r.ask(ctx, question, emit)
+	if res != nil {
+		r.appendTurn(Turn{
+			Question: question, Answer: res.Answer, Steps: res.Steps,
+			Usage: res.Usage, Stopped: res.Stopped, At: time.Now(),
+		})
+		if emit != nil {
+			emit(Event{Kind: "done", Stopped: res.Stopped, Usage: &res.Usage})
+		}
+	}
+	return res, err
+}
+
+// Export 返回可序列化的会话记录。
+//
+// 不带工具结果全文：那里面可能有业务数据。会话导出是给人复核「做了什么」，
+// 不是把库里的数据再复制一份出去。
+func (r *Runtime) Export() Transcript {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return Transcript{
+		Provider: r.prov.Name(),
+		Mode:     string(r.policy.Mode()),
+		Turns:    append([]Turn(nil), r.turns...),
+		Notes:    append([]string(nil), r.notes...),
+	}
+}
+
+func (r *Runtime) appendTurn(t Turn) {
+	r.mu.Lock()
+	r.turns = append(r.turns, t)
+	r.mu.Unlock()
+}
+
+// ask 是循环本体。
 //
 // 循环的形状就是 docs/11 §7 那段伪代码：决策 → 工具 → 观察 → 再决策，
 // 唯一多出来的是「每次工具调用都过一遍授权」，以及把没走完的原因如实带回去。
-func (r *Runtime) Ask(ctx context.Context, question string) (*Result, error) {
+func (r *Runtime) ask(ctx context.Context, question string, emit func(Event)) (*Result, error) {
 	if strings.TrimSpace(question) == "" {
 		return nil, errors.New("agent: 问题为空")
 	}
@@ -271,6 +346,9 @@ func (r *Runtime) Ask(ctx context.Context, question string) (*Result, error) {
 
 		if len(resp.ToolCalls) == 0 {
 			res.Answer = resp.Text
+			if emit != nil {
+				emit(Event{Kind: "answer", Text: resp.Text})
+			}
 			r.commit(msgs, res)
 			return res, nil
 		}
@@ -278,6 +356,10 @@ func (r *Runtime) Ask(ctx context.Context, question string) (*Result, error) {
 		for _, call := range resp.ToolCalls {
 			stepOut, envText := r.invoke(ctx, call, len(res.Steps))
 			res.Steps = append(res.Steps, stepOut)
+			if emit != nil {
+				s := stepOut
+				emit(Event{Kind: "step", Step: &s})
+			}
 			msgs = append(msgs, Message{
 				Role: "tool", Name: call.Name, ToolCallID: call.ID,
 				Content: envText,
