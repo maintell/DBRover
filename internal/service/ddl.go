@@ -457,6 +457,11 @@ func (e *Executor) BuildDDLPlan(ctx context.Context, req DDLRequest) (*ChangePla
 			SQL:        e.dialect.DropIndexSQL(table, spec.Name),
 			ExpectRows: -1,
 		}}
+		// 大表上建索引会锁写，引擎各有各的在线做法。只给建议不自动生成：
+		// PostgreSQL 的 CONCURRENTLY 不能在事务里跑，而执行门是单事务的。
+		if advice := e.dialect.IndexBuildAdvice(table, spec.Columns, spec.Unique); advice != "" {
+			plan.Notes = append(plan.Notes, advice)
+		}
 		plan.AffectedRows = 0
 
 	case DDLDropIndex:

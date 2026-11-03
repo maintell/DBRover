@@ -240,7 +240,7 @@ func TestDDLIndexOnRealEngines(t *testing.T) {
 				t.Fatalf("应收敛为 ErrDuplicateRows, 实际 %v", err)
 			}
 
-			// 2) 普通索引：建成功。
+			// 2) 普通索引：建成功，并且预案里带「怎么不锁表」的引擎建议。
 			plan, err := ex.BuildDDLPlan(ctx, service.DDLRequest{
 				Table:  tableRef("it_idxprobe"),
 				Action: service.DDLCreateIndex,
@@ -248,6 +248,10 @@ func TestDDLIndexOnRealEngines(t *testing.T) {
 			})
 			if err != nil {
 				t.Fatalf("BuildDDLPlan(create_index): %v", err)
+			}
+			// 大表建索引会锁写，两个业务引擎都该给出建议（SQLite 不参与这组测试）。
+			if len(plan.Notes) == 0 {
+				t.Errorf("建索引预案应带「怎么不锁表」的建议, 实际没有")
 			}
 			if out, err := ex.ApplyChangePlan(ctx, plan, service.Request{Approval: true}); err != nil || out.Err != nil || out.Blocked {
 				t.Fatalf("建索引失败: err=%v out=%+v", err, out)

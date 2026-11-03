@@ -268,7 +268,7 @@ SELECT COUNT(*) FROM t WHERE c > 2147483647 OR c < -2147483648;
 | 前置条件：定义未变 | §2.5 / 验收 10 | 预案带表定义哈希，执行前比对，变了返回 `409 SCHEMA_CHANGED` 并让前端重读结构；建表则要求「执行时表仍不存在」（`ExpectTableAbsent`），别人抢先建了就停下 | `TestDDLPlanSchemaChangedBlocks`、`TestDDLCreateTableBlocksWhenTableAppeared`、`TestDDLPlanOnRealEngines`（MySQL + PG） |
 | DDL 事务性差异 | §2.3 / 验收 3 | 由 `Capabilities().DDLTransactional` 声明，预案据此设 `rolls_back_as_compensation`；MySQL 上提示「隐式提交，补偿不是撤销」 | `TestDDLPlanOnRealEngines`（MySQL 补偿 / PG 真回滚） |
 | 改列类型 | §1.1 / §5.2 | `action` 为 `alter_column_type`；语句文本由 `Dialect.AlterColumnTypeSQL` 渲染（PG `ALTER COLUMN … TYPE`、MySQL `MODIFY COLUMN` 带完整列定义）；**生成预案前做收窄预检**，装不下现存数据即 `ErrNarrowingBlocked` 并给出样本 | `TestBoundsFor`、`TestDDLAlterColumnTypeOnRealEngines`（MySQL + PG）、浏览器实测（含拦截与放行两条路径） |
-| 索引管理（建 / 删） | §1.1 / 验收 6 | `action` 为 `create_index` / `drop_index`；语句文本由 `Dialect.CreateIndexSQL` / `DropIndexSQL` 渲染（MySQL 的 `DROP INDEX` 要带 `ON <table>`，PG/SQLite 不能带）；建唯一索引前先查重复值，命中即 `ErrDuplicateRows` 并给样本；主键索引拒绝删除；删索引不动数据，回滚按原定义重建 | `TestDDLCreateAndDropIndex`、`TestDDLUniqueIndexBlocksDuplicates`、`TestDDLIndexOnRealEngines`（MySQL + PG，直接验证 `DROP INDEX` 写法）、浏览器实测 |
+| 索引管理（建 / 删） | §1.1 / §2.4 / 验收 4、6 | `action` 为 `create_index` / `drop_index`；语句文本由 `Dialect.CreateIndexSQL` / `DropIndexSQL` 渲染（MySQL 的 `DROP INDEX` 要带 `ON <table>`，PG/SQLite 不能带）；建唯一索引前先查重复值，命中即 `ErrDuplicateRows` 并给样本；主键索引拒绝删除；删索引不动数据，回滚按原定义重建。**建索引预案附带在线变更建议**（`Dialect.IndexBuildAdvice`）：PG 提示 `CREATE INDEX CONCURRENTLY` 并说明它不能在事务里跑、需要到 SQL 工作区单跑；MySQL 提示 `ALGORITHM=INPLACE, LOCK=NONE`；SQLite 不给（没有这个概念） | `TestDDLCreateAndDropIndex`、`TestDDLUniqueIndexBlocksDuplicates`、`TestDDLIndexOnRealEngines`（MySQL + PG，直接验证 `DROP INDEX` 写法与建议非空）、`TestIndexBuildAdvice`、浏览器实测 |
 | 结构比对（v1） | §4 / 验收 9 | `POST /compare`：两个已打开连接逐表比对，输出 `only_left` / `only_right` / `changed` / `need_review` 与逐列原因（中立类型、原始类型、可空、默认值、注释、主键与唯一标记）；**索引参与比对**，按「列序列 + 唯一性 + 谓词」为键、不按名字，只改名字或访问方法不生成脚本而进 `need_review`；主键索引不当作普通索引处理；原始类型文本先做同义归一（`character varying(n)`≡`varchar(n)`、`integer`≡`int`、剥掉 MySQL 整数显示宽度）。列的删除与改类型仍进 `need_review`，索引的增删因为不丢数据、两个方向都生成脚本（升级与回退） | `TestCompareSchemas`、`TestCompareIndexes`、`TestCompareIndexNameOnlyDifference`、`TestNormalizeTypeText`、`TestCompareEndpoint`、浏览器实测（3 张差异表 + 升级脚本 + 3 条待决策）；`TestCompareIndexes` 含变异验证（去掉脚本生成即失败）；跨引擎冒烟：MySQL 5.7 ↔ PostgreSQL 17 同构表**零差异**（主键索引未误报、`BTREE`/`btree` 等价、整数显示宽度已归一） |
 | 加外键 | §1.1 / 验收 5 | `action` 为 `add_foreign_key`；生成预案前**先跑与预检端点同一套检查**（孤儿数据 + 父表列唯一性），不通过即 `ErrForeignKeyBlocked` → 409 `FK_PRECHECK_BLOCKED` 并带样本；动作子句走白名单（CASCADE / RESTRICT / NO ACTION / SET NULL），`SET NULL` 撞上 NOT NULL 引用列时提前拒绝；名字为空按 `fk_<表>_<列>` 生成（回滚要靠它摘约束，不能是随机名）；回滚是 `ALTER TABLE … DROP` 约束，不动数据 | `TestValidateFKShape`、`TestDefaultFKName`、`TestDDLAddForeignKeyNeedsCapability`、`TestSchemaPlanAddForeignKeyNeedsCapability`、`TestDDLAddForeignKeyOnRealEngines`（MySQL 5.7 + PG 17：孤儿阻断带样本 → 清数据后出预案 → 执行 → 结构里出现外键 → 回滚摘掉） |
 | 删表 + 依赖阻断 | §5.1 / 验收 8 | `action` 为 `drop_table`：生成预案前先查依赖，被视图或入向外键引用即 `409 DEPENDENCY_BLOCKED` 并列出引用方（近似结果带「可能误报」标注）；删表必然不可逆，回滚语句只是把空表建回来，预案里明说「数据不会回来」 | `TestDDLDropTableBlockedByView`、`TestDDLDropColumnBlockedByForeignKey`、`TestSchemaPlanDropTableBlockedByDependency`、`drivertest` 的 `DependentsReported`（三引擎）、`scripts/accept/deps-drop.ps1`（MySQL 5.7 + PG 17 真机：外键 + 视图双阻断 → 拆掉后出预案 → 执行 → 表消失） |
@@ -285,8 +285,7 @@ SELECT COUNT(*) FROM t WHERE c > 2147483647 OR c < -2147483648;
 | 检查约束的 DDL | §1.1 / §5.2 | 既没有加检查约束的动作，结构比对也不比它（`TableDetail.Checks` 已由驱动填充，只是没被用起来） | 待实现；加检查约束要先做「存量行是否满足表达式」的预检，否则和孤儿数据是同一类问题 |
 | 视图 / 物化视图 / 例程 / 触发器 / 序列 / 用户类型设计器 | §1.1、§6 | 全部缺失 | 待实现 |
 | 引擎特有项（`EngineExtra`）表单 | §1.3 | 未渲染，仅能看 DDL 原文 | 待实现；依赖各引擎补充元数据 |
-| 在线变更建议（`CONCURRENTLY`、`ALGORITHM=INPLACE` 等） | §2.4 / 验收 4 | 无建议与「一键插入编辑器」 | 待实现 |
-| 预执行检查（长事务 / MDL / 磁盘 / 孤儿数据） | §2.5 / 验收 5、11 | 只做了「定义哈希」一项；其余未探测 | 待实现 |
+| 预执行检查（长事务 / MDL / 磁盘 / 孤儿数据） | §2.5 / 验收 5、11 | 已做「定义哈希」与「外键孤儿数据」两项；长事务、MDL、磁盘余量未探测 | 待实现；需要各引擎的会话/元数据锁查询 |
 | 类型收窄预检与样本行 | §5.2 / 验收 7 | 改类型未做，故也没有越界检查 | 待实现 |
 | 例程依赖检查 | §5.1 | 只查视图与外键；存储过程/函数体里引用目标对象查不出来 | 待实现；文本搜索例程体误报率太高，加之前要先想清楚怎么标注 |
 | 结构比对的完整形态 | §4 / 验收 9 | 已比表、列、索引；尚未比外键、检查约束、视图定义；回退脚本目前只覆盖索引与新增表以外的部分（删表/删列/改类型仍不生成） | 待实现；外键比对要按「列集合 → 引用表与引用列」为键，检查约束按归一化后的表达式 |
@@ -294,6 +293,6 @@ SELECT COUNT(*) FROM t WHERE c > 2147483647 OR c < -2147483648;
 
 ### 8.3 验收清单状态
 
-已过：1（预览）、3（MySQL 警示）、5（加外键前检测孤儿并阻断，含样本；MySQL/PG 真机跑通「阻断 → 出预案 → 执行 → 结构出现 → 回滚摘掉」）、6（唯一索引前查重复值并阻断，含样本）、7（收窄预检 + 样本）、8（删表/删列前查依赖并阻断，引用方点名，MySQL/PG 真机验证）、10（定义变更阻断）。
-未过：2（MSSQL/Oracle 未实现，无法 5 引擎回放）、4（在线变更建议）、11（长事务探测）、12（手写 SQL 模式）；9（结构比对）部分过：差异分类、索引级差异、升级脚本与索引回退脚本已可用，但删表/删列/改类型不生成回退脚本，外键与检查约束尚未比对。
+已过：1（预览）、3（MySQL 警示）、4（建索引时按引擎给出在线变更建议，并说明 `CONCURRENTLY` 不能在事务里跑）、5（加外键前检测孤儿并阻断，含样本；MySQL/PG 真机跑通「阻断 → 出预案 → 执行 → 结构出现 → 回滚摘掉」）、6（唯一索引前查重复值并阻断，含样本）、7（收窄预检 + 样本）、8（删表/删列前查依赖并阻断，引用方点名，MySQL/PG 真机验证）、10（定义变更阻断）。
+未过：2（MSSQL/Oracle 未实现，无法 5 引擎回放）、11（长事务/MDL 探测）、12（手写 SQL 模式）；9（结构比对）部分过：差异分类、索引级差异、升级脚本与索引回退脚本已可用，但删表/删列/改类型不生成回退脚本，外键与检查约束尚未比对。
 

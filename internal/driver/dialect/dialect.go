@@ -81,6 +81,13 @@ type Dialect interface {
 	// MySQL 用 DROP FOREIGN KEY，PostgreSQL 用 DROP CONSTRAINT——同一件事两个名字。
 	DropForeignKeySQL(table, name string) string
 
+	// IndexBuildAdvice 返回「怎么建索引才不锁表」的建议；没有可说的时候返回空串。
+	//
+	// 这不是语句，是提示：PostgreSQL 的 CREATE INDEX CONCURRENTLY 不能在事务里跑，
+	// 而本工具的执行门是单事务的——直接生成它会让每次执行都失败。
+	// 所以这里只给出建议与限制，让人自己决定要不要去 SQL 工作区单跑。
+	IndexBuildAdvice(table string, columns []string, unique bool) string
+
 	Split(script string) ([]Statement, error)
 	Normalize(sqlText string) (string, error)
 	Fingerprint(sqlText string) (string, error)
@@ -230,10 +237,39 @@ func (d impl) DropForeignKeySQL(table, name string) string {
 	}
 }
 
+// IndexBuildAdvice 按引擎给出「怎么建索引才不锁表」的建议。
+//
+// 只给建议、不自动生成 CONCURRENTLY：它不能在事务里跑，而本工具的执行门是
+// 单事务的，直接发出去等于每次都失败。
+func (d impl) IndexBuildAdvice(table string, columns []string, unique bool) string {
+	kw := "CREATE INDEX "
+	if unique {
+		kw = "CREATE UNIQUE INDEX "
+	}
+	cols := make([]string, len(columns))
+	for i, c := range columns {
+		cols[i] = d.quote(c)
+	}
+	plain := kw + d.quote("idx_name") + " ON " + table + " (" + strings.Join(cols, ", ") + ")"
+
+	switch d.engine {
+	case model.EnginePostgres:
+		return "PostgreSQL 上大表建索引会持 ShareLock 挡住写入。要在线建请用 " +
+			strings.Replace(plain, kw, "CREATE INDEX CONCURRENTLY ", 1) +
+			"——注意 CONCURRENTLY 不能在事务里执行，本工具的执行门是单事务的，" +
+			"需要它时请到 SQL 工作区单独跑。"
+	case model.EngineMySQL:
+		return "MySQL 5.7/8 的 InnoDB 加二级索引通常可以在线进行；写入压力大时可在语句末尾加 " +
+			"ALGORITHM=INPLACE, LOCK=NONE 显式要求不锁写（不支持时会直接报错而不是退化成锁表）。"
+	default:
+		// SQLite 没有在线建索引的概念，建索引本来就很快。
+		return ""
+	}
+}
+
 // quoteBacktick 用反引号引用标识符（MySQL）。
 func quoteBacktick(s string) string { return "`" + strings.ReplaceAll(s, "`", "``") + "`" }
-
-func quoteDouble(s string) string { return `"` + strings.ReplaceAll(s, `"`, `""`) + `"` }
+func quoteDouble(s string) string   { return `"` + strings.ReplaceAll(s, `"`, `""`) + `"` }
 
 func quoteBracket(s string) string { return "[" + strings.ReplaceAll(s, "]", "]]") + "]" }
 
