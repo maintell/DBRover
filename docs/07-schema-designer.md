@@ -156,6 +156,7 @@ ChangePlan
 ### 4.2 比对规则
 
 - 类型比对走中立类型 + 原始类型双轨：中立类型不同必报差异；中立相同但原始不同（如 `varchar(50)` vs `varchar(100)`）也报差异并标注。
+- **原始类型文本先归一化，再比对**：`character varying(n)` 与 `varchar(n)`、`integer` 与 `int` 是同一类型的两种打印方式（PostgreSQL 的 `FormatType` 与 MySQL 的 `COLUMN_TYPE` 各说各话），归一后不报差异；MySQL 的整数显示宽度（`bigint(20)`、`int(11)`）在 MySQL 8 已废弃，同样剥掉。`decimal(10,2)` 这类带两位数字的括号必须保留——那是精度不是宽度。这条不做「聪明的类型映射」，只抹平同义写法。
 - 默认值比对做归一化（去外层括号、统一 `now()` 与 `CURRENT_TIMESTAMP` 视为等价需**引擎内**判断，跨引擎不视为等价）。
 - 索引比对按「列序列 + 唯一性 + 条件」为键，不按索引名（名字不同不一定是差异）。
 - 跨引擎比对的类型差异一律标为「需人工决策」，不自动映射。
@@ -261,7 +262,7 @@ SELECT COUNT(*) FROM t WHERE c > 2147483647 OR c < -2147483648;
 | DDL 事务性差异 | §2.3 / 验收 3 | 由 `Capabilities().DDLTransactional` 声明，预案据此设 `rolls_back_as_compensation`；MySQL 上提示「隐式提交，补偿不是撤销」 | `TestDDLPlanOnRealEngines`（MySQL 补偿 / PG 真回滚） |
 | 改列类型 | §1.1 / §5.2 | `action` 为 `alter_column_type`；语句文本由 `Dialect.AlterColumnTypeSQL` 渲染（PG `ALTER COLUMN … TYPE`、MySQL `MODIFY COLUMN` 带完整列定义）；**生成预案前做收窄预检**，装不下现存数据即 `ErrNarrowingBlocked` 并给出样本 | `TestBoundsFor`、`TestDDLAlterColumnTypeOnRealEngines`（MySQL + PG）、浏览器实测（含拦截与放行两条路径） |
 | 索引管理（建 / 删） | §1.1 / 验收 6 | `action` 为 `create_index` / `drop_index`；语句文本由 `Dialect.CreateIndexSQL` / `DropIndexSQL` 渲染（MySQL 的 `DROP INDEX` 要带 `ON <table>`，PG/SQLite 不能带）；建唯一索引前先查重复值，命中即 `ErrDuplicateRows` 并给样本；主键索引拒绝删除；删索引不动数据，回滚按原定义重建 | `TestDDLCreateAndDropIndex`、`TestDDLUniqueIndexBlocksDuplicates`、`TestDDLIndexOnRealEngines`（MySQL + PG，直接验证 `DROP INDEX` 写法）、浏览器实测 |
-| 结构比对（v1） | §4 / 验收 9 | `POST /compare`：两个已打开连接逐表比对，输出 `only_left` / `only_right` / `changed` / `need_review` 与逐列原因（中立类型、原始类型、可空、默认值、注释、主键与唯一标记）；**索引参与比对**，按「列序列 + 唯一性 + 谓词」为键、不按名字，只改名字或访问方法不生成脚本而进 `need_review`；主键索引不当作普通索引处理。列的删除与改类型仍进 `need_review`，索引的增删因为不丢数据、两个方向都生成脚本（升级与回退） | `TestCompareSchemas`、`TestCompareIndexes`、`TestCompareIndexNameOnlyDifference`、`TestCompareEndpoint`、浏览器实测（3 张差异表 + 升级脚本 + 3 条待决策）；`TestCompareIndexes` 含变异验证（去掉脚本生成即失败） |
+| 结构比对（v1） | §4 / 验收 9 | `POST /compare`：两个已打开连接逐表比对，输出 `only_left` / `only_right` / `changed` / `need_review` 与逐列原因（中立类型、原始类型、可空、默认值、注释、主键与唯一标记）；**索引参与比对**，按「列序列 + 唯一性 + 谓词」为键、不按名字，只改名字或访问方法不生成脚本而进 `need_review`；主键索引不当作普通索引处理；原始类型文本先做同义归一（`character varying(n)`≡`varchar(n)`、`integer`≡`int`、剥掉 MySQL 整数显示宽度）。列的删除与改类型仍进 `need_review`，索引的增删因为不丢数据、两个方向都生成脚本（升级与回退） | `TestCompareSchemas`、`TestCompareIndexes`、`TestCompareIndexNameOnlyDifference`、`TestNormalizeTypeText`、`TestCompareEndpoint`、浏览器实测（3 张差异表 + 升级脚本 + 3 条待决策）；`TestCompareIndexes` 含变异验证（去掉脚本生成即失败）；跨引擎冒烟：MySQL 5.7 ↔ PostgreSQL 17 同构表**零差异**（主键索引未误报、`BTREE`/`btree` 等价、整数显示宽度已归一） |
 | 外键孤儿数据预检（只读） | §5.1 / §5.2 / 验收 5 | ``POST /connections/{id}/fk/precheck``：检出子表里父表找不到对应行的数据（任一子列为 NULL 不计），判断父表参与列是否唯一（主键或**列集合完全一致**的唯一索引），orphans>0 即 ``blocked`` 并给最多 5 条样本 | ``TestFKPrecheckCleanData``、``TestFKPrecheckOrphansBlocked``、``TestFKPrecheckCompositeUniqueness``、``TestFKPrecheckEndpoint`` |
 | 删列的影响面 | §5.2 | 展示该列**非空行数**（`COUNT(*) WHERE col IS NOT NULL`），并标 `不可逆`；NULL 行不计入 | 浏览器实测（3 行有值 → 显示「影响 3 行」） |
 | 加列可撤销 | §2.6 | 撤销预案 = `DROP COLUMN`，复用撤销通道；删列因数据丢失不生成撤销 | 浏览器实测（加列后撤销，结构与 DDL 复原） |

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/maintell/DBRover/internal/driver"
@@ -343,8 +344,31 @@ func hasTypeReason(reasons []string) bool {
 	return false
 }
 
+// normalizeTypeText 归一化原始类型文本，减少纯写法差异带来的假阳性。
+//
+// 做两件事实上的清理，而不是「聪明的类型映射」：
+//   - 同义写法归一：PostgreSQL 自己把 varchar 打印成 character varying、
+//     把 int 打印成 integer，它们是同一个类型，不归一就会每次跨引擎比对都报差异。
+//   - 剥掉 MySQL 的整数显示宽度（bigint(20)、int(11)）：MySQL 8 已废弃该语法。
+//     decimal(10,2) 这类带两位数字的括号必须保留——那是精度，不是显示宽度。
 func normalizeTypeText(s string) string {
-	return strings.ToLower(strings.Join(strings.Fields(s), " "))
+	out := strings.NewReplacer(
+		"character varying", "varchar",
+		"integer", "int",
+	).Replace(strings.ToLower(strings.Join(strings.Fields(s), " ")))
+
+	open := strings.IndexByte(out, '(')
+	if open < 0 || !strings.HasSuffix(out, ")") {
+		return out
+	}
+	inner := out[open+1 : len(out)-1]
+	switch out[:open] {
+	case "tinyint", "smallint", "mediumint", "int", "bigint":
+		if _, err := strconv.Atoi(inner); err == nil {
+			return out[:open]
+		}
+	}
+	return out
 }
 
 func boolText(b bool) string {
