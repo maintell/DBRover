@@ -104,8 +104,11 @@ func normalizeEngine(s string) model.Engine {
 // connFlags 是各子命令共用的连接参数。
 // SQLite 用 -db 指文件路径；网络引擎用 -host/-port/-user，-db 指库名。
 type connFlags struct {
-	engine    string
-	db        string
+	engine string
+	db     string
+	// schema 与 db 是两件事：db 是库名，schema 留空则用引擎默认值
+	// （PostgreSQL 为 public）。把库名当 schema 会让元数据查询全部落空。
+	schema    string
 	host      string
 	port      int
 	user      string
@@ -118,7 +121,8 @@ type connFlags struct {
 
 func (c *connFlags) bind(fs *flag.FlagSet) {
 	fs.StringVar(&c.engine, "engine", "sqlite", "引擎: sqlite|mysql|postgres")
-	fs.StringVar(&c.db, "db", "", "SQLite 数据库文件路径；MySQL 为库名")
+	fs.StringVar(&c.db, "db", "", "SQLite 数据库文件路径；MySQL/PostgreSQL 为库名")
+	fs.StringVar(&c.schema, "schema", "", "schema（可选，PostgreSQL 默认 public；不要传库名）")
 	fs.StringVar(&c.host, "host", "", "主机地址（网络引擎必填）")
 	fs.IntVar(&c.port, "port", 0, "端口（默认按引擎取）")
 	fs.StringVar(&c.user, "user", "", "登录用户名（网络引擎必填）")
@@ -151,7 +155,7 @@ func (c *connFlags) open() (driver.Connector, model.Environment, model.AccessMod
 		Host:        c.host,
 		Port:        c.port,
 		Catalog:     c.db,
-		Schema:      c.db,
+		Schema:      c.schema,
 		User:        c.user,
 		AccessMode:  mode,
 		Environment: env,

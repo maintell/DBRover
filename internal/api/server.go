@@ -203,11 +203,38 @@ type createConnectionRequest struct {
 	Host    string `json:"host"`
 	Port    int    `json:"port"`
 	Catalog string `json:"catalog"`
-	User    string `json:"user"`
+	// Schema 与 Catalog 是两件事：PG 的 Catalog 是数据库、Schema 默认 public；
+	// 把库名当 schema 传下去会让「查表」全部落空。
+	Schema string `json:"schema"`
+	User   string `json:"user"`
 	// Password 只进不出：请求里出现一次，之后任何响应都不回显。
 	Password    string `json:"password"`
 	Environment string `json:"environment"`
 	AccessMode  string `json:"access_mode"`
+}
+
+// connectConfigFrom 把请求体映射成连接配置。
+//
+// 两个容易错的地方在这里集中处理，并有单测锁住：
+//   - Catalog 与 Schema 是两件事。PG 的 Catalog 是数据库、Schema 默认 public，
+//     把库名当 schema 传下去会让所有「查表」落到不存在的 schema 上。
+//   - SQLite 的 Host 是文件路径，Port/User/Password 对它没有意义。
+func connectConfigFrom(req createConnectionRequest, env model.Environment, mode model.AccessMode) driver.ConnectConfig {
+	cfg := driver.ConnectConfig{
+		Name:        req.Name,
+		Host:        req.Host,
+		AccessMode:  mode,
+		Environment: env,
+	}
+	if model.Engine(req.Engine) == model.EngineSQLite {
+		return cfg
+	}
+	cfg.Port = req.Port
+	cfg.Catalog = req.Catalog
+	cfg.Schema = req.Schema
+	cfg.User = req.User
+	cfg.Password = req.Password
+	return cfg
 }
 
 type connectionDTO struct {
@@ -317,21 +344,7 @@ func (s *Server) handleCreateConnection(w http.ResponseWriter, r *http.Request) 
 		mode = model.DefaultAccessMode(env)
 	}
 
-	cfg := driver.ConnectConfig{
-		Name:        req.Name,
-		Host:        req.Host,
-		Port:        req.Port,
-		Catalog:     req.Catalog,
-		Schema:      req.Catalog,
-		User:        req.User,
-		Password:    req.Password,
-		AccessMode:  mode,
-		Environment: env,
-	}
-	if req.Engine == string(model.EngineSQLite) {
-		// SQLite 的 Host 就是文件路径，以 -db 语义传入。
-		cfg.Host = req.Host
-	}
+	cfg := connectConfigFrom(req, env, mode)
 	engine := model.Engine(req.Engine)
 
 	conn, err := s.opener(engine, cfg)

@@ -128,8 +128,23 @@
                 "required": ["engine", "host"],
                 "properties": {
                   "name": { "type": "string" },
-                  "engine": { "type": "string", "enum": ["sqlite"] },
-                  "host": { "type": "string" },
+                  "engine": {
+                    "type": "string",
+                    "enum": ["sqlite", "mysql", "pg"],
+                    "description": "sqlite 时 host 是数据库文件路径；其余引擎按网络连接处理"
+                  },
+                  "host": { "type": "string", "description": "文件路径或主机名" },
+                  "port": { "type": "integer", "description": "网络引擎必填" },
+                  "catalog": { "type": "string", "description": "库名；与 schema 是两件事" },
+                  "schema": {
+                    "type": "string",
+                    "description": "schema，留空则由引擎取默认值（PostgreSQL 为 public）。不要传库名"
+                  },
+                  "user": { "type": "string" },
+                  "password": {
+                    "type": "string",
+                    "description": "只进不出：请求里出现一次，之后任何响应都不回显"
+                  },
                   "environment": { "type": "string", "enum": ["local", "test", "staging", "production", "unknown"] },
                   "access_mode": { "type": "string", "enum": ["read-only", "read-write", "admin"] }
                 }

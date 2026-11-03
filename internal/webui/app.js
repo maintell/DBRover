@@ -182,7 +182,7 @@ async function loadConnections(preferId) {
 
     const box = document.createElement('div');
     box.className = 'notice';
-    box.textContent = '还没有连接。先建一个 SQLite 连接：';
+    box.textContent = '还没有连接。先建一个连接：';
     const btn = document.createElement('button');
     btn.className = 'primary';
     btn.textContent = '新建连接';
@@ -243,10 +243,41 @@ async function loadIdentity(id) {
   }
 }
 
+const ENGINES = [
+  ['sqlite', 'SQLite'],
+  ['mysql', 'MySQL'],
+  ['pg', 'PostgreSQL'],
+];
+
+// applyEngineLayout 按引擎切换字段：SQLite 只有一个文件路径，
+// 网络引擎才需要主机/端口/账号/库名。
+function applyEngineLayout() {
+  const engine = $('f-engine').value;
+  const net = engine !== 'sqlite';
+  $('f-net').hidden = !net;
+  $('f-host-label').textContent = net ? '主机' : '数据库文件路径';
+  $('f-host').placeholder = net ? '192.168.2.88' : 'demo.db';
+  $('f-port').value = engine === 'mysql' ? '3306' : engine === 'pg' ? '5432' : '';
+  if (net) $('f-catalog').value = $('f-catalog').value || 'postgres';
+}
+
 function newConnection() {
   const html =
     '<label class="field">名称</label><input id="f-name" style="width:100%" value="local">' +
-    '<label class="field">数据库文件路径</label><input id="f-host" style="width:100%" placeholder="demo.db">' +
+    '<label class="field">引擎</label><select id="f-engine" style="width:100%">' +
+    ENGINES.map(([v, t]) => '<option value="' + v + '">' + t + '</option>').join('') +
+    '</select>' +
+    '<label class="field" id="f-host-label">数据库文件路径</label>' +
+    '<input id="f-host" style="width:100%" placeholder="demo.db" autocomplete="off" spellcheck="false">' +
+    '<div id="f-net" hidden>' +
+    '<label class="field">端口</label><input id="f-port" style="width:100%" autocomplete="off">' +
+    '<label class="field">用户</label><input id="f-user" style="width:100%" autocomplete="off">' +
+    '<label class="field">密码（只在本次请求里，不落盘、不回显）</label>' +
+    '<input id="f-password" type="password" style="width:100%" autocomplete="off">' +
+    '<label class="field">库名</label><input id="f-catalog" style="width:100%" autocomplete="off">' +
+    '<label class="field">schema（可选，PostgreSQL 用，默认 public）</label>' +
+    '<input id="f-schema" style="width:100%" autocomplete="off" placeholder="public">' +
+    '</div>' +
     '<label class="field">环境</label><select id="f-env" style="width:100%">' +
     '<option value="local">local</option><option value="test">test</option>' +
     '<option value="staging">staging</option><option value="production">production</option>' +
@@ -254,22 +285,43 @@ function newConnection() {
     '<label class="field">访问模式</label><select id="f-mode" style="width:100%">' +
     '<option value="read-write">read-write</option><option value="read-only">read-only</option>' +
     '</select>';
-  dialog('新建 SQLite 连接', html, '创建').then(async (ok) => {
+  dialog('新建连接', html, '创建').then(async (ok) => {
     if (!ok) return;
+    const engine = $('f-engine').value;
     const body = {
       name: $('f-name').value.trim() || 'local',
-      engine: 'sqlite',
+      engine,
       host: $('f-host').value.trim(),
       environment: $('f-env').value,
       access_mode: $('f-mode').value,
     };
+    if (engine !== 'sqlite') {
+      body.port = Number($('f-port').value) || 0;
+      body.user = $('f-user').value.trim();
+      body.password = $('f-password').value;
+      body.catalog = $('f-catalog').value.trim();
+      const schema = $('f-schema').value.trim();
+      if (schema) body.schema = schema;
+      // 连接前先自查必填项，别把「没填主机」变成一次服务端往返。
+      const missing = [
+        ['主机', body.host], ['端口', body.port], ['用户', body.user], ['库名', body.catalog],
+      ].filter(([, v]) => !v).map(([k]) => k);
+      if (missing.length) {
+        showNotice('还差：' + missing.join('、'), 'warn');
+        return;
+      }
+    }
     try {
       const created = await api(API.connections, { method: 'POST', body: JSON.stringify(body) });
+      $('f-password').value = '';
       await loadConnections(created && created.id);
     } catch (e) {
       showNotice('创建失败：' + e.message, 'error');
     }
   });
+  // 表单已经插入 DOM，绑定引擎切换。
+  $('f-engine').onchange = applyEngineLayout;
+  applyEngineLayout();
 }
 
 // ---------- 表 ----------
@@ -1454,6 +1506,7 @@ $('token').addEventListener('keydown', (e) => {
 
 $('conn').onchange = (e) => selectConnection(e.target.value);
 $('btn-reload').onclick = () => loadTables();
+$('btn-new-conn').onclick = () => newConnection();
 $('btn-new-table').onclick = () => showCreateTable();
 $('btn-forget').onclick = () => {
   forgetToken();
