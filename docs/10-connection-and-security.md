@@ -311,7 +311,13 @@ Statement
 
 **当前实现状态**：`dbrover serve -audit <path>` 会把事件追加写入 JSONL（一行一条，权限 0600；Windows 依赖用户目录 ACL），同时在内存保留最近 500 条供 `GET /api/v1/audit` 查询。
 
-**尚未实现**：链式哈希与完整性校验。也就是说，现在能证明「记录过什么」，还不能证明「没被人改过」。这是已知限制，不是遗漏。
+**链式哈希已实现**：每条事件带 `prev_hash` 与 `hash`，`hash = SHA256(prev_hash || 规范化 JSON)`。重启时会读出文件里最后一条的哈希接着算，所以跨进程也不会断链。`GET /api/v1/audit/verify` 校验整条链，返回 `{ok, events, broken_at, reason}`——`broken_at` 直接指到出问题的行号。
+
+能发现：改一条内容、删中间一条、插一条、把 `hash` 字段删掉。用例：`TestAuditChainVerifyOK`、`TestAuditChainDetectsTamper`、`TestAuditChainDetectsDeletedLine`、`TestAuditChainContinuesAfterRestart`，其中「删中间一条」用变异验证过——去掉连段校验该用例就红。
+
+**尚未实现**：外部锚点。也就是说，能发现「改了一行」，还不能发现「有管理员权限的人把整个文件重写成一条自洽的新链」。这需要定期把链头哈希发到外部系统，v1 不做。
+
+> 一个实现上的前提：`Risk` / `Friction` 的 JSON 编解码必须对称（`"R1"` ↔ 1）。链校验是「读回来重算一遍哈希」，只要有一边不对称，任何文件都验不过——所以这两个类型补了 `UnmarshalJSON`。
 
 **能力边界要写清**：本机制防「本地文件被悄悄编辑」，不防「有本地管理员权限的人整段重写」。后者需要外部锚点（如定期把链头哈希发到外部系统），v1 不做，文档标注为已知限制。
 
@@ -368,7 +374,7 @@ Statement
 | 6 | 只读连接执行 `SELECT 1; DELETE FROM t` 只拒第二条 | 单测 |
 | 7 | 配置序列化、日志、审计三处均无明文密码 | 单测（CI 强制） |
 | 8 | 审批 A、执行 B 被拒绝（哈希不匹配） | 单测 |
-| 9 | 审计链被手工修改一行后可被检测 | 单测 |
+| 9 | 审计链被手工修改一行后可被检测 | 单测 | ✅ `TestAuditChainDetectsTamper`（改一行 → `broken_at` 指到该行）、`TestAuditChainDetectsDeletedLine`（删一行 → 接不上）、`TestAuditChainVerifyOK` / `TestAuditChainContinuesAfterRestart`（跨重启不断链）；端点 `GET /api/v1/audit/verify`，用例 `TestAuditVerifyRealLog`。**不防**整段重写，需外部锚点（未做） |
 | 10 | 提示注入用例中 Agent 不执行注入指令 | 集成（端到端） |
 | 11 | 端口不对外监听（`netstat` 断言仅 127.0.0.1） | 集成 |
 | 12 | 生产连接在界面有醒目标识 | 手动 |

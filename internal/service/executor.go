@@ -32,6 +32,14 @@ type AuditEvent struct {
 	SQL        string          `json:"sql,omitempty"`
 	DurationMS int64           `json:"duration_ms"`
 	Reason     string          `json:"reason,omitempty"`
+
+	// PrevHash / Hash 构成链式哈希（docs/10 §6.2）：
+	// hash = SHA256(prev_hash || canonical_json(event_without_hash))。
+	//
+	// 它防的是「本地文件被悄悄编辑」：改一行，后面整条链都对不上。
+	// 不防「有管理员权限的人整段重写」——那需要外部锚点，v1 不做。
+	PrevHash string `json:"prev_hash,omitempty"`
+	Hash     string `json:"hash,omitempty"`
 }
 
 // AuditSink 接收审计事件。实现必须只追加。

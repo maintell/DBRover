@@ -1,6 +1,10 @@
 package service
 
 import (
+	"bufio"
+	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -46,6 +50,8 @@ type AuditLog struct {
 	recent []AuditEvent
 	limit  int
 	path   string
+	// lastHash 是链上最后一条的哈希，新事件接着它算（docs/10 §6.2）。
+	lastHash string
 }
 
 // DefaultAuditRecent 是内存热区保留的条数。
@@ -72,7 +78,39 @@ func NewAuditLog(path string, recentLimit int) (*AuditLog, error) {
 	// 说明：0o600 只在类 Unix 上生效；Windows 走 ACL，Go 不设 ACL，
 	// 实际保护来自「文件位于用户 profile 目录下」这一默认 ACL。
 	l.f = f
+	// 接到已有链条的末尾：重启之后写的事件必须继续挂在上一条后面，
+	// 否则每次重启都会开一条新链，校验时必然报断点。
+	if h, err := lastHashInFile(path); err == nil {
+		l.lastHash = h
+	}
 	return l, nil
+}
+
+// lastHashInFile 读出文件里最后一条事件的哈希。
+//
+// 顺序读整个文件：审计是追加写的，正常情况下几 MB 就很大了；真到需要优化时
+// 再改成从尾部反向读。
+func lastHashInFile(path string) (string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer func() { _ = f.Close() }()
+
+	var last string
+	sc := bufio.NewScanner(f)
+	sc.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
+	for sc.Scan() {
+		line := bytes.TrimSpace(sc.Bytes())
+		if len(line) == 0 {
+			continue
+		}
+		var ev AuditEvent
+		if err := json.Unmarshal(line, &ev); err == nil && ev.Hash != "" {
+			last = ev.Hash
+		}
+	}
+	return last, sc.Err()
 }
 
 // Record 追加一条事件。写盘失败不会向上传播——审计失败不应阻断业务，
@@ -80,6 +118,11 @@ func NewAuditLog(path string, recentLimit int) (*AuditLog, error) {
 func (l *AuditLog) Record(ev AuditEvent) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
+
+	// 先接链再落盘：PrevHash 指向上一条，Hash 覆盖本条内容。
+	ev.PrevHash = l.lastHash
+	ev.Hash = hashAuditEvent(ev)
+	l.lastHash = ev.Hash
 
 	l.recent = append(l.recent, ev)
 	if len(l.recent) > l.limit {
@@ -122,4 +165,106 @@ func (l *AuditLog) Close() error {
 	err := l.f.Close()
 	l.f = nil
 	return err
+}
+
+// hashAuditEvent 计算一条事件的链式哈希（docs/10 §6.2）：
+// hash = SHA256(prev_hash || canonical_json(event_without_hash))。
+//
+// 用结构体自身的字段顺序当「规范化 JSON」：Go 的 json.Marshal 对同一结构体
+// 输出字段顺序固定，读回来再算一遍能得到同样的字节。前提是 Risk / Friction
+// 的编解码对称——所以它们补了 UnmarshalJSON。
+func hashAuditEvent(ev AuditEvent) string {
+	ev.Hash = ""
+	b, err := json.Marshal(ev)
+	if err != nil {
+		return ""
+	}
+	sum := sha256.Sum256(append([]byte(ev.PrevHash), b...))
+	return hex.EncodeToString(sum[:])
+}
+
+// VerifyResult 是一次完整性校验的结果。
+type VerifyResult struct {
+	OK     bool `json:"ok"`
+	Events int  `json:"events"`
+	// BrokenAt 是第一个出问题的行号（1 基）；0 表示没有断点。
+	BrokenAt int    `json:"broken_at,omitempty"`
+	Reason   string `json:"reason,omitempty"`
+}
+
+// Verify 校验审计文件的链式哈希。
+//
+// 能发现：改一条内容、删中间一条、插一条、把 hash 字段删掉。
+// 不能发现：有管理员权限的人把整个文件重写成一条自洽的新链——
+// 那需要外部锚点（定期把链头哈希发到别处），v1 不做（docs/10 §6.2）。
+func (l *AuditLog) Verify() (VerifyResult, error) {
+	l.mu.Lock()
+	path := l.path
+	l.mu.Unlock()
+
+	if path == "" {
+		return VerifyResult{OK: true, Reason: "审计未落盘（启动时没给 -audit），没有可校验的链条"}, nil
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return VerifyResult{}, err
+	}
+	defer func() { _ = f.Close() }()
+
+	prev := ""
+	line := 0
+	sc := bufio.NewScanner(f)
+	sc.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
+	for sc.Scan() {
+		raw := bytes.TrimSpace(sc.Bytes())
+		if len(raw) == 0 {
+			continue
+		}
+		line++
+		var ev AuditEvent
+		if err := json.Unmarshal(raw, &ev); err != nil {
+			return VerifyResult{Events: line - 1, BrokenAt: line,
+				Reason: "第 " + itoa(line) + " 行不是合法 JSON：" + err.Error()}, nil
+		}
+		if ev.Hash == "" {
+			return VerifyResult{Events: line - 1, BrokenAt: line,
+				Reason: "第 " + itoa(line) + " 行缺少 hash（旧格式，或被删掉了）"}, nil
+		}
+		if got := hashAuditEvent(ev); got != ev.Hash {
+			return VerifyResult{Events: line - 1, BrokenAt: line,
+				Reason: "第 " + itoa(line) + " 行的哈希对不上（内容被改过）"}, nil
+		}
+		if ev.PrevHash != prev {
+			return VerifyResult{Events: line - 1, BrokenAt: line,
+				Reason: "第 " + itoa(line) + " 行与前一条接不上（中间被删或插入过）"}, nil
+		}
+		prev = ev.Hash
+	}
+	if err := sc.Err(); err != nil {
+		return VerifyResult{}, err
+	}
+	return VerifyResult{OK: true, Events: line}, nil
+}
+
+// itoa 是本地小工具，避免为了一个整数格式化再拉一个依赖。
+func itoa(n int) string {
+	if n == 0 {
+		return "0"
+	}
+	var buf [20]byte
+	i := len(buf)
+	neg := n < 0
+	if neg {
+		n = -n
+	}
+	for n > 0 {
+		i--
+		buf[i] = byte('0' + n%10)
+		n /= 10
+	}
+	if neg {
+		i--
+		buf[i] = '-'
+	}
+	return string(buf[i:])
 }

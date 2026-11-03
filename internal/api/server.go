@@ -172,6 +172,7 @@ func (s *Server) routes() []route {
 		{http.MethodGet, "/api/v1/results/{cid}/page", false, s.handlePage},
 		{http.MethodDelete, "/api/v1/results/{cid}", false, s.handleCloseCursor},
 		{http.MethodGet, "/api/v1/audit", false, s.handleAudit},
+		{http.MethodGet, "/api/v1/audit/verify", false, s.handleAuditVerify},
 		{http.MethodGet, "/api/v1/connections/{id}/export", false, s.handleExport},
 		// key-value 端点用查询参数传 key，不放进路径：Redis 的 key 是二进制安全的，
 		// 冒号、斜杠、空格都合法，放进路径会被 URL 转义规则咬住。

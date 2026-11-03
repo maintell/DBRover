@@ -850,6 +850,15 @@
         }
       }
     },
+    "/api/v1/audit/verify": {
+      "get": {
+        "summary": "校验审计链完整性（改一行、删一行都会在这里断开）",
+        "responses": {
+          "200": { "description": "ok（supported=false 表示当前审计实现不落盘）" },
+          "500": { "description": "读取审计文件失败" }
+        }
+      }
+    },
     "/api/v1/agent/status": {
       "get": {
         "summary": "Agent 是否可用（模型服务配置状态）",

@@ -89,3 +89,39 @@ func (s *Server) handleExplain(w http.ResponseWriter, r *http.Request) {
 		"error":        out.Err,
 	})
 }
+
+// auditVerifier 是「能自证完整性」的审计实现（docs/10 §6.2）。
+//
+// 用可选接口而不是往 AuditSink 上加方法：内存实现与测试替身不需要背这个能力，
+// 加进去它们就得提供一堆空实现。
+type auditVerifier interface {
+	Verify() (service.VerifyResult, error)
+}
+
+// handleAuditVerify 校验审计链的完整性。
+func (s *Server) handleAuditVerify(w http.ResponseWriter, r *http.Request) {
+	if s.audit == nil {
+		writeJSON(w, http.StatusOK, map[string]any{"supported": false, "reason": "没有启用审计"})
+		return
+	}
+	v, okVerifier := s.audit.(auditVerifier)
+	if !okVerifier {
+		writeJSON(w, http.StatusOK, map[string]any{
+			"supported": false,
+			"reason":    "当前审计实现不落盘（内存实现），没有可校验的链条",
+		})
+		return
+	}
+	res, err := v.Verify()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "AUDIT_VERIFY_FAILED", "internal", err.Error(), "", false)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"supported": true,
+		"ok":        res.OK,
+		"events":    res.Events,
+		"broken_at": res.BrokenAt,
+		"reason":    res.Reason,
+	})
+}

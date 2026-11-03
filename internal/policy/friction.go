@@ -3,6 +3,8 @@ package policy
 import (
 	"encoding/json"
 	"fmt"
+	"strconv"
+	"strings"
 
 	"github.com/maintell/DBRover/internal/model"
 )
@@ -23,6 +25,23 @@ func (f Friction) String() string { return fmt.Sprintf("F%d", int(f)) }
 
 // MarshalJSON 让摩擦等级在 JSON 中输出为 "F2" 而不是 2。
 func (f Friction) MarshalJSON() ([]byte, error) { return json.Marshal(f.String()) }
+
+// UnmarshalJSON 让 "F2" 能读回 Friction。
+//
+// 必须与 MarshalJSON 对称：审计链是「读回来、重新算一遍哈希」来验证的，
+// 只要有一边不对称，任何审计文件都验不过。
+func (f *Friction) UnmarshalJSON(b []byte) error {
+	var s string
+	if err := json.Unmarshal(b, &s); err != nil {
+		return err
+	}
+	n, err := strconv.Atoi(strings.TrimPrefix(strings.TrimSpace(s), "F"))
+	if err != nil {
+		return fmt.Errorf("policy: 无法解析摩擦等级 %q", s)
+	}
+	*f = Friction(n)
+	return nil
+}
 
 // RequiresApproval 报告是否需要「额外的」人工确认（弹窗及以上）。
 //

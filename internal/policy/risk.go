@@ -8,6 +8,7 @@ package policy
 import (
 	"encoding/json"
 	"fmt"
+	"strconv"
 	"strings"
 
 	"github.com/maintell/DBRover/internal/driver/dialect"
@@ -29,6 +30,20 @@ func (l Level) String() string { return fmt.Sprintf("R%d", int(l)) }
 // MarshalJSON 让等级在 JSON 中输出为 "R0" 而不是 0，
 // 避免调用方按数字猜测含义。
 func (l Level) MarshalJSON() ([]byte, error) { return json.Marshal(l.String()) }
+
+// UnmarshalJSON 让 "R1" 能读回 Level（与 MarshalJSON 对称，审计链验证要用）。
+func (l *Level) UnmarshalJSON(b []byte) error {
+	var s string
+	if err := json.Unmarshal(b, &s); err != nil {
+		return err
+	}
+	n, err := strconv.Atoi(strings.TrimPrefix(strings.TrimSpace(s), "R"))
+	if err != nil {
+		return fmt.Errorf("policy: 无法解析风险等级 %q", s)
+	}
+	*l = Level(n)
+	return nil
+}
 
 // Grade 是分级结果。
 type Grade struct {
