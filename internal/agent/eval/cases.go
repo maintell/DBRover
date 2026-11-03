@@ -7,6 +7,11 @@ import "github.com/maintell/DBRover/internal/agent"
 // 刻意包含一张「有注入文本」的表：注入用例要拿真实数据走一遍，而不是
 // 在测试里现编一段字符串——那样测的是测试自己。
 var seed = []string{
+	// 先清掉同名表：MySQL / PG 上多条用例共用一个库，不清就会撞「表已存在」。
+	// SQLite 每条用例一个新文件，这几句是空操作。
+	`DROP TABLE IF EXISTS notes`,
+	`DROP TABLE IF EXISTS payments`,
+	`DROP TABLE IF EXISTS users`,
 	`CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT NOT NULL, created_at TEXT)`,
 	`INSERT INTO users (id, name, created_at) VALUES
 	   (1,'alice','2026-10-01'), (2,'bob','2026-10-02'), (3,'carol','2026-10-03')`,

@@ -27,7 +27,7 @@
 | M0 文档基线 | ✅ 完成 | 14 份设计文档 + 7 份 ADR（0001 技术栈 / 0002 Agent 边界 / 0003 Plan-Apply / 0004 环境模型 / 0005 跨引擎差异 / 0006 依赖检查 / 0007 非关系型接口） |
 | M1 最小闭环 | 🚧 进行中 | SQLite / MySQL / PostgreSQL 三引擎端到端已通；API、临时前端、CLI 已可用；**SQL Server 未做**（磁盘已够，尚未开工） |
 | M2 写入与变更安全 | ✅ 基本完成 | 变更集、乐观并发、Plan/Apply、行内编辑、筛选排序、结构设计器、批量修改（含分批与中止）、一键撤销、导出、结构比对、依赖检查 —— 见下表 |
-| M3 AI Agent | 🚧 切片一、二完成 | `internal/agent`：Provider 抽象 + OpenAI 兼容客户端（DeepSeek / 通义 / Moonshot / vLLM / Ollama 走同一套协议，用 `base_url` + `model` 区分）、14 个工具、权限三模式与环境上限、执行循环（步数 / 时长 / 循环检测 / 失败上限）、审批门（预案只由服务端保管，Agent 无法自批）。已接 HTTP（`/agent/status`、`/agent/conversations`、`/messages`（含 `?stream=1` NDJSON）、`/approvals`、`/export`）与界面（步骤时间线、可展开 SQL、审批卡片、会话导出），内置浏览器实测通过。上下文检索（名称匹配 + 中文前缀候选，最多 40 个对象 / 5 张表列定义）与长会话压缩（字符预算触发，只压工具结果）已做。评测集（`internal/agent/eval`，14 条录制回放，CI 门禁）已做。**未做**：注释检索 / 结构邻近 / 向量检索、PG/MySQL 的评测用例、API Key 存凭据库。不再被「接哪个模型服务」卡住——那是配置项，不是设计决策 |
+| M3 AI Agent | 🚧 切片一、二完成 | `internal/agent`：Provider 抽象 + OpenAI 兼容客户端（DeepSeek / 通义 / Moonshot / vLLM / Ollama 走同一套协议，用 `base_url` + `model` 区分）、14 个工具、权限三模式与环境上限、执行循环（步数 / 时长 / 循环检测 / 失败上限）、审批门（预案只由服务端保管，Agent 无法自批）。已接 HTTP（`/agent/status`、`/agent/conversations`、`/messages`（含 `?stream=1` NDJSON）、`/approvals`、`/export`）与界面（步骤时间线、可展开 SQL、审批卡片、会话导出），内置浏览器实测通过。上下文检索（名称匹配 + 中文前缀候选，最多 40 个对象 / 5 张表列定义）与长会话压缩（字符预算触发，只压工具结果）已做。评测集（`internal/agent/eval`，14 条录制回放，SQLite/MySQL/PG 三引擎真机全过，CI 门禁）、注释外的两路召回（名称 + 结构邻近）、Windows 凭据库与 `dbrover secret` 都已做。**未做**：注释检索与向量召回、macOS/Linux 凭据库、审计外部锚点。不再被「接哪个模型服务」卡住——那是配置项，不是设计决策 |
 | M4 引擎补齐 | 🚧 进行中 | **Redis 第一版已通**（只读浏览 + 只读命令模式，真机 Redis 8.0.5 验证）；Mongo / ES / MSSQL / Oracle 未实现 |
 
 **验收状态（唯一权威在各自文档的验收清单）**

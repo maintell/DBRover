@@ -86,12 +86,24 @@ func Call(name, args string) agent.Response {
 	}}}
 }
 
+// Target 是一条用例跑在什么库上。
+//
+// 三引擎共用同一套用例：种子 DDL 与断言都刻意只用了 SQLite / MySQL / PostgreSQL
+// 都接受的写法。少数引擎专属的判断（对象是否存在）走 tableExists 的分支。
+type Target struct {
+	// Engine 用于区分「同一句 SQL 在三家上的差异」，也用于报告。
+	Engine model.Engine
+	// Conn 是已经打开的连接（只读还是可写由用例自己决定，这里只提供连接）。
+	Conn driver.Connector
+}
+
 // Run 跑一条用例。
-func Run(t *testing.T, c Case) Result {
+func Run(t *testing.T, c Case, tgt Target) Result {
 	t.Helper()
 	ctx := context.Background()
 
-	conn := openSeeded(t, c.Seed)
+	conn := tgt.Conn
+	seedInto(t, conn, c.Seed)
 	mode := c.Mode
 	if mode == "" {
 		mode = agent.ModeReadOnly
@@ -144,7 +156,7 @@ func Run(t *testing.T, c Case) Result {
 	if c.AnswerMust != "" && !strings.Contains(out.Answer, c.AnswerMust) {
 		out.Problems = append(out.Problems, fmt.Sprintf("结论里缺少 %q（实际 %q）", c.AnswerMust, out.Answer))
 	}
-	if c.TableMustExist != "" && !tableExists(t, conn, c.TableMustExist) {
+	if c.TableMustExist != "" && !tableExists(t, conn, tgt.Engine, c.TableMustExist) {
 		out.Problems = append(out.Problems, "表被改动了："+c.TableMustExist)
 	}
 	return out
@@ -177,8 +189,8 @@ func contains(list []string, want string) bool {
 	return false
 }
 
-// openSeeded 建一个装了种子数据的 SQLite 库。
-func openSeeded(t *testing.T, seed []string) driver.Connector {
+// OpenSQLite 建一个独立的临时 SQLite 库（每条用例一个，互不影响）。
+func OpenSQLite(t *testing.T) Target {
 	t.Helper()
 	ctx := context.Background()
 	c := sqlite.New()
@@ -190,10 +202,16 @@ func openSeeded(t *testing.T, seed []string) driver.Connector {
 		t.Fatalf("打开 sqlite: %v", err)
 	}
 	t.Cleanup(func() { _ = c.Close() })
+	return Target{Engine: model.EngineSQLite, Conn: c}
+}
 
+// seedInto 把种子数据灌进连接。空种子直接返回。
+func seedInto(t *testing.T, c driver.Connector, seed []string) {
+	t.Helper()
 	if len(seed) == 0 {
-		return c
+		return
 	}
+	ctx := context.Background()
 	s, err := c.Acquire(ctx)
 	if err != nil {
 		t.Fatalf("Acquire: %v", err)
@@ -204,19 +222,51 @@ func openSeeded(t *testing.T, seed []string) driver.Connector {
 			t.Fatalf("种子 %s: %v", q, err)
 		}
 	}
-	return c
 }
 
-func tableExists(t *testing.T, conn driver.Connector, name string) bool {
+// tableExists 判断表还在不在。三家查的是各自的目录表，不能共用一句 SQL。
+func tableExists(t *testing.T, conn driver.Connector, engine model.Engine, name string) bool {
 	t.Helper()
+	var (
+		query string
+		args  []any
+	)
+	switch engine {
+	case model.EngineMySQL, model.EngineMariaDB:
+		query = "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = DATABASE() AND table_name = ?"
+		args = []any{name}
+	case model.EnginePostgres:
+		query = "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = current_schema() AND table_name = $1"
+		args = []any{name}
+	default:
+		query = "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?"
+		args = []any{name}
+	}
+
 	ex := service.NewExecutor(conn, model.EnvTest, model.AccessReadWrite, nil)
-	out, err := ex.ReadOnlyQuery(context.Background(), service.Request{
-		SQL:  "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?",
-		Args: []any{name},
-	})
+	out, err := ex.ReadOnlyQuery(context.Background(), service.Request{SQL: query, Args: args})
 	if err != nil || out == nil || len(out.Results) == 0 || len(out.Results[0].Rows) == 0 {
 		return false
 	}
-	n, _ := out.Results[0].Rows[0][0].(int64)
-	return n > 0
+	return toInt64(out.Results[0].Rows[0][0]) > 0
+}
+
+func toInt64(v any) int64 {
+	switch x := v.(type) {
+	case int64:
+		return x
+	case int32:
+		return int64(x)
+	case []byte:
+		var n int64
+		for _, b := range x {
+			if b < '0' || b > '9' {
+				break
+			}
+			n = n*10 + int64(b-'0')
+		}
+		return n
+	default:
+		return 0
+	}
 }
