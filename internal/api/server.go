@@ -105,6 +105,7 @@ func (s *Server) routes() []route {
 		{http.MethodPost, "/api/v1/connections/{id}/changes/plan", false, s.handleChangePlan},
 		{http.MethodGet, "/api/v1/connections/{id}/tables/{name}/schema", false, s.handleTableSchema},
 		{http.MethodPost, "/api/v1/connections/{id}/schema/plan", false, s.handleSchemaPlan},
+		{http.MethodPost, "/api/v1/connections/{id}/bulk/plan", false, s.handleBulkPlan},
 		{http.MethodPost, "/api/v1/changes/{pid}/apply", false, s.handleChangeApply},
 		{http.MethodPost, "/api/v1/connections/{id}/query", false, s.handleQuery},
 		{http.MethodGet, "/api/v1/results/{cid}/page", false, s.handlePage},
@@ -818,6 +819,62 @@ func (s *Server) handleSchemaPlan(w http.ResponseWriter, r *http.Request) {
 	s.mu.Unlock()
 
 	writeJSON(w, http.StatusCreated, plan)
+}
+
+type bulkPlanRequest struct {
+	Table            model.ObjectRef      `json:"table"`
+	Set              map[string]any       `json:"set"`
+	Filter           []service.FilterCond `json:"filter"`
+	ConfirmTable     string               `json:"confirm_table"`
+	AcceptNoRollback bool                 `json:"accept_no_rollback"`
+}
+
+// handleBulkPlan 生成条件批量修改的预案。
+//
+// 与数据变更集共用同一个 apply 端点：批量修改只是「按条件而不是按行」描述变更，
+// 执行时的行数校验、事务回滚与审批逻辑完全一样。
+func (s *Server) handleBulkPlan(w http.ResponseWriter, r *http.Request) {
+	e, ok := s.lookup(r)
+	if !ok {
+		writeError(w, http.StatusNotFound, "CONNECTION_NOT_FOUND", "connection", "连接不存在", "", false)
+		return
+	}
+	var req bulkPlanRequest
+	if err := decode(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, "REQUEST_INVALID", "internal", err.Error(), "", false)
+		return
+	}
+
+	res, err := e.exec.BuildBulkUpdatePlan(r.Context(), service.BulkUpdateRequest{
+		Table: req.Table, Set: req.Set, Filter: req.Filter,
+		ConfirmTable: req.ConfirmTable, AcceptNoRollback: req.AcceptNoRollback,
+	})
+	switch {
+	case errors.Is(err, service.ErrBulkNeedsConfirmTable):
+		writeError(w, http.StatusPreconditionRequired, "BULK_CONFIRM_TABLE_REQUIRED", "policy",
+			err.Error(), "把 confirm_table 设成表名再提交", false)
+		return
+	case errors.Is(err, service.ErrBulkNeedsNoRollbackAck):
+		writeError(w, http.StatusPreconditionRequired, "BULK_NO_ROLLBACK_ACK", "policy",
+			err.Error(), "确认已备份后把 accept_no_rollback 设为 true", false)
+		return
+	case errors.Is(err, service.ErrInvalidFilter):
+		writeError(w, http.StatusBadRequest, "FILTER_INVALID", "internal", err.Error(), "", false)
+		return
+	case errors.Is(err, service.ErrInvalidDDL):
+		writeError(w, http.StatusBadRequest, "REQUEST_INVALID", "internal", err.Error(), "", false)
+		return
+	case err != nil:
+		writeError(w, http.StatusBadRequest, "BULK_PLAN_FAILED", "internal", err.Error(), "", false)
+		return
+	}
+
+	s.mu.Lock()
+	s.purgeExpiredPlansLocked()
+	s.plans[res.Plan.ID] = &storedPlan{plan: res.Plan, exec: e.exec, exp: res.Plan.ExpiresAt}
+	s.mu.Unlock()
+
+	writeJSON(w, http.StatusCreated, res)
 }
 
 func (s *Server) handleChangePlan(w http.ResponseWriter, r *http.Request) {

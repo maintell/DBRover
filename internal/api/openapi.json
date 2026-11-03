@@ -556,6 +556,36 @@
         }
       }
     },
+    "/api/v1/connections/{id}/bulk/plan": {
+      "post": {
+        "summary": "生成条件批量修改预案",
+        "description": "按条件一次改多行。与数据变更集共用同一个 apply 端点：行数校验、事务回滚、审批逻辑完全一致。影响行数在生成预案时精确统计并写入 expect_rows，执行时行数不符即整体回滚。无 where 时等于全表写，必须回填 confirm_table；影响超过 1000 行时不生成逐行回滚，必须显式接受 accept_no_rollback。",
+        "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "string" } }],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["table", "set"],
+                "properties": {
+                  "table": { "type": "object" },
+                  "set": { "type": "object", "description": "列名 → 新值；null 表示设为 NULL" },
+                  "filter": { "type": "array", "items": { "type": "object" }, "description": "与 rows 端点的 where 同构" },
+                  "confirm_table": { "type": "string", "description": "无 filter 时必须等于表名" },
+                  "accept_no_rollback": { "type": "boolean", "description": "影响超过 1000 行时必须为 true" }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": { "description": "预案已生成：plan（语句/回滚/风险/摩擦）+ affected + samples 前后对比 + note" },
+          "400": { "description": "参数不合法（REQUEST_INVALID / FILTER_INVALID / BULK_PLAN_FAILED）" },
+          "428": { "description": "需要额外确认（BULK_CONFIRM_TABLE_REQUIRED / BULK_NO_ROLLBACK_ACK）" }
+        }
+      }
+    },
     "/api/v1/audit": {
       "get": {
         "summary": "审计事件",

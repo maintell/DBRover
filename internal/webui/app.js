@@ -38,6 +38,7 @@ const API = {
   export: '/api/v1/connections/:id/export',
   exec: '/api/v1/connections/:id/exec',
   changePlan: '/api/v1/connections/:id/changes/plan',
+  bulkPlan: '/api/v1/connections/:id/bulk/plan',
   changeApply: '/api/v1/changes/:pid/apply',
 };
 
@@ -479,6 +480,13 @@ function renderToolbar() {
   exportBtn.onclick = () => exportTable(exportSel.value);
   bar.append(exportSel, exportBtn);
 
+  const bulkBtn = document.createElement('button');
+  bulkBtn.id = 'btn-bulk';
+  bulkBtn.textContent = '批量修改';
+  bulkBtn.title = '按当前筛选条件一次改多行（不加载行）';
+  bulkBtn.onclick = () => bulkEdit();
+  bar.appendChild(bulkBtn);
+
   state.filter.forEach((f, i) => {
     const chip = document.createElement('span');
     chip.className = 'chip';
@@ -797,6 +805,98 @@ async function applyPlan(pid, token, after) {
     }
     showNotice('应用变更失败：' + e.message, 'error');
   }
+}
+
+// ---------- 条件批量修改 ----------
+
+// bulkEdit 是「按条件改多行」的入口。它与行内编辑的区别必须让用户看见：
+// 行内编辑改的是「我看着的这几行」，批量修改改的是「符合条件的全部行」。
+function bulkEdit() {
+  if (!state.current || !state.tableName) return;
+  const pkSet = new Set((state.pkCols || []).map((c) => c.toLowerCase()));
+  const cols = (state.columns || []).filter((c) => !pkSet.has(c.name.toLowerCase()));
+  if (!cols.length) {
+    showNotice('这张表没有可批量修改的非主键列。', 'warn');
+    return;
+  }
+
+  const noFilter = state.filter.length === 0;
+  const html =
+    '<label class="field">列</label><select id="bk-col" style="width:100%">' +
+    cols.map((c) => '<option value="' + c.name + '">' + c.name + '</option>').join('') +
+    '</select>' +
+    '<label class="field">新值</label><input id="bk-val" style="width:100%" autocomplete="off">' +
+    (noFilter
+      ? '<p class="warn">当前没有筛选条件：这会命中<strong>全表</strong>。要确认请回填表名。</p>' +
+        '<label class="field">回填表名</label><input id="bk-confirm" style="width:100%" autocomplete="off">'
+      : '<p>只影响当前筛选命中的行（' + state.filter.length + ' 个条件）。</p>');
+
+  dialog('批量修改', html, '生成预案').then(async (ok) => {
+    if (!ok) return;
+    const body = {
+      table: { kind: 'table', name: state.tableName },
+      set: {},
+      filter: state.filter,
+    };
+    const col = $('bk-col').value;
+    const raw = $('bk-val').value;
+    body.set[col] = coerce(cellKind(cols.find((c) => c.name === col)), raw);
+    if (noFilter) {
+      const typed = $('bk-confirm').value.trim();
+      if (typed !== state.tableName) {
+        showNotice('表名不一致，已取消。', 'warn');
+        return;
+      }
+      body.confirm_table = typed;
+    }
+    await submitBulk(body);
+  });
+}
+
+async function submitBulk(body) {
+  let res;
+  try {
+    res = await api(path(API.bulkPlan, { id: state.current.id }), {
+      method: 'POST',
+      body: JSON.stringify(body),
+    });
+  } catch (e) {
+    if (e.code === 'BULK_NO_ROLLBACK_ACK') {
+      // 影响行数过大时不生成回滚，必须再确认一次。
+      const ok = await dialog('这批不生成回滚',
+        '<p>' + escapeHTML(e.message) + '</p><p>确认已备份这些行，继续吗？</p>', '继续');
+      if (!ok) return;
+      body.accept_no_rollback = true;
+      return submitBulk(body);
+    }
+    showNotice('生成批量预案失败：' + e.message, 'error');
+    return;
+  }
+
+  const plan = res.plan || {};
+  const sample = (res.samples || []).slice(0, 5);
+  const stmts = (plan.statements || []).map((s) => s.sql).join(';\n');
+
+  const sampleHTML = sample.length
+    ? '<p>前后对比（最多 5 行）：</p><pre>' + escapeHTML(sample.map((s) =>
+        JSON.stringify(s.key) + '  ' + JSON.stringify(s.before) + ' → ' + JSON.stringify(s.after),
+      ).join('\n')) + '</pre>'
+    : '';
+  const noteHTML = res.note ? '<p class="warn">' + escapeHTML(res.note) + '</p>' : '';
+
+  const ok = await dialog('确认批量修改',
+    '<div class="meta">' +
+      '<span class="badge ' + String(plan.risk).toLowerCase() + '">风险 ' + plan.risk + '</span>' +
+      '<span class="badge">打扰 ' + plan.friction + '</span>' +
+      '<span class="badge">影响 ' + res.affected + ' 行</span>' +
+      (plan.irreversible ? '<span class="badge r4">不可逆</span>' : '') +
+    '</div>' +
+    '<p>将执行 ' + (plan.statements || []).length + ' 条语句：</p>' +
+    '<pre>' + escapeHTML(stmts) + '</pre>' +
+    sampleHTML + noteHTML, '执行');
+  if (!ok) return;
+
+  await applyPlan(plan.id);
 }
 
 // ---------- 建表 ----------
