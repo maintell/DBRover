@@ -109,9 +109,12 @@ model → （无）
 
 ```powershell
 pwsh -File scripts/check.ps1     # gofmt + vet + build + test + test -race
+pwsh -File scripts/check.ps1 -TmpDir $env:LOCALAPPDATA\Temp   # 临时目录所在盘快满时用这个
 ```
 
 要求 Go 1.26+、`CGO_ENABLED=0`。新增依赖前先确认它是纯 Go。
+
+**磁盘前置检查**：脚本会先看临时目录所在盘的可用空间，低于 2 GB 直接拒绝并给出改法。原因是一次真实的误判——盘满时链接阶段报 `There is not enough space on the disk`，读起来像代码错误，实际上是磁盘问题（`F:` 曾 0 字节可用，换 `-TmpDir` 到 `C:` 后立刻全绿）。
 
 ---
 

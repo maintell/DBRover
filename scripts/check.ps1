@@ -1,11 +1,53 @@
 # 本地质量检查（发版前必须全绿）
 #
-# 用法：pwsh -File scripts/check.ps1
+# 用法：pwsh -File scripts/check.ps1 [-TmpDir <path>]
 # 说明：只跑静态检查与单测，不产出构建物；完整矩阵交给 CI。
+#
+# -TmpDir：把编译与测试的临时目录指到别处。默认用系统 TEMP；当它所在盘
+# 快满时，链接阶段会报 "There is not enough space on the disk"——那看起来
+# 像代码错误，其实是磁盘问题。这个参数与下面那条前置检查就是为了把这种
+# 误判挡在门口。
+
+[CmdletBinding()]
+param(
+    [string]$TmpDir = ''
+)
 
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot
 Set-Location $root
+
+# 链接一个 test 二进制大概要几百 MB；低于 2 GB 就基本必然失败。
+$minFreeGB = 2
+
+function Get-FreeGB([string]$path) {
+    try {
+        $full = [System.IO.Path]::GetFullPath($path)
+        $drive = [System.IO.Path]::GetPathRoot($full)
+        $d = New-Object System.IO.DriveInfo($drive)
+        return [math]::Round($d.AvailableFreeSpace / 1GB, 2)
+    } catch {
+        return $null
+    }
+}
+
+if ($TmpDir) {
+    New-Item -ItemType Directory -Force -Path $TmpDir | Out-Null
+    $env:TMP = $TmpDir
+    $env:TEMP = $TmpDir
+    $env:GOTMPDIR = $TmpDir
+    Write-Host "临时目录: $TmpDir（可用 $(Get-FreeGB $TmpDir) GB）" -ForegroundColor Cyan
+}
+
+$tmp = if ($env:GOTMPDIR) { $env:GOTMPDIR } elseif ($env:TEMP) { $env:TEMP } else { $env:TMP }
+$free = Get-FreeGB $tmp
+if ($null -ne $free -and $free -lt $minFreeGB) {
+    Write-Host "临时目录所在盘只剩 $free GB：$tmp" -ForegroundColor Red
+    Write-Host "编译/测试会在链接阶段报 'not enough space on the disk'，那看起来像代码错误。" -ForegroundColor Yellow
+    Write-Host "先清理磁盘，或把临时目录指到别处：" -ForegroundColor Yellow
+    Write-Host "  pwsh -File scripts/check.ps1 -TmpDir `$env:LOCALAPPDATA\Temp" -ForegroundColor Yellow
+    exit 1
+}
 
 $env:CGO_ENABLED = '0'
 $failed = @()
