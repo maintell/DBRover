@@ -131,12 +131,16 @@
 
 ### 3.1 存储后端
 
-| 平台 | 后端 | 实现 |
-|---|---|---|
-| Windows | Credential Manager (DPAPI) | `syscall` 调 `CredWrite`/`CredRead`，或 `zalando/go-keyring` |
-| macOS | Keychain | `security` 命令或 `go-keyring` |
-| Linux | Secret Service（D-Bus） | `go-keyring` |
-| 降级 | 本地文件 `0600` | 仅当上述不可用；UI 强制警告 |
+| 平台 | 后端 | 实现 | 状态 |
+|---|---|---|---|
+| Windows | Credential Manager (DPAPI) | `syscall` 调 `CredWriteW`/`CredReadW`/`CredDeleteW`（`internal/infra/secret`） | ✅ |
+| macOS | Keychain | `security` 命令或 `go-keyring` | ⛔ |
+| Linux | Secret Service（D-Bus） | `go-keyring` | ⛔ |
+| 降级 | 本地文件 `0600` | 仅当上述不可用；UI 强制警告 | ⛔ **有意不做** |
+
+**为什么不实现「降级到本地文件」**：那条路会让调用方以为凭据进了系统库、实际落在磁盘上，而且没人会再去 review 它。非 Windows 平台上 `secret.*` 直接返回 `ErrUnsupported`，功能不可用但不说谎——等有对应平台的验证环境再补。
+
+已接入的用法：`dbrover secret set|clear|status`（口令只从 stdin 读，绝不接受命令行参数——那会进进程列表与 shell 历史）。Agent 的 API Key 走这条路径，见 `docs/11 §8.3`。
 
 ### 3.2 规则
 

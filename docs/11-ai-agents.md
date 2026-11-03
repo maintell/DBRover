@@ -413,7 +413,7 @@ type Provider interface {
 | 项 | 状态 |
 |---|---|
 | 自定义 `base_url`（内网网关、代理） | ✅ 已实现 |
-| API Key 存 OS 凭据库 | ⛔ **未实现**：现在走环境变量，属于明文。已知限制，不要当已完成 |
+| API Key 存 OS 凭据库 | ✅ Windows 凭据管理器（`internal/infra/secret`）。用法：`echo <key> \| dbrover secret set`（口令只从 stdin 读，不接受命令行参数），`dbrover secret status` 只报有没有、不打印值。`serve` 取 key 的顺序是「环境变量 → 凭据库」，所以 CI 仍可用环境变量临时覆盖。非 Windows 平台返回 `ErrUnsupported`，**不退化成明文文件** |
 | 每个连接绑定默认 provider/model | ⛔ 未实现：一条 `serve` 只有一个模型配置 |
 | 每会话 token 消耗 | ⚠️ 服务端按轮汇总并返回（`usage`），未落库、未按连接汇总 |
 

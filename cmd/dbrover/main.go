@@ -20,6 +20,7 @@ import (
 	"github.com/maintell/DBRover/internal/driver/pg"
 	"github.com/maintell/DBRover/internal/driver/redis"
 	"github.com/maintell/DBRover/internal/driver/sqlite"
+	"github.com/maintell/DBRover/internal/infra/secret"
 	"github.com/maintell/DBRover/internal/infra/tunnel"
 	"github.com/maintell/DBRover/internal/model"
 	"github.com/maintell/DBRover/internal/service"
@@ -54,6 +55,8 @@ func main() {
 		err = cmdServe(os.Args[2:])
 	case "tunnel":
 		err = cmdTunnel(os.Args[2:])
+	case "secret":
+		err = cmdSecret(os.Args[2:])
 	default:
 		fmt.Fprintf(os.Stderr, "未知命令: %s\n\n", os.Args[1])
 		usage()
@@ -80,6 +83,7 @@ func usage() {
   dbrover exec   -db <file> (-sql "..." | -file <path>) [-env ...] [-ro|-rw] [-approve]
   dbrover serve  [-addr 127.0.0.1:7788] [-token <token>] [-allow-remote]
   dbrover tunnel -via user@hop1:22[,user@hop2:22] -to host:port (-password-stdin | -key <path>)
+  dbrover secret (set|clear|status) [-service dbrover/agent] [-account api-key]  # 口令从 stdin 读
 
 退出码:
   0  成功
@@ -422,11 +426,20 @@ func cmdServe(args []string) error {
 // 但环境变量同样是明文，真正该做的是 OS 凭据库（docs/11 §8.3）——这一步还没做，
 // 已在那份文档里标为已知限制，不要因为「现在能用」就当作已完成。
 func agentConfigFromEnv() api.AgentConfig {
-	return api.AgentConfig{
+	cfg := api.AgentConfig{
 		BaseURL: strings.TrimSpace(os.Getenv("DBROVER_AGENT_BASE_URL")),
 		Model:   strings.TrimSpace(os.Getenv("DBROVER_AGENT_MODEL")),
 		APIKey:  os.Getenv("DBROVER_AGENT_API_KEY"),
 	}
+	// 环境变量优先（便于 CI 临时覆盖），否则去系统凭据库取。
+	// 环境变量里的 key 会跟着进程环境走（崩溃转储、子进程都看得到），
+	// 所以推荐 dbrover secret set 把 key 存进凭据库。
+	if cfg.APIKey == "" {
+		if v, err := secret.Load(secret.AgentAPIKeyService, secret.AgentAPIKeyAccount); err == nil {
+			cfg.APIKey = v
+		}
+	}
+	return cfg
 }
 
 // parseHops 解析 -via 参数：user@host:port[,user@host:port]。
