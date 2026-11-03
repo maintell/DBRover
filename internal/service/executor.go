@@ -10,6 +10,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/maintell/DBRover/internal/driver"
@@ -113,6 +114,9 @@ type Executor struct {
 	WarmRelations bool
 	// cursors 持有流式查询的游标，生命周期由执行器管理。
 	cursors *cursorStore
+	// runMu / running 跟踪「此刻在跑的语句」，供取消使用（见 cancel.go）。
+	runMu   sync.Mutex
+	running map[*runningExec]struct{}
 }
 
 // NewExecutor 构造执行门。
@@ -205,6 +209,11 @@ func (e *Executor) Execute(ctx context.Context, req Request) (*Outcome, error) {
 	}
 	defer func() { _ = sess.Close() }()
 
+	// 登记「这一条在跑」：用户按取消时，取消的就是它。
+	runCtx, doneRun := e.beginRun(ctx, sess)
+	defer doneRun()
+	ctx = runCtx
+
 	maxRows := req.MaxRows
 	if maxRows <= 0 {
 		maxRows = 1000
@@ -270,7 +279,6 @@ func (e *Executor) Execute(ctx context.Context, req Request) (*Outcome, error) {
 	return out, nil
 }
 
-// gradeAll 对整批语句做分级，返回预检结果。
 // statementAt 挑出光标所在的那条语句。
 //
 // 规则来自编辑器里的实际习惯（docs/05 验收 1、2）：
@@ -291,6 +299,7 @@ func statementAt(stmts []dialect.Statement, cursor int) dialect.Statement {
 	return stmts[0]
 }
 
+// gradeAll 对整批语句做分级，返回预检结果。
 func (e *Executor) gradeAll(ctx context.Context, stmts []dialect.Statement) ([]prepared, policy.Level, bool) {
 	rels := e.relations(ctx, stmts)
 	preps := make([]prepared, 0, len(stmts))

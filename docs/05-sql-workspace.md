@@ -225,12 +225,11 @@
 
 ## 8. 长查询与资源
 
-> **这一节目前是设计，不是现状。** 取消还没实现（见 §9 第 9 项）：界面上没有取消入口，
-> `Session.Cancel` 在驱动层存在但没有接到 HTTP，也没有「已运行 N 秒」的计时。
-> 现在能做的只是等它跑完，或者关掉页面（客户端断开会让 Go 的请求 ctx 取消，
-> 但那不等于引擎侧语句被终止）。下面的行数上限与页大小是实现的。
+> **这一节一半是设计，一半是现状。** 取消入口已经有了（执行期间工具栏出现「取消」，
+> 对应 `POST /connections/{id}/cancel`），但**没有**「已运行 N 秒」的计时、没有 30 秒提示、
+> 也没有引擎侧等待事件展示。另外取消的实效性按引擎不同，见 §9 第 9 项。
 
-- 超过 3 秒的查询：结果区显示「已运行 3s，可取消」，状态栏计时。**未实现**
+- 超过 3 秒的查询：结果区显示「已运行 3s，可取消」，状态栏计时。**未实现**（取消按钮有，计时没有）
 - 超过 30 秒：提示「是否继续等待 / 取消」，并显示当前会话在引擎侧的等待事件（若 `MonitorProvider` 可用）。**未实现**
 - 结果行数超过 10 万：默认停止继续拉取，提示「已加载 10 万行，可继续或导出」。
 - 单页大小默认 200 行，可配 50–2000。
@@ -249,7 +248,7 @@
 | 6 | 深分页第 10000 页 < 500ms（有主键表） | 基准 | ⚠️ 键集分页已实现，未跑 10000 页基准 |
 | 7 | `Decimal(38,10)` 读回与写入完全一致 | 类型保真测试 | ✅ 见 `docs/06` 精度守卫与真机验收 |
 | 8 | `NULL` 与 `''` 视觉可区分 | 视觉检查 | ✅ 界面用 `NULL` 标记区分；见 `docs/06` |
-| 9 | 取消在 1s 内使引擎侧语句终止 | 集成（查 `pg_stat_activity` / `PROCESSLIST`） | ⛔ **未实现**：没有取消入口，`Session.Cancel` 有但没接到 HTTP |
+| 9 | 取消在 1s 内使引擎侧语句终止 | 集成（查 `pg_stat_activity` / `PROCESSLIST`） | ⚠️ **部分通过**。入口：执行期间工具栏「取消」→ `POST /connections/{id}/cancel`，客户端 1 毫秒内返回 `SQL_CANCELED`。真机：**PostgreSQL** `pg_sleep(30)` 取消后 `pg_stat_activity`（`state='active'`）计数 1→0；**SQLite** interrupt 立刻停；**MySQL** 只做到「客户端立刻返回」，`SLEEP(30)` 取消 1.5 秒后仍在 `processlist` 里——要真杀得把会话钉在单条连接上再用 `KILL QUERY <id>`，未做。用例：`TestCancelStopsRunningQuery`、`TestCancelWhenIdleReturnsFalse`、`TestRunningClearedAfterNormalExecution`、`TestCancelSurvivesInterleavedQuery`（并发登记）、`TestCancelWhenIdle`（端点） |
 | 10 | 执行计划对 5 种关系库可解析并高亮偏差节点 | 集成 | ⚠️ 服务端已有 `Executor.Explain`（PG/MySQL 用 `EXPLAIN`、SQLite 用 `EXPLAIN QUERY PLAN`、MSSQL/Oracle 明确说不支持），但**没有端点与界面**，也没有「高亮偏差节点」 |
 | 11 | 格式化后 `Normalize` 指纹不变 | 单测 | ✅ `dialect` 归一化用例 |
 | 12 | 跨库引用（PG）在执行前被拦截并说明原因 | 单测 | ⚠️ 未做专门拦截；跨库查询会由引擎自己报错，错误信息原样返回 |

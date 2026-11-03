@@ -41,6 +41,7 @@ const API = {
   schemaPlan: '/api/v1/connections/:id/schema/plan',
   export: '/api/v1/connections/:id/export',
   exec: '/api/v1/connections/:id/exec',
+  cancel: '/api/v1/connections/:id/cancel',
   changePlan: '/api/v1/connections/:id/changes/plan',
   bulkPlan: '/api/v1/connections/:id/bulk/plan',
   compare: '/api/v1/compare',
@@ -2205,6 +2206,8 @@ async function runSQL(approvalToken) {
 
   setStatus('执行中…');
   $('btn-run').disabled = true;
+  // 只有真在跑的时候才有取消按钮：常驻会让人以为随时能中断。
+  $('btn-cancel').hidden = false;
   try {
     const body = { sql, max_rows: 200 };
     if (!hasSel) body.cursor = byteOffset(sql, el.selectionStart);
@@ -2236,12 +2239,17 @@ async function runSQL(approvalToken) {
     } else if (e.code === 'POLICY_APPROVAL_MISMATCH') {
       showNotice('审批凭证与当前语句不匹配（可能你改了 SQL）。请重新执行以获取新凭证。', 'warn');
       setStatus('已拒绝');
+    } else if (e.code === 'SQL_CANCELED') {
+      // 取消不是失败：是用户自己的动作，别用红字报错的口吻。
+      showNotice('已取消这条语句。', 'ok');
+      setStatus('已取消');
     } else {
       showNotice(e.message, 'error');
       setStatus('失败');
     }
   } finally {
     $('btn-run').disabled = false;
+    $('btn-cancel').hidden = true;
   }
 }
 
@@ -2492,6 +2500,20 @@ $('btn-forget').onclick = () => {
   location.reload();
 };
 $('btn-run').onclick = () => runSQL(false);
+
+// 取消：独立一次请求。执行那条请求正阻塞着等结果，没法用它自己取消自己。
+$('btn-cancel').onclick = async () => {
+  if (!state.current) return;
+  try {
+    const r = await api(path(API.cancel, { id: state.current.id }), {
+      method: 'POST',
+      body: '{}',
+    });
+    setStatus(r.canceled ? '取消中…' : '已经跑完了');
+  } catch (e) {
+    showNotice('取消失败：' + e.message, 'error');
+  }
+};
 
 $('sql').addEventListener('keydown', (e) => {
   if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {

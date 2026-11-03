@@ -347,3 +347,8 @@ label.inline {
   color: var(--muted);
   margin-bottom: 6px;
 }
+
+/* 取消按钮只在执行时出现；toolbar 的 flex 会盖过 [hidden]，必须显式关掉。 */
+#btn-cancel[hidden] {
+  display: none;
+}

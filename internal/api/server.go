@@ -159,6 +159,7 @@ func (s *Server) routes() []route {
 		{http.MethodGet, "/api/v1/connections/{id}/tables", false, s.handleTables},
 		{http.MethodGet, "/api/v1/connections/{id}/tables/{name}/rows", false, s.handleTableRows},
 		{http.MethodPost, "/api/v1/connections/{id}/exec", false, s.handleExec},
+		{http.MethodPost, "/api/v1/connections/{id}/cancel", false, s.handleCancel},
 		{http.MethodPost, "/api/v1/connections/{id}/changes/plan", false, s.handleChangePlan},
 		{http.MethodGet, "/api/v1/connections/{id}/tables/{name}/schema", false, s.handleTableSchema},
 		{http.MethodPost, "/api/v1/connections/{id}/schema/plan", false, s.handleSchemaPlan},

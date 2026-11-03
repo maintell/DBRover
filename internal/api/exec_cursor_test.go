@@ -69,3 +69,20 @@ func rowsOf(t *testing.T, body map[string]any) [][]any {
 	}
 	return out
 }
+
+// TestCancelWhenIdle 没有语句在跑时，取消返回 200 且 canceled=false。
+//
+// 这条守的是「取消不是错误」：界面上按晚了不该弹红字。
+func TestCancelWhenIdle(t *testing.T) {
+	_, ts, dir := newServer(t)
+	connID := createConn(t, ts, dir, "test", "read-write")
+
+	code, body := do(t, ts, http.MethodPost, "/api/v1/connections/"+connID+"/cancel",
+		map[string]any{}, true)
+	if code != http.StatusOK {
+		t.Fatalf("状态码 = %d %v", code, body)
+	}
+	if body["canceled"] != false {
+		t.Errorf("空闲时 canceled 应为 false，实际 %v", body["canceled"])
+	}
+}

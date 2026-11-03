@@ -830,6 +830,16 @@
         }
       }
     },
+    "/api/v1/connections/{id}/cancel": {
+      "post": {
+        "summary": "终止这条连接上正在执行的语句（canceled=false 表示已跑完）",
+        "responses": {
+          "200": { "description": "ok" },
+          "400": { "description": "key-value 连接没有可取消的长语句" },
+          "404": { "description": "连接不存在" }
+        }
+      }
+    },
     "/api/v1/agent/status": {
       "get": {
         "summary": "Agent 是否可用（模型服务配置状态）",
