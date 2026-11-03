@@ -8,9 +8,18 @@ package driver
 
 import (
 	"context"
+	"errors"
 
 	"github.com/maintell/DBRover/internal/model"
 )
+
+// ErrObjectNotFound 表示目标对象不存在。
+//
+// Describe* 系列必须返回它（或包装它），**不得**返回一个零列的空结构：
+// PRAGMA table_info 与 information_schema 对不存在的表都只是「查不到行」，
+// 一不小心就会把「表不存在」说成「表没有列」，上层据此会给出误导性提示
+// （例如把建表失败说成「没有主键，无法编辑」）。
+var ErrObjectNotFound = errors.New("对象不存在")
 
 // ConnectConfig 是建立连接所需的最小信息。
 //

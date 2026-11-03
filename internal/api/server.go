@@ -718,6 +718,11 @@ func (s *Server) handleTableSchema(w http.ResponseWriter, r *http.Request) {
 	ref := model.ObjectRef{Kind: model.KindTable, Name: r.PathValue("name"), Schema: r.URL.Query().Get("schema")}
 
 	detail, err := e.exec.DescribeTable(r.Context(), ref)
+	if errors.Is(err, driver.ErrObjectNotFound) {
+		writeError(w, http.StatusNotFound, "OBJECT_NOT_FOUND", "resource",
+			err.Error(), "刷新表清单后重试", false)
+		return
+	}
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "SCHEMA_READ_FAILED", "internal", err.Error(), "", false)
 		return
@@ -742,9 +747,11 @@ func (s *Server) handleTableSchema(w http.ResponseWriter, r *http.Request) {
 }
 
 type schemaPlanRequest struct {
-	Table  model.ObjectRef    `json:"table"`
-	Action service.DDLAction  `json:"action"`
-	Column service.ColumnSpec `json:"column"`
+	Table      model.ObjectRef      `json:"table"`
+	Action     service.DDLAction    `json:"action"`
+	Column     service.ColumnSpec   `json:"column"`
+	Columns    []service.ColumnSpec `json:"columns"`
+	PrimaryKey []string             `json:"primary_key"`
 }
 
 // handleSchemaPlan 生成结构变更预案。执行走同一个 /changes/{pid}/apply。
@@ -762,6 +769,7 @@ func (s *Server) handleSchemaPlan(w http.ResponseWriter, r *http.Request) {
 
 	plan, err := e.exec.BuildDDLPlan(r.Context(), service.DDLRequest{
 		Table: req.Table, Action: req.Action, Column: req.Column,
+		Columns: req.Columns, PrimaryKey: req.PrimaryKey,
 	})
 	if errors.Is(err, service.ErrInvalidDDL) {
 		writeError(w, http.StatusBadRequest, "INVALID_COLUMN", "internal",

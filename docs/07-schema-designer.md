@@ -253,10 +253,11 @@ SELECT COUNT(*) FROM t WHERE c > 2147483647 OR c < -2147483648;
 |---|---|---|---|
 | 结构详情 | §1.1 | `GET /tables/{name}/schema` 返回列 / 索引 / 外键 / 主键 + DDL 原文；DDL 还原失败时仍返回结构并单给 `ddl_error`，不让整页打不开 | `TestSchemaLifecycle` |
 | 加列 / 删列 | §1.1（子集） | `POST /schema/plan`，`action` 为 `add_column` / `drop_column`；执行复用 `/changes/{id}/apply` | `TestDDLPlanAddColumn`、`TestDDLPlanDropColumnIsIrreversible` |
+| 建表 | §1.1（子集） | `action` 为 `create_table`，按列清单生成 `CREATE TABLE … PRIMARY KEY (…)`；**必须给主键**（无主键的新表在本工具里不可浏览、不可编辑），主键列强制 `NOT NULL`；回滚是 `DROP TABLE` | `TestDDLCreateTable`、`TestSchemaCreateTableAndUndo`、浏览器实测 |
 | 表单改动即时生成 DDL 且可见 | §1.2 / 验收 1 | 输入变化 250ms 后调 `?preview=1` 取服务端生成的语句并展示；预览不保管预案 | 浏览器实测 |
 | DDL 无法参数化的处理 | §1.2 引申 | 列名走 `QuoteIdent`；类型与默认值走正则白名单（拒绝分号、引号、表达式型默认值） | `TestDDLPlanRejectsBadInput`、`TestSchemaPlanRejectsInjection` |
 | 结构变更走同一套 Plan/Apply | §2.1 / ADR-0003 | 预案含语句、回滚、风险（`policy` 分级）、摩擦、有效期；确认后才执行 | `TestSchemaLifecycle` |
-| 前置条件：定义未变 | §2.5 / 验收 10 | 预案带表定义哈希，执行前比对，变了返回 `409 SCHEMA_CHANGED` 并让前端重读结构 | `TestDDLPlanSchemaChangedBlocks`、`TestDDLPlanOnRealEngines`（MySQL + PG） |
+| 前置条件：定义未变 | §2.5 / 验收 10 | 预案带表定义哈希，执行前比对，变了返回 `409 SCHEMA_CHANGED` 并让前端重读结构；建表则要求「执行时表仍不存在」（`ExpectTableAbsent`），别人抢先建了就停下 | `TestDDLPlanSchemaChangedBlocks`、`TestDDLCreateTableBlocksWhenTableAppeared`、`TestDDLPlanOnRealEngines`（MySQL + PG） |
 | DDL 事务性差异 | §2.3 / 验收 3 | 由 `Capabilities().DDLTransactional` 声明，预案据此设 `rolls_back_as_compensation`；MySQL 上提示「隐式提交，补偿不是撤销」 | `TestDDLPlanOnRealEngines`（MySQL 补偿 / PG 真回滚） |
 | 删列的影响面 | §5.2 | 展示该列**非空行数**（`COUNT(*) WHERE col IS NOT NULL`），并标 `不可逆`；NULL 行不计入 | 浏览器实测（3 行有值 → 显示「影响 3 行」） |
 | 加列可撤销 | §2.6 | 撤销预案 = `DROP COLUMN`，复用撤销通道；删列因数据丢失不生成撤销 | 浏览器实测（加列后撤销，结构与 DDL 复原） |
@@ -265,8 +266,8 @@ SELECT COUNT(*) FROM t WHERE c > 2147483647 OR c < -2147483648;
 
 | 缺口 | 契约位置 | 影响 | 处置 |
 |---|---|---|---|
-| 建表 / 改列类型 / 改默认值 / 改可空 | §1.1 | 只能加列与删列；改类型需要收窄预检，不想做半成品 | 待实现；改类型须先做 §5.2 的越界数据预检 |
-| 索引 / 外键 / 检查约束管理 | §1.1 | 不能建索引、加外键；`Capabilities().Indexes` 已声明但无写入路径 | 待实现 |
+| 改列类型 / 改默认值 / 改可空 | §1.1 | 只能建表、加列、删列；改类型需要收窄预检，不想做半成品 | 待实现；改类型须先做 §5.2 的越界数据预检 |
+| 索引 / 外键 / 检查约束管理 | §1.1 | 不能建索引、加外键；`Capabilities().Indexes` 已声明但无写入路径。注意 `DROP INDEX` 的语法跨引擎不同（MySQL 要 `ON table`），需要先在方言层声明而不是按引擎名判断 | 待实现；预计需要一份 ADR 记录「方言差异用能力/语法声明」 |
 | 视图 / 物化视图 / 例程 / 触发器 / 序列 / 用户类型设计器 | §1.1、§6 | 全部缺失 | 待实现 |
 | 引擎特有项（`EngineExtra`）表单 | §1.3 | 未渲染，仅能看 DDL 原文 | 待实现；依赖各引擎补充元数据 |
 | 在线变更建议（`CONCURRENTLY`、`ALGORITHM=INPLACE` 等） | §2.4 / 验收 4 | 无建议与「一键插入编辑器」 | 待实现 |

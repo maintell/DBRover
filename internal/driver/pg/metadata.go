@@ -202,6 +202,11 @@ func (c *Connector) DescribeTable(ctx context.Context, ref model.ObjectRef) (*mo
 	if err := c.loadColumns(ctx, h, schema, ref.Name, td); err != nil {
 		return nil, err
 	}
+	// pg_catalog 查不到表时只是返回空行，不会报错。
+	// 必须显式区分，否则上层拿到的是「零列的表」而不是「表不存在」。
+	if len(td.Columns) == 0 {
+		return nil, fmt.Errorf("%w: 表 %s", driver.ErrObjectNotFound, ref.Name)
+	}
 	if err := c.loadIndexes(ctx, h, schema, ref.Name, td); err != nil {
 		return nil, err
 	}

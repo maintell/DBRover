@@ -75,6 +75,10 @@ type MetadataProvider interface {
 }
 ```
 
+**缺失对象的契约**：`Describe*` 系列遇到不存在的对象必须返回包装了 `driver.ErrObjectNotFound` 的错误，**不得**返回一个零列的空结构。
+
+这条不是洁癖：`PRAGMA table_info`、`information_schema`、`pg_catalog` 对不存在的表都只是「查不到行」而不报错，一不小心就会把「表不存在」说成「表没有列」。上层会据此给出误导性提示（例如把建表失败说成「没有主键，无法编辑」），API 也会对已删除的表返回 200 空结构。由 `drivertest` 的 `DescribeMissingObjectErrors` 用例锁住。
+
 ### 2.3 可选能力（用能力接口 + 类型断言）
 
 ```go

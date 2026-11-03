@@ -219,7 +219,7 @@
     "/api/v1/connections/{id}/schema/plan": {
       "post": {
         "summary": "生成结构变更预案",
-        "description": "v1 只支持 add_column / drop_column。执行走同一个 /changes/{pid}/apply；预案带表定义哈希，执行前比对，变了就返回 409 SCHEMA_CHANGED。",
+        "description": "v1 支持 create_table / add_column / drop_column。执行走同一个 /changes/{pid}/apply；预案带表定义哈希（建表则要求执行时表仍不存在），变了就返回 409 SCHEMA_CHANGED。建表必须给主键。",
         "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "string" } }],
         "requestBody": {
           "required": true,
@@ -227,10 +227,10 @@
             "application/json": {
               "schema": {
                 "type": "object",
-                "required": ["table", "action", "column"],
+                "required": ["table", "action"],
                 "properties": {
                   "table": { "type": "object" },
-                  "action": { "type": "string", "enum": ["add_column", "drop_column"] },
+                  "action": { "type": "string", "enum": ["create_table", "add_column", "drop_column"] },
                   "column": {
                     "type": "object",
                     "required": ["name"],
@@ -240,7 +240,9 @@
                       "nullable": { "type": "boolean" },
                       "default": { "type": "string", "description": "只接受字面量" }
                     }
-                  }
+                  },
+                  "columns": { "type": "array", "items": { "type": "object" }, "description": "create_table 用" },
+                  "primary_key": { "type": "array", "items": { "type": "string" }, "description": "create_table 用，必须非空" }
                 }
               }
             }

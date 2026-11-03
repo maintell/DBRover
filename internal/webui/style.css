@@ -312,3 +312,23 @@ label.inline {
   font-size: 12px;
 }
 .card p.warn { color: var(--warn); }
+
+/* 建表的列行：一行一组输入，删列是行内小按钮。 */
+.col-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+.col-row input.col-name { width: 160px; }
+.col-row input.col-type { width: 150px; }
+.col-row input.col-default { width: 140px; }
+.col-row button.col-del {
+  border: 1px solid #3d4453;
+  background: transparent;
+  color: var(--muted);
+  border-radius: 4px;
+  padding: 0 8px;
+  cursor: pointer;
+}
+.col-row button.col-del:hover { color: var(--danger); border-color: #7c2f2b; }

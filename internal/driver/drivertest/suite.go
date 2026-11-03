@@ -46,7 +46,22 @@ func Run(t *testing.T, cfg Config) {
 	t.Run("KeysetSQLSupported", func(t *testing.T) { testKeysetPagination(t, cfg) })
 	t.Run("TransactionRollback", func(t *testing.T) { testTxRollback(t, cfg) })
 	t.Run("ReadOnlyRejectsWrite", func(t *testing.T) { testReadOnlyRejectsWrite(t, cfg) })
+	t.Run("DescribeMissingObjectErrors", func(t *testing.T) { testDescribeMissingObject(t, cfg) })
 	t.Run("DDLRoundTrip", func(t *testing.T) { testDDLRoundTrip(t, cfg) })
+}
+
+// testDescribeMissingObject 锁住一条契约：描述不存在的对象必须返回错误。
+//
+// 为什么必须测：PRAGMA table_info 与 information_schema 对不存在的表都只是
+// 「查不到行」，一不留神就返回一个「零列的表结构」。上层据此无法区分
+// 「表不存在」与「表没有列」，会给出误导性的提示（例如把建表失败说成没有主键）。
+func testDescribeMissingObject(t *testing.T, cfg Config) {
+	c := open(t, cfg, false)
+	ref := model.ObjectRef{Kind: model.KindTable, Name: "dbrover_no_such_table_zzz"}
+	td, err := c.Meta().DescribeTable(context.Background(), ref)
+	if err == nil {
+		t.Fatalf("描述不存在的表应报错，实际返回了 %d 列的结构", len(td.Columns))
+	}
 }
 
 func open(t *testing.T, cfg Config, readOnly bool) driver.Connector {

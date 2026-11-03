@@ -3,6 +3,7 @@ package mysql
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"strings"
 
 	"github.com/maintell/DBRover/internal/driver"
@@ -196,6 +197,11 @@ func (c *Connector) DescribeTable(ctx context.Context, ref model.ObjectRef) (*mo
 
 	if err := c.loadColumns(ctx, h, db, ref.Name, td); err != nil {
 		return nil, err
+	}
+	// information_schema 对不存在的表只是查不到行，不会报错。
+	// 必须显式区分，否则上层拿到的是「零列的表」而不是「表不存在」。
+	if len(td.Columns) == 0 {
+		return nil, fmt.Errorf("%w: 表 %s", driver.ErrObjectNotFound, ref.Name)
 	}
 	if err := c.loadIndexes(ctx, h, db, ref.Name, td); err != nil {
 		return nil, err

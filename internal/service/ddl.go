@@ -30,8 +30,9 @@ var ErrInvalidDDL = errors.New("结构变更参数不合法")
 type DDLAction string
 
 const (
-	DDLAddColumn  DDLAction = "add_column"
-	DDLDropColumn DDLAction = "drop_column"
+	DDLAddColumn   DDLAction = "add_column"
+	DDLDropColumn  DDLAction = "drop_column"
+	DDLCreateTable DDLAction = "create_table"
 )
 
 // ColumnSpec 是加列时的列定义。
@@ -46,7 +47,13 @@ type ColumnSpec struct {
 type DDLRequest struct {
 	Table  model.ObjectRef `json:"table"`
 	Action DDLAction       `json:"action"`
-	Column ColumnSpec      `json:"column"`
+	// Column 用于 add_column / drop_column。
+	Column ColumnSpec `json:"column"`
+	// Columns 与 PrimaryKey 只在 create_table 时有意义。
+	// v1 要求必须给主键：没有主键的新表在本工具里不可编辑（浏览要键集分页），
+	// 建出来只会让人困惑。
+	Columns    []ColumnSpec `json:"columns"`
+	PrimaryKey []string     `json:"primary_key"`
 }
 
 // typePattern 限定类型声明的字符集。
@@ -129,6 +136,22 @@ func normalizeColumn(spec ColumnSpec) (ColumnSpec, error) {
 	return out, nil
 }
 
+// tableExists 判断表是否存在。
+// 用对象清单而不是「DescribeTable 是否报错」：后者分不清「不存在」与「读失败」，
+// 把读失败当成不存在去建表，就会撞上引擎的 already exists。
+func (e *Executor) tableExists(ctx context.Context, ref model.ObjectRef) (bool, error) {
+	objs, err := e.conn.Meta().Objects(ctx, ref.Catalog, schemaOf(ref, e.cfgSchema()), model.KindTable)
+	if err != nil {
+		return false, err
+	}
+	for _, o := range objs {
+		if strings.EqualFold(o.Name, ref.Name) {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
 // columnDefinition 由列定义拼出 DDL 片段。
 func (e *Executor) columnDefinition(spec ColumnSpec) string {
 	parts := []string{e.dialect.QuoteIdent(spec.Name), spec.Type}
@@ -203,6 +226,11 @@ func (e *Executor) countNonNull(ctx context.Context, table, column string) int64
 //   - DDL 无法参数化，列名走 QuoteIdent、类型与默认值走白名单；
 //   - 预案带一个「表定义哈希」，执行前比对，防止拿旧结构去改别人已经改过的表。
 func (e *Executor) BuildDDLPlan(ctx context.Context, req DDLRequest) (*ChangePlan, error) {
+	// 建表没有「现有结构」可读，走单独分支。
+	if req.Action == DDLCreateTable {
+		return e.buildCreateTablePlan(ctx, req)
+	}
+
 	td, err := e.conn.Meta().DescribeTable(ctx, req.Table)
 	if err != nil {
 		return nil, err
@@ -280,6 +308,13 @@ func (e *Executor) BuildDDLPlan(ctx context.Context, req DDLRequest) (*ChangePla
 	}
 
 	// 引擎的 DDL 在隐式提交时不参与事务，回滚语句只是补偿。
+	e.finishDDLPlan(plan)
+	return plan, nil
+}
+
+// finishDDLPlan 补上风险、摩擦与回滚语义。
+// 结构变更与数据变更共用同一套分级：不因为「是 DDL」就给个特例等级。
+func (e *Executor) finishDDLPlan(plan *ChangePlan) {
 	plan.RollsBackAsCompensation = !e.conn.Capabilities().DDLTransactional
 
 	var highest policy.Level
@@ -295,5 +330,97 @@ func (e *Executor) BuildDDLPlan(ctx context.Context, req DDLRequest) (*ChangePla
 		RowsAffected:       plan.AffectedRows,
 		ReadOnlyConnection: !e.mode.AllowsWrite(),
 	})
+}
+
+// buildCreateTablePlan 生成建表预案。
+//
+// v1 要求必须给主键：没有主键的新表在本工具里既不能浏览（键集分页）也不能改，
+// 建出来只会让人困惑。这条约束写在预案校验里，而不是事后提示。
+func (e *Executor) buildCreateTablePlan(ctx context.Context, req DDLRequest) (*ChangePlan, error) {
+	name := strings.TrimSpace(req.Table.Name)
+	if name == "" {
+		return nil, fmt.Errorf("%w: 表名不能为空", ErrInvalidDDL)
+	}
+	if len(req.Columns) == 0 {
+		return nil, fmt.Errorf("%w: 至少要有一列", ErrInvalidDDL)
+	}
+	if len(req.PrimaryKey) == 0 {
+		return nil, fmt.Errorf("%w: 必须指定主键（无主键的新表在本工具里不可浏览、不可编辑）", ErrInvalidDDL)
+	}
+
+	specs := make([]ColumnSpec, 0, len(req.Columns))
+	byName := make(map[string]int, len(req.Columns))
+	for _, c := range req.Columns {
+		spec, err := normalizeColumn(c)
+		if err != nil {
+			return nil, err
+		}
+		key := strings.ToLower(spec.Name)
+		if _, dup := byName[key]; dup {
+			return nil, fmt.Errorf("%w: 列 %q 重复", ErrInvalidDDL, spec.Name)
+		}
+		byName[key] = len(specs)
+		specs = append(specs, spec)
+	}
+
+	// 主键列必须真实存在；同时主键列一律 NOT NULL，让引擎与工具对「能不能为空」有同一个答案。
+	pkNames := make([]string, 0, len(req.PrimaryKey))
+	pkSeen := make(map[string]bool, len(req.PrimaryKey))
+	for _, pk := range req.PrimaryKey {
+		canonical, err := normalizeColumnName(pk)
+		if err != nil {
+			return nil, err
+		}
+		key := strings.ToLower(canonical)
+		idx, ok := byName[key]
+		if !ok {
+			return nil, fmt.Errorf("%w: 主键列 %q 不在列清单里", ErrInvalidDDL, canonical)
+		}
+		if pkSeen[key] {
+			return nil, fmt.Errorf("%w: 主键列 %q 重复", ErrInvalidDDL, canonical)
+		}
+		pkSeen[key] = true
+		specs[idx].Nullable = false
+		pkNames = append(pkNames, specs[idx].Name)
+	}
+
+	exists, err := e.tableExists(ctx, req.Table)
+	if err != nil {
+		return nil, err
+	}
+	if exists {
+		return nil, fmt.Errorf("%w: 表 %q 已存在", ErrInvalidDDL, name)
+	}
+
+	table := e.dialect.QuoteQualified(schemaOf(req.Table, e.cfgSchema()), name)
+	defs := make([]string, 0, len(specs)+1)
+	for _, s := range specs {
+		defs = append(defs, e.columnDefinition(s))
+	}
+	pkCols := make([]string, 0, len(pkNames))
+	for _, c := range pkNames {
+		pkCols = append(pkCols, e.dialect.QuoteIdent(c))
+	}
+	defs = append(defs, "PRIMARY KEY ("+strings.Join(pkCols, ", ")+")")
+
+	plan := &ChangePlan{
+		ID:        "ddl-" + newID(),
+		Table:     model.ObjectRef{Kind: model.KindTable, Name: name, Schema: req.Table.Schema, Catalog: req.Table.Catalog},
+		CreatedAt: time.Now(),
+		ExpiresAt: time.Now().Add(planTTL),
+		DDL:       true,
+		// 建表没有旧定义可比，改为要求「执行时表仍然不存在」。
+		ExpectTableAbsent: true,
+		Statements: []PlanStatement{{
+			SQL:        "CREATE TABLE " + table + " (" + strings.Join(defs, ", ") + ")",
+			ExpectRows: -1,
+		}},
+		Rollback: []PlanStatement{{
+			SQL:        "DROP TABLE " + table,
+			ExpectRows: -1,
+		}},
+		AffectedRows: 0,
+	}
+	e.finishDDLPlan(plan)
 	return plan, nil
 }

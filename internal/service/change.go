@@ -74,6 +74,9 @@ type ChangePlan struct {
 	// ExpectDDLHash 是生成预案时看到的表定义哈希，执行前比对。
 	// 只在服务端保管，不对外暴露（客户端不需要，也不该能改）。
 	ExpectDDLHash string `json:"-"`
+	// ExpectTableAbsent 为 true 时，执行前要求目标表仍然不存在。
+	// 这是建表预案的竞态保护：别人先建了同名表，就不该再按计划去建。
+	ExpectTableAbsent bool `json:"-"`
 }
 
 // ChangeSetRequest 是构建预案的输入。
@@ -323,6 +326,19 @@ func (e *Executor) ApplyChangePlan(ctx context.Context, plan *ChangePlan, req Re
 				Code: "SCHEMA_CHANGED", Category: "constraint",
 				Message: ErrSchemaChanged.Error(),
 				Hint:    "重新打开结构页生成新的预案",
+			}
+			out.Duration = time.Since(started)
+			e.record(actor, req, out, "error", plan.Table.Name, out.Err.Message)
+			return out, nil
+		}
+	}
+	// 建表的竞态保护：别人已经建了同名表就停手，别去撞引擎的 already exists。
+	if plan.ExpectTableAbsent {
+		if exists, err := e.tableExists(ctx, plan.Table); err == nil && exists {
+			out.Err = &ExecError{
+				Code: "SCHEMA_CHANGED", Category: "constraint",
+				Message: "表已存在，建表预案作废",
+				Hint:    "刷新表清单后重试",
 			}
 			out.Duration = time.Since(started)
 			e.record(actor, req, out, "error", plan.Table.Name, out.Err.Message)

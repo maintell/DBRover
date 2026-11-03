@@ -747,6 +747,150 @@ async function applyPlan(pid, token, after) {
   }
 }
 
+// ---------- 建表 ----------
+
+const CREATE_ROW = () =>
+  '<div class="col-row">' +
+  '<input class="col-name" placeholder="列名" autocomplete="off" spellcheck="false">' +
+  '<input class="col-type" placeholder="类型" list="sch-types" autocomplete="off" spellcheck="false">' +
+  '<label class="inline"><input type="checkbox" class="col-nullable" checked> 可空</label>' +
+  '<input class="col-default" placeholder="默认值" autocomplete="off" spellcheck="false">' +
+  '<button class="col-del" title="移除这一列">×</button>' +
+  '</div>';
+
+function showCreateTable() {
+  if (!state.current) {
+    showNotice('请先建立连接。', 'warn');
+    return;
+  }
+  state.view = 'create';
+  state.tableName = '';
+  state.columns = [];
+  state.filter = [];
+  state.order = null;
+  state.undo = null;
+  $('table-toolbar').hidden = true;
+  updatePendingBar();
+
+  const wrap = document.createElement('div');
+  wrap.className = 'schema';
+  wrap.innerHTML =
+    '<div class="toolbar">' +
+    '<input id="ct-name" class="narrow" placeholder="表名" autocomplete="off" spellcheck="false">' +
+    '<input id="ct-pk" class="narrow" placeholder="主键（逗号分隔）" autocomplete="off" spellcheck="false">' +
+    '<button id="ct-addcol">添加列</button>' +
+    '<button id="ct-submit" class="primary">建表</button>' +
+    '</div>' +
+    '<datalist id="sch-types">' + TYPES.map((t) => '<option value="' + t + '"></option>').join('') + '</datalist>' +
+    '<div id="ct-cols"></div>' +
+    '<pre id="ct-preview" class="preview">填表名、列与主键后显示将执行的语句。</pre>';
+
+  $('results').replaceChildren(wrap);
+  addCreateRow();
+  addCreateRow();
+
+  $('ct-addcol').onclick = () => addCreateRow();
+  $('ct-submit').onclick = () => submitCreateTable();
+  for (const id of ['ct-name', 'ct-pk']) {
+    $(id).oninput = () => scheduleCreatePreview();
+  }
+  setStatus('新建表 · 先填列，再指定主键');
+}
+
+function addCreateRow() {
+  const box = $('ct-cols');
+  if (!box) return;
+  const holder = document.createElement('div');
+  holder.innerHTML = CREATE_ROW();
+  const row = holder.firstElementChild;
+  row.querySelector('.col-del').onclick = () => {
+    row.remove();
+    scheduleCreatePreview();
+  };
+  for (const sel of ['.col-name', '.col-type', '.col-default', '.col-nullable']) {
+    row.querySelector(sel).oninput = () => scheduleCreatePreview();
+  }
+  box.appendChild(row);
+  scheduleCreatePreview();
+}
+
+let createTimer = null;
+
+function scheduleCreatePreview() {
+  clearTimeout(createTimer);
+  createTimer = setTimeout(previewCreateTable, 250);
+}
+
+// collectCreate 把表单读成请求体。DOM 顺序即列顺序。
+function collectCreate() {
+  const body = {
+    table: { kind: 'table', name: $('ct-name').value.trim() },
+    action: 'create_table',
+    columns: [],
+    primary_key: $('ct-pk').value.split(/[,，\s]+/).filter(Boolean),
+  };
+  const rows = $('ct-cols').querySelectorAll('.col-row');
+  for (const row of rows) {
+    const name = row.querySelector('.col-name').value.trim();
+    const type = row.querySelector('.col-type').value.trim();
+    if (!name && !type) continue; // 空行直接忽略，别逼用户删
+    const col = { name, type, nullable: row.querySelector('.col-nullable').checked };
+    const def = row.querySelector('.col-default').value.trim();
+    if (def) col.default = def;
+    body.columns.push(col);
+  }
+  return body;
+}
+
+async function previewCreateTable() {
+  const box = $('ct-preview');
+  if (!box) return;
+  const body = collectCreate();
+  if (!body.table.name || !body.columns.length) {
+    box.textContent = '填表名、列与主键后显示将执行的语句。';
+    return;
+  }
+  try {
+    const plan = await api(path(API.schemaPlan, { id: state.current.id }) + '?preview=1', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    });
+    box.textContent = (plan.statements || []).map((s) => s.sql).join(';\n');
+  } catch (e) {
+    box.textContent = '参数不合法：' + e.message;
+  }
+}
+
+async function submitCreateTable() {
+  const body = collectCreate();
+  if (!body.table.name) { showNotice('表名不能为空。', 'warn'); return; }
+  if (!body.columns.length) { showNotice('至少要有一列。', 'warn'); return; }
+  if (!body.primary_key.length) {
+    showNotice('必须指定主键：无主键的新表在本工具里既不能浏览也不能编辑。', 'warn');
+    return;
+  }
+
+  let plan;
+  try {
+    plan = await api(path(API.schemaPlan, { id: state.current.id }), {
+      method: 'POST',
+      body: JSON.stringify(body),
+    });
+  } catch (e) {
+    showNotice('生成建表预案失败：' + e.message, 'error');
+    return;
+  }
+  if (!(await confirmPlan(plan))) return;
+
+  const created = body.table.name;
+  await applyPlan(plan.id, undefined, async () => {
+    await loadTables();
+    state.tableName = created;
+    state.view = 'schema';
+    await refreshSchema();
+  });
+}
+
 // ---------- 结构 ----------
 
 // TYPES 是常见类型的快捷项。类型仍可手填：白名单在服务端，
@@ -768,6 +912,18 @@ async function refreshSchema() {
     state.schema = out;
     renderSchema(out);
   } catch (e) {
+    if (e.code === 'OBJECT_NOT_FOUND') {
+      // 表刚被删掉（例如撤销了一次建表）：回清单，不要对着消失的表报错。
+      state.tableName = '';
+      $('table-toolbar').hidden = true;
+      const hint = document.createElement('div');
+      hint.className = 'notice';
+      hint.textContent = '这张表已经不存在了，已回到对象清单。';
+      $('results').replaceChildren(hint);
+      setStatus('');
+      await loadTables();
+      return;
+    }
     showNotice('读取结构失败：' + e.message, 'error');
   }
 }
@@ -1238,6 +1394,7 @@ $('token').addEventListener('keydown', (e) => {
 
 $('conn').onchange = (e) => selectConnection(e.target.value);
 $('btn-reload').onclick = () => loadTables();
+$('btn-new-table').onclick = () => showCreateTable();
 $('btn-forget').onclick = () => {
   forgetToken();
   location.reload();

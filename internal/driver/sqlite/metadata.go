@@ -159,6 +159,11 @@ func (c *Connector) DescribeTable(ctx context.Context, ref model.ObjectRef) (*mo
 	if err := c.loadColumns(ctx, h, qual, name, td); err != nil {
 		return nil, err
 	}
+	// PRAGMA table_info 对不存在的表只是返回空结果集，不会报错。
+	// 这里必须显式区分：否则上层会把「表不存在」当成「表没有列」。
+	if len(td.Columns) == 0 {
+		return nil, fmt.Errorf("%w: 表 %s", driver.ErrObjectNotFound, ref.Name)
+	}
 	if err := c.loadIndexes(ctx, h, qual, name, td); err != nil {
 		return nil, err
 	}
