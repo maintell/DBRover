@@ -107,6 +107,7 @@ func (s *Server) routes() []route {
 		{http.MethodPost, "/api/v1/connections/{id}/schema/plan", false, s.handleSchemaPlan},
 		{http.MethodPost, "/api/v1/connections/{id}/bulk/plan", false, s.handleBulkPlan},
 		{http.MethodPost, "/api/v1/compare", false, s.handleCompare},
+		{http.MethodPost, "/api/v1/connections/{id}/fk/precheck", false, s.handleFKPrecheck},
 		{http.MethodPost, "/api/v1/changes/{pid}/apply", false, s.handleChangeApply},
 		{http.MethodPost, "/api/v1/connections/{id}/query", false, s.handleQuery},
 		{http.MethodGet, "/api/v1/results/{cid}/page", false, s.handlePage},
@@ -912,6 +913,44 @@ func (s *Server) handleCompare(w http.ResponseWriter, r *http.Request) {
 	res, err := service.Compare(r.Context(), left.drv, right.drv)
 	if err != nil {
 		writeError(w, http.StatusBadGateway, "COMPARE_FAILED", "internal", err.Error(), "", true)
+		return
+	}
+	writeJSON(w, http.StatusOK, res)
+}
+
+type fkPrecheckRequest struct {
+	Child      model.ObjectRef `json:"child"`
+	Parent     model.ObjectRef `json:"parent"`
+	Columns    []string        `json:"columns"`
+	RefColumns []string        `json:"ref_columns"`
+}
+
+// handleFKPrecheck 检查「现在加这个外键会不会踩到既有数据」。
+//
+// 只读。加外键的 DDL 生成暂未实现：SQLite 不支持 ALTER TABLE ADD CONSTRAINT，
+// 而 MySQL/PG 目前没有可用的真机环境验收，先把不会出错的那半做出来。
+func (s *Server) handleFKPrecheck(w http.ResponseWriter, r *http.Request) {
+	e, ok := s.lookup(r)
+	if !ok {
+		writeError(w, http.StatusNotFound, "CONNECTION_NOT_FOUND", "connection", "连接不存在", "", false)
+		return
+	}
+	var req fkPrecheckRequest
+	if err := decode(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, "REQUEST_INVALID", "internal", err.Error(), "", false)
+		return
+	}
+
+	res, err := e.exec.PrecheckForeignKey(r.Context(), service.FKPrecheckRequest{
+		Child: req.Child, Parent: req.Parent,
+		Columns: req.Columns, RefColumns: req.RefColumns,
+	})
+	if errors.Is(err, service.ErrInvalidDDL) {
+		writeError(w, http.StatusBadRequest, "REQUEST_INVALID", "internal", err.Error(), "", false)
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusBadGateway, "FK_PRECHECK_FAILED", "internal", err.Error(), "", true)
 		return
 	}
 	writeJSON(w, http.StatusOK, res)

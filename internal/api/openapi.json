@@ -613,6 +613,36 @@
         }
       }
     },
+    "/api/v1/connections/{id}/fk/precheck": {
+      "post": {
+        "summary": "加外键前的孤儿数据预检（只读）",
+        "description": "检查子表是否存在父表找不到对应行的数据，并判断父表参与列是否唯一（主键或列集合完全一致的唯一索引）。任一子列为 NULL 的行不计入孤儿。orphans>0 时 blocked=true 并给最多 5 条样本。注意：本端点不生成加外键的 DDL——SQLite 不支持 ALTER TABLE ADD CONSTRAINT，MySQL/PG 暂无可用真机验收。",
+        "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "string" } }],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["child", "parent", "columns", "ref_columns"],
+                "properties": {
+                  "child": { "type": "object" },
+                  "parent": { "type": "object" },
+                  "columns": { "type": "array", "items": { "type": "string" } },
+                  "ref_columns": { "type": "array", "items": { "type": "string" } }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": { "description": "orphans / samples / parent_unique / blocked / reason" },
+          "400": { "description": "参数不合法（REQUEST_INVALID）" },
+          "404": { "description": "连接不存在" },
+          "502": { "description": "预检执行失败（FK_PRECHECK_FAILED）" }
+        }
+      }
+    },
     "/api/v1/audit": {
       "get": {
         "summary": "审计事件",
