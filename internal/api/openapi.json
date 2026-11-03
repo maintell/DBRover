@@ -677,7 +677,7 @@
     "/api/v1/connections/{id}/kv/command": {
       "post": {
         "summary": "命令模式（第一版只放行只读命令）",
-        "description": "结构化命令名 + 参数，不做自由文本解析。风险分级见 ADR-0007 §3：risk > R1（写/高危）一律 403 POLICY_WRITE_NOT_ENABLED，因为写路径要过审批与审计，尚未做；KEYS 与 DEBUG 直接拒绝（POLICY_COMMAND_BLOCKED）并给出替代方案。",
+        "description": "结构化命令名 + 参数，不做自由文本解析。走与 SQL 同一套执行门：风险分级（ADR-0007 §3）→ 摩擦 → 审批 → 审计。需要确认的命令返回 428 并签发绑定**命令指纹**的凭证；只读连接上的写命令返回 403 POLICY_READ_ONLY（与 SQL 同一条规则）；KEYS 与 DEBUG 直接 403 POLICY_COMMAND_BLOCKED 并给替代方案。",
         "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "string" } }],
         "requestBody": {
           "required": true,
@@ -686,15 +686,53 @@
             "required": ["name"],
             "properties": {
               "name": { "type": "string", "description": "命令名，如 GET / TTL / SCAN" },
-              "args": { "type": "array", "items": {} }
+              "args": { "type": "array", "items": {} },
+              "approval_token": { "type": "string", "description": "428 响应里签发的凭证，绑定命令指纹" }
             }
           } } }
         },
         "responses": {
-          "200": { "description": "命令结果（rows）+ changed=-1 表示未知" },
+          "200": { "description": "命令结果：risk / friction / result（result.changed=-1 表示未知）" },
           "400": { "description": "请求非法或连接不是 key-value" },
-          "403": { "description": "命令被拒（POLICY_COMMAND_BLOCKED / POLICY_WRITE_NOT_ENABLED）" },
-          "502": { "description": "执行失败（KV_COMMAND_FAILED）" }
+          "403": { "description": "命令被拒（POLICY_COMMAND_BLOCKED / POLICY_READ_ONLY）" },
+          "409": { "description": "审批凭证与当前命令不匹配（POLICY_APPROVAL_MISMATCH）" },
+          "428": { "description": "需要确认（POLICY_APPROVAL_REQUIRED），带 approval.token" },
+          "502": { "description": "执行失败" }
+        }
+      }
+    },    "/api/v1/connections/{id}/kv/apply": {
+      "post": {
+        "summary": "key-value 结构化写操作",
+        "description": "一次写一个 key（SET / HSET / DEL / HDEL / RPUSH / EXPIRE）。与命令模式共用同一道门：分级 → 摩擦 → 审批 → 审计。「命令模式的写」还没有单独开放——写要走这里，因为它带着明确的操作语义，比一条裸命令更容易分级与审计。",
+        "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "string" } }],
+        "requestBody": {
+          "required": true,
+          "content": { "application/json": { "schema": {
+            "type": "object",
+            "required": ["mutation"],
+            "properties": {
+              "mutation": {
+                "type": "object",
+                "required": ["kind", "key"],
+                "properties": {
+                  "kind": { "type": "string", "enum": ["set_string", "set_field", "delete_key", "delete_item", "push", "expire"] },
+                  "key": { "type": "string" },
+                  "field": { "type": "string" },
+                  "value": { "type": "string" },
+                  "member": { "type": "string" },
+                  "ttl_seconds": { "type": "integer" }
+                }
+              },
+              "approval_token": { "type": "string" }
+            }
+          } } }
+        },
+        "responses": {
+          "200": { "description": "已执行：risk / friction / result" },
+          "400": { "description": "请求非法或连接不是 key-value" },
+          "403": { "description": "被策略拒绝（POLICY_READ_ONLY / POLICY_COMMAND_BLOCKED）" },
+          "409": { "description": "审批凭证与当前操作不匹配（POLICY_APPROVAL_MISMATCH）" },
+          "428": { "description": "需要确认（POLICY_APPROVAL_REQUIRED）" }
         }
       }
     },    "/api/v1/compare": {

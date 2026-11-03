@@ -62,6 +62,9 @@ type entry struct {
 	drv  driver.Connector
 	kv   driver.KVConnector
 	exec *service.Executor
+	// kvexec 是 key-value 的执行门（风险 → 摩擦 → 审批 → 审计），
+	// 与关系型的 exec 同构但分开实现（ADR-0007）。
+	kvexec *service.KVExecutor
 }
 
 // New 创建服务。token 为空时随机生成。
@@ -170,6 +173,7 @@ func (s *Server) routes() []route {
 		{http.MethodGet, "/api/v1/connections/{id}/kv/entry", false, s.handleKVEntry},
 		{http.MethodGet, "/api/v1/connections/{id}/kv/value", false, s.handleKVValue},
 		{http.MethodPost, "/api/v1/connections/{id}/kv/command", false, s.handleKVCommand},
+		{http.MethodPost, "/api/v1/connections/{id}/kv/apply", false, s.handleKVApply},
 	}
 }
 
@@ -445,6 +449,7 @@ func (s *Server) handleCreateConnection(w http.ResponseWriter, r *http.Request) 
 		e.exec = service.NewExecutor(v, env, mode, s.audit)
 	case driver.KVConnector:
 		e.kv = v
+		e.kvexec = service.NewKVExecutor(v, env, mode, s.audit)
 	default:
 		s.mu.Unlock()
 		writeError(w, http.StatusBadGateway, "DB_CONNECT_FAILED", "connection",
@@ -1655,38 +1660,120 @@ func (s *Server) handleKVValue(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, val)
 }
 
+// kvApplyRequest 是 /kv/apply 的请求体：一次结构化的写操作。
+type kvApplyRequest struct {
+	Mutation      driver.KVMutation `json:"mutation"`
+	ApprovalToken string            `json:"approval_token"`
+}
+
 // handleKVCommand 是命令模式的入口。
 //
-// **第一版只放行只读命令**（风险 R0/R1）：写路径要过审批与审计，那是
-// service.KVGuard 的活，还没做。这里宁可窄，也不给一个能绕过只读的口子。
+// 走与 SQL 同一套执行门（service.KVExecutor）：分级 → 摩擦 → 审批 → 审计。
+// 被策略封禁的命令（KEYS / DEBUG）直接 403；需要确认的命令返回 428 并带上
+// 绑定**命令指纹**的凭证——拿 A 的凭证执行 B 会被拒。
 func (s *Server) handleKVCommand(w http.ResponseWriter, r *http.Request) {
-	kv, ok := s.kvConn(w, r)
+	e, ok := s.lookup(r)
 	if !ok {
+		writeError(w, http.StatusNotFound, "CONNECTION_NOT_FOUND", "connection", "连接不存在", "", false)
+		return
+	}
+	if e.kvexec == nil {
+		writeError(w, http.StatusBadRequest, "CAPABILITY_UNSUPPORTED", "internal",
+			"这是一个关系型连接，没有命令模式", "改用 POST /connections/{id}/exec", false)
 		return
 	}
 	var req struct {
-		Name string `json:"name"`
-		Args []any  `json:"args"`
+		Name          string `json:"name"`
+		Args          []any  `json:"args"`
+		ApprovalToken string `json:"approval_token"`
 	}
 	if err := decode(r, &req); err != nil {
 		writeError(w, http.StatusBadRequest, "REQUEST_INVALID", "internal", err.Error(), "", false)
 		return
 	}
-	if reason, blocked := policy.RedisCommandBlocked(req.Name); blocked {
-		writeError(w, http.StatusForbidden, "POLICY_COMMAND_BLOCKED", "policy", reason,
-			"用 keyspace 浏览器或命令里的替代写法", false)
+
+	fp := service.CommandFingerprint(req.Name, req.Args)
+	approved := false
+	if req.ApprovalToken != "" {
+		if !s.verifyApproval(req.ApprovalToken, fp) {
+			writeError(w, http.StatusConflict, "POLICY_APPROVAL_MISMATCH", "policy",
+				"审批凭证无效、已过期，或与当前命令不匹配", "重新执行一次取得新凭证", false)
+			return
+		}
+		approved = true
+	}
+
+	out := e.kvexec.ExecuteCommand(r.Context(), service.KVCommandRequest{
+		Name: req.Name, Args: req.Args, Approval: approved, StatementHash: fp,
+	}, "human:http")
+	s.writeKVOutcome(w, out, fp)
+}
+
+// handleKVApply 是结构化写操作的入口。
+func (s *Server) handleKVApply(w http.ResponseWriter, r *http.Request) {
+	e, ok := s.lookup(r)
+	if !ok {
+		writeError(w, http.StatusNotFound, "CONNECTION_NOT_FOUND", "connection", "连接不存在", "", false)
 		return
 	}
-	if level, reason := policy.RedisCommandRisk(req.Name); level > policy.R1 {
-		writeError(w, http.StatusForbidden, "POLICY_WRITE_NOT_ENABLED", "policy",
-			fmt.Sprintf("%s 属于写/高危命令（%s：%s），命令模式的写路径尚未开放", req.Name, level, reason),
-			"写操作将在下一阶段连同审批与审计一起开放", false)
+	if e.kvexec == nil {
+		writeError(w, http.StatusBadRequest, "CAPABILITY_UNSUPPORTED", "internal",
+			"这是一个关系型连接，没有 key-value 写操作", "改用 /changes/plan + /changes/{pid}/apply", false)
 		return
 	}
-	res, err := kv.Command(r.Context(), req.Name, req.Args)
-	if err != nil {
-		writeError(w, http.StatusBadGateway, "KV_COMMAND_FAILED", "internal", err.Error(), "", true)
+	var req kvApplyRequest
+	if err := decode(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, "REQUEST_INVALID", "internal", err.Error(), "", false)
 		return
 	}
-	writeJSON(w, http.StatusOK, res)
+
+	fp := service.MutationFingerprint(req.Mutation)
+	approved := false
+	if req.ApprovalToken != "" {
+		if !s.verifyApproval(req.ApprovalToken, fp) {
+			writeError(w, http.StatusConflict, "POLICY_APPROVAL_MISMATCH", "policy",
+				"审批凭证无效、已过期，或与当前操作不匹配", "重新提交取得新凭证", false)
+			return
+		}
+		approved = true
+	}
+
+	out := e.kvexec.ApplyMutation(r.Context(), service.KVMutationRequest{
+		Op: req.Mutation, Approval: approved, StatementHash: fp,
+	}, "human:http")
+	s.writeKVOutcome(w, out, fp)
+}
+
+// writeKVOutcome 把执行门的结果映射成 HTTP。与 SQL 路径的映射保持同构：
+// 被审批拦下 → 428 并签发凭证；被策略阻断 → 403；执行出错 → 502。
+func (s *Server) writeKVOutcome(w http.ResponseWriter, out *service.KVOutcome, fingerprint string) {
+	switch {
+	case out.ApprovalRequired:
+		exp := time.Now().Add(approvalTTL)
+		writeJSON(w, http.StatusPreconditionRequired, errorBody{Error: errorDetail{
+			Code: "POLICY_APPROVAL_REQUIRED", Category: "policy",
+			Message: out.Reason,
+			Hint:    "确认命令与风险后，用返回的 token 作为 approval_token 重新提交",
+			Approval: &approvalInfo{
+				StatementHash: fingerprint,
+				ExpiresAt:     exp.UTC().Format(time.RFC3339),
+				Token:         s.approvalToken(fingerprint, exp),
+			},
+		}})
+	case out.Blocked:
+		code, hint := "POLICY_COMMAND_BLOCKED", "用 keyspace 浏览器或命令里的替代写法"
+		if out.ReadOnly {
+			code, hint = "POLICY_READ_ONLY", "换一个只读命令，或新建读写连接"
+		}
+		writeError(w, http.StatusForbidden, code, "policy", out.Reason, hint, false)
+	case out.Err != nil:
+		writeError(w, http.StatusBadGateway, out.Err.Code, out.Err.Category,
+			out.Err.Message, out.Err.Hint, out.Err.Retryable)
+	default:
+		writeJSON(w, http.StatusOK, map[string]any{
+			"risk":     out.Risk.String(),
+			"friction": out.Friction.String(),
+			"result":   out.Result,
+		})
+	}
 }

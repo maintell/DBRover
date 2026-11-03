@@ -408,8 +408,8 @@ type Dialect interface {
 | 浏览 keyspace | `GET /connections/{id}/kv/keys?cursor&pattern&type&count` | 游标遍历超时 → 返回已取到的部分 + `has_more: true`，**不假装取完** | 真机 Redis 8.0.5 上 `SCAN` 返回 3 个 key 且 `has_more=false`；接口门禁用例覆盖 keys/entry/value 三个端点 |
 | 看一个 key | `GET /kv/entry?key=...` → 类型 / TTL / 编码 / 元素数 / 体积 | `MEMORY USAGE` 超时 → 只给类型与元素数，体积字段缺失，不猜 | 真机返回 `type=stream ttl=-1 size=1277`；TTL -2 表示 key 不存在 |
 | 读值 | `GET /kv/value?key=...&cursor&count&max_bytes`，按类型分页（`HSCAN`/`SSCAN`/`ZRANGE`/`XRANGE`/`GETRANGE`） | string 超过 8 KB 默认只取前 8 KB 并标 `truncated: true` | 真机读 stream 返回 `pairs=0`（空队列）不报错 |
-| 改值 | `POST /kv/apply`，走与 SQL 同构的 Plan/Apply | 摩擦 ≥ F2 要审批凭证；**预案里必须写明 Redis 多命令不保证回滚** | 只读连接上的写在执行门被拒；生产环境改写要审批 |
-| 命令模式 | `POST /kv/command`，结构化「命令 + 参数」 | **第一版只放行只读命令**（风险 ≤ `R1`）：写命令一律 `403 POLICY_WRITE_NOT_ENABLED`，因为写路径要过审批与审计（`service.KVGuard`），尚未做；`KEYS` 与 `DEBUG` 直接 `403 POLICY_COMMAND_BLOCKED` 并说明替代方案 | `TestKVEndpointsAndPolicyGates`；真机 Redis 8.0.5 上 `DBSIZE` 放行、`KEYS`/`SET`/`DEBUG` 全部 403 |
+| 改值 | `POST /kv/apply`，一次一个结构化写操作（`set_string` / `set_field` / `delete_key` / `delete_item` / `push` / `expire`） | 与命令模式共用同一道门（`service.KVExecutor`）。**刻意不做「一次多条命令」的预案**：Redis 的 `MULTI/EXEC` 出错不回滚，套用关系型那套「整批回滚」文案会骗人 | `TestKVWriteGateAndApprovalBinding`；真机 Redis 8.0.5：写 string（带 TTL 120）→ 读回一致且 `ttl=120`；写 hash field → `HGETALL` 读回；`delete_key` 返回 1 且之后 `TYPE=none`；审计里三条 `kv.mutate` |
+| 命令模式 | `POST /kv/command`，结构化「命令 + 参数」 | 走与 SQL 同一道门（`service.KVExecutor`：分级 → 摩擦 → 审批 → 审计）。生产环境的写命令返回 428 并签发**绑定命令指纹**的凭证；只读连接上的写命令 `403 POLICY_READ_ONLY`（与 SQL 同一条规则）；`KEYS` 与 `DEBUG` 直接 `403 POLICY_COMMAND_BLOCKED` 并说明替代方案 | `TestKVEndpointsAndPolicyGates`、`TestKVWriteGateAndApprovalBinding`（凭证换命令、换操作类型都 409）；真机 Redis 8.0.5 上 `DBSIZE` 放行、`KEYS`/`DEBUG` 被拒 |
 
 **实现约束**
 
