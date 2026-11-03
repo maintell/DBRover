@@ -188,6 +188,12 @@ func (e *Executor) compileRowChange(table string, pk []string, cols map[string]m
 
 	reversible = true
 
+	// 时间列先归一化：接口读出去的是带偏移的 RFC3339，原样写回 MySQL 会报
+	// 1292 Incorrect datetime value；同时把带时区列的瞬间固定成 UTC。
+	ch.After = normalizeTemporalMap(cols, ch.After)
+	ch.Before = normalizeTemporalMap(cols, ch.Before)
+	ch.Key = normalizeTemporalMap(cols, ch.Key)
+
 	switch ch.Op {
 	case OpUpdate:
 		if len(ch.After) == 0 {
@@ -457,6 +463,27 @@ func (e *Executor) ApplyChangePlanWithProgress(
 	out.Duration = time.Since(started)
 	e.record(actor, req, out, "ok", plan.Table.Name, "")
 	return out, nil
+}
+
+// normalizeTemporalMap 按列类型归一化一张值表里的时间字符串。
+// 返回新 map，不改调用方的请求体——请求体可能还要被别处复用。
+func normalizeTemporalMap(cols map[string]model.Column, in map[string]any) map[string]any {
+	if len(in) == 0 {
+		return in
+	}
+	out := make(map[string]any, len(in))
+	for k, v := range in {
+		if s, ok := v.(string); ok {
+			if c, known := cols[strings.ToLower(strings.TrimSpace(k))]; known {
+				switch c.Type.Kind {
+				case model.TypeDate, model.TypeTime, model.TypeTimestamp:
+					v = normalizeTemporal(s, c.Type)
+				}
+			}
+		}
+		out[k] = v
+	}
+	return out
 }
 
 func requireKeys(ch RowChange, pk []string) error {

@@ -9,6 +9,7 @@ package driver
 import (
 	"context"
 	"errors"
+	"time"
 
 	"github.com/maintell/DBRover/internal/model"
 )
@@ -40,6 +41,44 @@ type ConnectConfig struct {
 
 	AccessMode  model.AccessMode
 	Environment model.Environment
+
+	// DisplayTimeZone 是时间值返回给上层时使用的时区（IANA 名，如 Asia/Shanghai）。
+	// 空表示 UTC——**不是**「跟随服务器本地时区」：跨引擎比对与日志里
+	// 一个固定基准比「看起来是本机时间」重要得多（docs/06 §1.4）。
+	// 只影响展示，不影响存储：驱动会把握手时区固定为 UTC，写进去的就是 UTC。
+	DisplayTimeZone string
+}
+
+// DisplayLocation 把 DisplayTimeZone 解析成 *time.Location。
+// 空值或非法名一律退回 UTC：宁可显示成 UTC，也不要按服务器本地时区猜——
+// 猜错的时区会让人对着差 8 小时的数据排查半天。
+func (c ConnectConfig) DisplayLocation() *time.Location {
+	name := c.DisplayTimeZone
+	if name == "" || name == "UTC" {
+		return time.UTC
+	}
+	loc, err := time.LoadLocation(name)
+	if err != nil {
+		return time.UTC
+	}
+	return loc
+}
+
+// ConvertTimeValues 把一行里的 time.Time 换算到目标时区（原地修改）。
+//
+// 放在 driver 层是因为所有读路径（表浏览、查询分页、导出、游标续页）
+// 都经过这两个驱动的 cursor，这是唯一一个能一次改对的地方。
+// 只动 time.Time：DATE 也被驱动读成 time.Time，换算后仍是同一天（除非
+// 目标时区跨零点的极端情形），比让它们各自为政更一致。
+func ConvertTimeValues(vals []any, loc *time.Location) {
+	if loc == nil {
+		return
+	}
+	for i, v := range vals {
+		if t, ok := v.(time.Time); ok {
+			vals[i] = t.In(loc)
+		}
+	}
 }
 
 // HealthInfo 是连接建立后的健康与身份信息。

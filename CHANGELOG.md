@@ -30,6 +30,9 @@
 - **结构比对补上索引级差异**：按「列序列 + 唯一性 + 谓词」为键匹配、不按名字（名字不同不构成功能差异，只记进 `need_review` 说明）；主键索引不当作普通索引处理。索引的增删不丢数据，所以 `upgrade` 与 `downgrade` 两个方向都生成脚本——这是比对第一次能给出真正可用的回退语句。列的删除与改类型仍进 `need_review`。
 - **结构比对先归一化类型文本**：`character varying(n)` 与 `varchar(n)`、`integer` 与 `int` 是同一类型的两种打印方式，`bigint(20)` 的显示宽度 MySQL 8 已废弃，归一后不再报差异；`decimal(p,s)` 的精度原样保留。不做「聪明的类型映射」，只抹平同义写法——此前 MySQL ↔ PG 的同构表每列都会稳定误报一条类型差异，现在同构表零差异。
 - **加外键（`add_foreign_key`）**：结构设计器现在能加外键了，而不是只做只读预检。生成预案前先跑**同一套**孤儿数据与父表唯一性检查，不通过直接 409 `FK_PRECHECK_BLOCKED` 并带样本；动作子句走白名单（CASCADE / RESTRICT / NO ACTION / SET NULL），`SET NULL` 撞上 NOT NULL 引用列提前拒绝（MySQL 会当场拒绝，PG 会建成功、删父行时才报错，后者更难查）；外键名留空时按 `fk_<表>_<列>` 生成——回滚要靠这个名字摘约束，随机名等于让撤销无从下手。回滚是 `ALTER TABLE … DROP FOREIGN KEY/CONSTRAINT`，不动数据。SQLite 用 `Capabilities().AddForeignKey = false` 声明不支持（它的 ALTER TABLE 只认 RENAME / ADD COLUMN），接口明确拒绝而不是生成必然失败的语句。
+- **连接级展示时区（`display_timezone`）**：时间值按连接配置的 IANA 时区渲染，空 = UTC；在驱动返回行时统一换算，所以表浏览、查询分页、导出、游标续页看到的是同一个时区。写回按列类型归一：带时区的列换算到 UTC（保住瞬间），不带时区的列保留墙上时钟（保住用户看到的 12:00），`DATE`/`TIME` 取字面值不跨零点。时区名拼错直接 400，不静默退回 UTC。详见 docs/06 §1.4。
+- **修掉两处会让时间静默挪 hour 的缺陷**：① MySQL 的 `TIMESTAMP` 在 SELECT 时按**会话**时区换算，之前会话是服务器默认（可能 +08:00）而驱动按 `loc=UTC` 解析，取出来整体偏 8 小时——现在握手时 `time_zone='+00:00'`，PG 同理 `timezone=UTC`。② 接口读出去的是带偏移的 RFC3339，原样写回 MySQL 会报 `1292 Incorrect datetime value`——「读出来再存回去」这条最普通的编辑动作之前根本走不通。
+- **PG 只读改到连接参数**：`default_transaction_read_only=on` 之前是开完池再 `SET` 一次，而 `sql.DB` 是连接池——那条 SET 只作用于恰好被选中的物理连接，池里其余连接仍然可写。现在写进 DSN，每条连接都带上。
 - **流式导出**（`internal/service/export.go` + `GET /export`）：CSV 与 NDJSON，单条 SELECT 走游标分批取、边取边写；复用 `where`/`order`，导出的就是当前视图且不受分页限制；不要求主键，视图与无主键表也能导。大整数以字符串输出、二进制 base64、NULL 在 NDJSON 里是真正的 `null`。响应头推迟到首次写出，开跑前失败返回结构化错误而不是空文件配 200。界面加「导出」入口与格式下拉（状态栏给出字节数与首行，便于确认内容）。
 - **回环 HTTP 服务**（`internal/api`）：token 鉴权、Origin 校验、连接管理、`exec`、`query`、`results/{id}/page`、`tables/{name}/rows`、审计查询、OpenAPI 契约（`/api/v1/openapi.json`）。
 - **审计落盘**：JSONL 追加写（0600）+ 内存热区，`serve -audit <path>` 开启。

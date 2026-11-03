@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"fmt"
 	"sync"
+	"time"
 
 	"github.com/maintell/DBRover/internal/driver"
 	"github.com/maintell/DBRover/internal/model"
@@ -72,6 +73,7 @@ func (s *session) Query(ctx context.Context, sqlText string, args []any, opt dri
 	}
 	return &cursor{
 		rows: rows, cols: cols, fetch: fetch, maxRows: opt.MaxRows,
+		loc:    s.c.config().DisplayLocation(),
 		cancel: cancel, onClose: func() { s.setCancel(nil) },
 	}, nil
 }
@@ -195,8 +197,10 @@ type cursor struct {
 	done      bool
 	truncated bool
 	closed    bool
-	cancel    context.CancelFunc
-	onClose   func()
+	// loc 是返回给上层时使用的时间区（连接级展示时区）。
+	loc     *time.Location
+	cancel  context.CancelFunc
+	onClose func()
 }
 
 func (cur *cursor) Columns() []model.Column { return cur.cols }
@@ -222,6 +226,7 @@ func (cur *cursor) Next(ctx context.Context) ([][]any, bool, error) {
 			return nil, false, err
 		}
 		normalizeRow(vals, cur.cols)
+		driver.ConvertTimeValues(vals, cur.loc)
 		batch = append(batch, vals)
 		cur.sent++
 		if cur.maxRows > 0 && cur.sent >= cur.maxRows {

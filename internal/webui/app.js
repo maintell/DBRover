@@ -283,7 +283,10 @@ async function selectConnection(id) {
   if (!c) return;
   state.current = c;
   envBadge(c.environment);
-  $('profile').textContent = c.engine + ' · ' + c.access_mode;
+  // 展示时区必须摆在明面上：同一列数据在两台连接上显示成不同时间是正常的，
+  // 但「为什么不一样」得能一眼看到，否则会被当成数据错乱。
+  $('profile').textContent = c.engine + ' · ' + c.access_mode +
+    ' · 时区 ' + (c.display_timezone || 'UTC');
   // 切连接后必须清掉上一个连接留下的结果与提示。
   state.tableNext = null;
   state.tableName = '';
@@ -362,6 +365,8 @@ function newConnection() {
     '<option value="local">local</option><option value="test">test</option>' +
     '<option value="staging">staging</option><option value="production">production</option>' +
     '</select>' +
+    '<label class="field">展示时区（可选，IANA 名；留空按 UTC）</label>' +
+    '<input id="f-tz" style="width:100%" placeholder="Asia/Shanghai" autocomplete="off" spellcheck="false">' +
     '<label class="field">访问模式</label><select id="f-mode" style="width:100%">' +
     '<option value="read-write">read-write</option><option value="read-only">read-only</option>' +
     '</select>';
@@ -375,6 +380,8 @@ function newConnection() {
       environment: $('f-env').value,
       access_mode: $('f-mode').value,
     };
+    const tz = $('f-tz').value.trim();
+    if (tz) body.display_timezone = tz;
     if (engine !== 'sqlite') {
       body.port = Number($('f-port').value) || 0;
       body.user = $('f-user').value.trim();

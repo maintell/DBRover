@@ -43,7 +43,8 @@
           "name": { "type": "string" },
           "engine": { "type": "string" },
           "environment": { "type": "string", "enum": ["local", "test", "staging", "production", "unknown"] },
-          "access_mode": { "type": "string", "enum": ["read-only", "read-write", "admin"] }
+          "access_mode": { "type": "string", "enum": ["read-only", "read-write", "admin"] },
+          "display_timezone": { "type": "string", "description": "展示时区；缺省表示按 UTC" }
         }
       },
       "Column": {
@@ -146,7 +147,11 @@
                     "description": "只进不出：请求里出现一次，之后任何响应都不回显"
                   },
                   "environment": { "type": "string", "enum": ["local", "test", "staging", "production", "unknown"] },
-                  "access_mode": { "type": "string", "enum": ["read-only", "read-write", "admin"] }
+                  "access_mode": { "type": "string", "enum": ["read-only", "read-write", "admin"] },
+                  "display_timezone": {
+                    "type": "string",
+                    "description": "时间值的展示时区，IANA 名（如 Asia/Shanghai）；留空按 UTC。只影响展示：会话时区固定 UTC，写进去的就是 UTC。名字不合法返回 400，不做静默退回"
+                  }
                 }
               }
             }

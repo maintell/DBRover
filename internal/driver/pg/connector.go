@@ -78,6 +78,20 @@ func (c *Connector) Open(ctx context.Context, cfg driver.ConnectConfig) error {
 	if cfg.AccessMode == "" {
 		cfg.AccessMode = model.DefaultAccessMode(cfg.Environment)
 	}
+	if cfg.Params == nil {
+		cfg.Params = map[string]string{}
+	}
+	// 只读在最底层强制：写进**连接参数**而不是开好池再 SET 一次——
+	// sql.DB 是连接池，那条 SET 只作用于恰好被选中的那一条物理连接，
+	// 池里其余连接仍然是可写的。
+	if !cfg.AccessMode.AllowsWrite() {
+		cfg.Params["default_transaction_read_only"] = "on"
+	}
+	// 会话时区固定 UTC：timestamptz 的换算与 timestamp 字面量的解释都以它为基准。
+	// 与展示无关——展示在返回行时按 DisplayTimeZone 转换。
+	if _, ok := cfg.Params["timezone"]; !ok {
+		cfg.Params["timezone"] = "UTC"
+	}
 
 	db, err := sql.Open(driverName, buildDSN(cfg))
 	if err != nil {
@@ -92,14 +106,6 @@ func (c *Connector) Open(ctx context.Context, cfg driver.ConnectConfig) error {
 	if err := db.PingContext(pingCtx); err != nil {
 		_ = db.Close()
 		return fmt.Errorf("postgres: 连接失败: %w", err)
-	}
-
-	// 只读在最底层强制：任何事务默认只读，写入会被引擎拒绝。
-	if !cfg.AccessMode.AllowsWrite() {
-		if _, err := db.ExecContext(ctx, "SET default_transaction_read_only = on"); err != nil {
-			_ = db.Close()
-			return fmt.Errorf("postgres: 设置只读失败: %w", err)
-		}
 	}
 
 	if cfg.Schema == "" {

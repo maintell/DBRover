@@ -211,6 +211,10 @@ func buildDSN(cfg driver.ConnectConfig) string {
 		// clientFoundRows：让 UPDATE 的 RowsAffected 返回「匹配行数」而不是「实际改动行数」。
 		// 否则把一行改成相同值会返回 0，被乐观并发校验误判成冲突。
 		"clientFoundRows=true",
+		// time_zone 把会话时区钉成 UTC。TIMESTAMP 列在 SELECT 时由服务端换算成
+		// 会话时区，会话是 +08:00 而驱动按 loc=UTC 解析的话，取出来会整体偏 8 小时。
+		// 值必须带引号并 URL 编码，驱动会原样拼成 SET time_zone='+00:00'。
+		"time_zone=%27%2B00%3A00%27",
 	}
 	for k, v := range cfg.Params {
 		params = append(params, k+"="+v)

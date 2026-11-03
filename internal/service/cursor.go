@@ -620,6 +620,42 @@ func coerceKey(v any, ct model.ColumnType) any {
 		if f, err := strconv.ParseFloat(s, 64); err == nil {
 			return f
 		}
+	case model.TypeDate, model.TypeTime, model.TypeTimestamp:
+		return normalizeTemporal(s, ct)
+	}
+	return s
+}
+
+// normalizeTemporal 把时间值统一成「引擎能接受、且瞬间不会被悄悄挪动」的形态。
+//
+// 两组事实决定了这套规则：
+//  1. 我们读出去的 timestamptz 是带偏移的 RFC3339（2026-11-03T12:00:00+08:00），
+//     原样写回 MySQL 会报 1292 Incorrect datetime value——「读出来再存回去」
+//     这条路必须通，否则行内编辑时间列根本用不了。
+//  2. 带时区的列存的是**瞬间**，所以换算到 UTC 再写；不带时区的列存的是**日历
+//     时间**（墙上时钟），换算反而会让用户看到的 12:00 变成 04:00，所以原样写。
+//     DATE / TIME 同理取字面值，不跨零点。
+func normalizeTemporal(s string, ct model.ColumnType) string {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return s
+	}
+	t, err := time.Parse(time.RFC3339Nano, s)
+	if err != nil {
+		// 已经是引擎原生写法（或用户手写），交给引擎判断，不猜。
+		return s
+	}
+	switch ct.Kind {
+	case model.TypeDate:
+		return t.Format("2006-01-02")
+	case model.TypeTime:
+		return t.Format("15:04:05")
+	case model.TypeTimestamp:
+		if ct.WithTZ {
+			// 会话时区已钉成 UTC，写 UTC 才是同一个瞬间。
+			return t.UTC().Format("2006-01-02 15:04:05")
+		}
+		return t.Format("2006-01-02 15:04:05")
 	}
 	return s
 }

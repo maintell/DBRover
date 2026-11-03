@@ -25,6 +25,7 @@ docker run -d --name dbrover-pg  -e POSTGRES_PASSWORD=testpass     -e POSTGRES_D
 | `precision.ps1 -Engine mysql -Port 13306 -User root` | `BIGINT` 上下界与 `NUMERIC(38,10)` 极值在「独立 SQL → 表浏览接口 → 原样写回 → 改成新精度值」全链路逐字符一致；反向验证 JSON 数字形态的大整数被 `400 NUMBER_PRECISION_LOSS` 拒绝 | MySQL 或 PostgreSQL |
 | `compare-cross.ps1` | 跨引擎结构比对：MySQL ↔ PG 的同构表应当**零差异**（主键索引不误报、`BTREE`/`btree` 等价、整数显示宽度已归一） | MySQL + PostgreSQL |
 | `fk-add.ps1 -Engine mysql -Port 13306 -User root` | 加外键的端到端：孤儿数据 → 409 `FK_PRECHECK_BLOCKED` 带样本；清数据后出预案（含生成的外键名与动作子句）→ 执行 → 结构里出现外键 → 用返回的 `undo` 预案摘掉 | MySQL 或 PostgreSQL |
+| `timezone.ps1 -Engine mysql -Port 13306 -User root` | 展示时区：同一条数据在 `display_timezone=Asia/Shanghai` 与默认（UTC）两条连接上读出的 RFC3339 是不是同一瞬间；再把值改成另一种带偏移的写法写回，用 UTC 连接读回仍同一瞬间（存的是瞬间，展示才换算） | MySQL 或 PostgreSQL |
 
 ## 约定
 

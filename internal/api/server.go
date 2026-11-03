@@ -214,6 +214,9 @@ type createConnectionRequest struct {
 	Password    string `json:"password"`
 	Environment string `json:"environment"`
 	AccessMode  string `json:"access_mode"`
+	// DisplayTimeZone 是时间值的展示时区（IANA 名）。空 = UTC。
+	// 只影响展示：会话时区固定 UTC，写进去的就是 UTC。
+	DisplayTimeZone string `json:"display_timezone"`
 }
 
 // connectConfigFrom 把请求体映射成连接配置。
@@ -224,10 +227,11 @@ type createConnectionRequest struct {
 //   - SQLite 的 Host 是文件路径，Port/User/Password 对它没有意义。
 func connectConfigFrom(req createConnectionRequest, env model.Environment, mode model.AccessMode) driver.ConnectConfig {
 	cfg := driver.ConnectConfig{
-		Name:        req.Name,
-		Host:        req.Host,
-		AccessMode:  mode,
-		Environment: env,
+		Name:            req.Name,
+		Host:            req.Host,
+		AccessMode:      mode,
+		Environment:     env,
+		DisplayTimeZone: req.DisplayTimeZone,
 	}
 	if model.Engine(req.Engine) == model.EngineSQLite {
 		return cfg
@@ -241,11 +245,12 @@ func connectConfigFrom(req createConnectionRequest, env model.Environment, mode 
 }
 
 type connectionDTO struct {
-	ID          string `json:"id"`
-	Name        string `json:"name"`
-	Engine      string `json:"engine"`
-	Environment string `json:"environment"`
-	AccessMode  string `json:"access_mode"`
+	ID              string `json:"id"`
+	Name            string `json:"name"`
+	Engine          string `json:"engine"`
+	Environment     string `json:"environment"`
+	AccessMode      string `json:"access_mode"`
+	DisplayTimeZone string `json:"display_timezone,omitempty"`
 }
 
 type execRequest struct {
@@ -346,6 +351,15 @@ func (s *Server) handleCreateConnection(w http.ResponseWriter, r *http.Request) 
 	if mode == "" {
 		mode = model.DefaultAccessMode(env)
 	}
+	// 时区名打错不能静默退回 UTC：那会让人对着差 8 小时的数据排查半天。
+	if tz := strings.TrimSpace(req.DisplayTimeZone); tz != "" {
+		if _, err := time.LoadLocation(tz); err != nil {
+			writeError(w, http.StatusBadRequest, "REQUEST_INVALID", "internal",
+				"display_timezone 不是合法的 IANA 时区名: "+tz,
+				"例如 Asia/Shanghai、UTC；留空表示按 UTC 展示", false)
+			return
+		}
+	}
 
 	cfg := connectConfigFrom(req, env, mode)
 	engine := model.Engine(req.Engine)
@@ -364,6 +378,7 @@ func (s *Server) handleCreateConnection(w http.ResponseWriter, r *http.Request) 
 		conn: model.Connection{
 			ID: id, Name: req.Name, Engine: engine, Host: req.Host,
 			Environment: env, AccessMode: mode,
+			DisplayTimeZone: strings.TrimSpace(req.DisplayTimeZone),
 		},
 		drv:  conn,
 		exec: service.NewExecutor(conn, env, mode, s.audit),
@@ -374,6 +389,7 @@ func (s *Server) handleCreateConnection(w http.ResponseWriter, r *http.Request) 
 	writeJSON(w, http.StatusCreated, connectionDTO{
 		ID: id, Name: req.Name, Engine: string(engine),
 		Environment: string(env), AccessMode: string(mode),
+		DisplayTimeZone: strings.TrimSpace(req.DisplayTimeZone),
 	})
 }
 
@@ -385,6 +401,7 @@ func (s *Server) handleListConnections(w http.ResponseWriter, r *http.Request) {
 		items = append(items, connectionDTO{
 			ID: e.conn.ID, Name: e.conn.Name, Engine: string(e.conn.Engine),
 			Environment: string(e.conn.Environment), AccessMode: string(e.conn.AccessMode),
+			DisplayTimeZone: e.conn.DisplayTimeZone,
 		})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"items": items})

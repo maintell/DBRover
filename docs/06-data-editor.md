@@ -40,7 +40,16 @@
 | 枚举/集合 | 下拉（取元数据枚举值） | 下拉，允许输入非标准值并警告 |
 | 时间戳 | ISO8601 + 时区标注 | 日期时间选择器 + 手动输入 |
 
-**时区规则**：所有 `timestamptz` / `TIMESTAMP WITH TIME ZONE` 统一以 UTC 传输，按连接配置的显示时区渲染。`timestamp`（无时区）不转换，原样显示并标注「无时区」。这条必须写进 UI 文案，否则用户会误判。
+**时区规则**：所有 `timestamptz` / `TIMESTAMP WITH TIME ZONE` 统一以 UTC 传输，按连接配置的 `display_timezone`（IANA 名，空 = UTC）渲染。`timestamp`（无时区）不转换，原样显示并标注「无时区」。这条必须写进 UI 文案，否则用户会误判。
+
+实现上分两层，缺一层就会静默挪时间：
+
+| 层 | 做法 | 不做会怎样 |
+|---|---|---|
+| 存储 | 握手时把会话时区钉成 UTC（MySQL `time_zone='+00:00'`、PG `timezone=UTC`） | MySQL 的 `TIMESTAMP` 在 SELECT 时按会话时区换算，会话是 +08:00 而驱动按 `loc=UTC` 解析，取出来整体偏 8 小时 |
+| 展示 | 驱动返回行时按 `display_timezone` 换算 `time.Time`，所有读路径共用这一个点 | 表浏览、导出、游标续页各自为政，同一条数据显示成两个时间 |
+
+写回时按列类型归一（`normalizeTemporal`）：带时区的列换算到 UTC 保住瞬间；不带时区的列保留墙上时钟，保住用户看到的 12:00；`DATE`/`TIME` 取字面值，不跨零点。另外，接口读出去的是带偏移的 RFC3339，原样写回 MySQL 会报 `1292 Incorrect datetime value`——「读出来再存回去」这条路必须先归一才通。
 
 ---
 
@@ -373,7 +382,7 @@ GET /api/v1/connections/{id}/tables/{name}/rows
 | 8 | 条件批量修改 2 万行分批执行，进度可见，可中止 | 集成 | 过：①本地 `serve` + SQLite，2 万行改值 → `batched=true`、`batches=20`，`apply?stream=1` 收到 20 条 `progress`（1000→20000，跨度 10.8 s，逐条陆续到达）与 1 条 `result`（`rows_affected=20000`）；`curl --max-time 0.6` 中途断开后仅保留第一批 1000 行、剩余 19000 行未改，预案仍有效，重新提交后补齐到 20000。②真实 MySQL 5.7.38 与 PostgreSQL 17.11（各自独立容器，用后即删）：3000 行 3 批，`batched=true`，三次执行（需改值 / 先改回再改 / 逐批都是改成相同值）都得到 3 条进度与 `rows_affected=3000`——最后一种正是 MySQL `clientFoundRows` 的判别式，关掉它会被误判成 `CHANGE_ROW_CONFLICT`。③规模：同一批脚本把行数提到 **100 万**（`batches=1000`），PostgreSQL 17.11 用 31.8 s、MySQL 5.7.38 用 126.2 s，两者都收到 1000 条进度、`rows_affected=1000000`、核验 `COUNT(*)=1000000`；服务端工作集全程平稳（PG 46–48 MB、MySQL 44 MB，不随已提交行数增长），说明分批推进没有攒状态 |
 | 9 | 空 `WHERE` 判定 `R4` 并要求输入表名 | 单测 | 过：`TestBulkUpdateRequiresTableNameWhenNoFilter`（表名不匹配也拒绝） |
 | 10 | 导出 100 万行 CSV 内存增长 < 200MB | 压测 | 过：本地 SQLite 100 万行，19.7 MB CSV / 1.5 s，进程工作集 12.1 → 22.7 MB（增长 10.6 MB）；文件首尾与抽样行均正确 |
-| 11 | 时区：`timestamptz` 按配置时区显示，写回为 UTC | 集成（跨时区样例） | 未过：无连接级显示时区 |
+| 11 | 时区：`timestamptz` 按配置时区显示，写回为 UTC | 集成（跨时区样例） | 过：真实 MySQL 5.7.38（`TIMESTAMP`）与 PostgreSQL 17.11（`timestamptz`）各建两条连接读同一行——`display_timezone=Asia/Shanghai` 读到 `2026-11-03T12:00:00+08:00`，默认连接读到 `2026-11-03T04:00:00Z`，两者解析后是同一瞬间；把值改成 `2026-11-03T05:30:00+08:00` 写回后，UTC 连接读到 `2026-11-02T21:30:00Z`，说明存的是瞬间、展示才换算。顺带修掉两处会让时间静默挪 hour 的缺陷（会话时区没钉 UTC、接口读出的 RFC3339 原样写回被 MySQL 拒绝） |
 | 12 | 关闭未提交变更的标签页被拦截 | 手动 | 过：浏览器实测 A/B（有改动跳转被拦、丢弃后同一跳转成功） |
 
 ---
@@ -399,6 +408,7 @@ GET /api/v1/connections/{id}/tables/{name}/rows
 | 无主键表禁止编辑 | §1.2 | 无主键直接拒绝浏览（`ErrNoPrimaryKey` → 501），编辑入口不会出现 | `TestTableRowsNoPrimaryKey` |
 | 只读连接不出现编辑入口 | §1.2 引申 | `TableRowsResult.Editable = mode.AllowsWrite()`，前端据此决定 `contenteditable` | `TestTableRowsEditableFollowsAccessMode`（含变异验证） |
 | 大整数与高精度小数的保真 | §1.4 / 验收 6 | 十进制列以字符串传输与展示（不经过 double）；`BIGINT` 超过 2^53 时界面保持字符串、服务端按列类型还原；客户端若把它写成 JSON 数字，服务端直接 `400 NUMBER_PRECISION_LOSS` 而不是写入丢了低位的值 | `TestChangePlanRejectsBigIntegerAsJSONNumber`、`TestBulkUpdateRejectsBigIntegerAsJSONNumber`、`TestChangePlanRejectsBigIntegerAsJSONNumber`（接口侧）、真实 MySQL 5.7 / PostgreSQL 17 双向实测（见下表 6） |
+| 连接级显示时区 | §1.4 / 验收 11 | `display_timezone`（IANA 名，空 = UTC）；驱动在**返回行时**统一换算，所以表浏览、查询分页、导出、游标续页看到的是同一个时区，不需要每个入口各写一遍。会话时区握手时钉成 UTC（MySQL `time_zone='+00:00'`、PG `timezone=UTC`），写进去的就是 UTC。写回时按列类型归一：带时区的列换算到 UTC（保住瞬间），不带时区的列保留墙上时钟（保住用户看到的 12:00），DATE/TIME 取字面值不跨零点。SQLite 没有原生时间类型，值按存储原样返回 | `TestDisplayLocation`、`TestConvertTimeValues`、`TestNormalizeTemporal`、`TestNormalizeTemporalMapOnlyTouchesTemporalColumns`、`TestCreateConnectionRejectsBadTimeZone`、`scripts/accept/timezone.ps1`（MySQL + PG 真机，含写回往返） |
 | 变更集模型 | §2.2 | `RowChange{op, key, before, after}`；UI 脏单元格 + 顶部变更条「待提交 N 处修改」 | `change_test.go`、浏览器实测 |
 | 单事务提交 | §2.3 | `Begin` → 逐条执行 → `Commit`；任一条失败整体 `Rollback` | `change_test.go` |
 | 影响行数校验与冲突报错 | §2.3 | 每语句比对 `RowsAffected` 与 `expect_rows`；为 0 → `CHANGE_ROW_CONFLICT`（409）+ 整批回滚 | `change_test.go`（两会话） |
@@ -417,5 +427,4 @@ GET /api/v1/connections/{id}/tables/{name}/rows
 | 复合主键表的分批 | §3.2 | 复合主键退回单事务（理由见 §3.2） | 待实现；需要行值比较或参数上限的方案 |
 | 筛选与排序的完整形态 | §4.1 / §4.2 | 只有 AND；无 `OR`、分组、`IN`、`BETWEEN`、正则、原始 SQL 模式、多列拖拽排序 | 待实现；原始 SQL 模式需先有表达式校验，否则等于开注入面 |
 | 导出与测试数据生成 | §5 / 验收 10 | CSV / NDJSON 已实现并压测通过（100 万行内存增长 10.6 MB）；xlsx、SQL INSERT、Markdown 与测试数据生成未做 | 待实现 |
-| 时区显示策略 | §1.4 / 验收 11 | 时间按驱动原始形态展示，无连接级显示时区 | 待实现 |
 

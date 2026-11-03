@@ -247,6 +247,10 @@ type Connection struct {
 
 	AccessMode AccessMode `json:"access_mode"`
 
+	// DisplayTimeZone 是时间值的展示时区（IANA 名）；空表示 UTC。
+	// 只影响展示：会话时区固定 UTC，写进去的就是 UTC。
+	DisplayTimeZone string `json:"display_timezone,omitempty"`
+
 	// ServerIdentity 是运行时采集，不持久化敏感信息。
 	ServerIdentity *ServerIdentity `json:"server_identity,omitempty"`
 }
