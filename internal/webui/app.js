@@ -1582,6 +1582,30 @@ function renderSchema(out) {
     wrap.appendChild(ddl);
   }
 
+  // 手写 DDL：给「我已经有语句，只想让它经过这道门」的人。
+  // 与表单路径的区别必须摆在明面上——它不做语义预检，也不生成回滚。
+  const rawHead = document.createElement('div');
+  rawHead.className = 'head';
+  rawHead.textContent = '手写 DDL';
+  wrap.appendChild(rawHead);
+  const rawBar = document.createElement('div');
+  rawBar.className = 'toolbar';
+  const rawBox = document.createElement('textarea');
+  rawBox.id = 'raw-ddl';
+  rawBox.rows = 3;
+  rawBox.placeholder = 'ALTER TABLE ' + state.tableName + ' ADD COLUMN note TEXT';
+  const rawPreview = document.createElement('button');
+  rawPreview.id = 'raw-preview';
+  rawPreview.textContent = '预览语句';
+  rawPreview.onclick = () => previewRawDDL();
+  const rawRun = document.createElement('button');
+  rawRun.id = 'raw-run';
+  rawRun.className = 'primary';
+  rawRun.textContent = '执行手写 DDL';
+  rawRun.onclick = () => planRawDDL();
+  rawBar.append(rawBox, rawPreview, rawRun);
+  wrap.appendChild(rawBar);
+  wrap.appendChild(notice('一次一条 DDL；不做语义预检（收窄/孤儿/依赖都不查），也不生成回滚语句。'));
   // 删表放在最后，且与上面所有「改结构」的入口分开：它不可逆，
   // 不该和「加一列」长成一排，让人顺手点到。
   const dangerHead = document.createElement('div');
@@ -1788,6 +1812,45 @@ async function planDropTable() {
   });
 }
 
+// ---------- 手写 DDL ----------
+
+// postRawDDL 把手写语句交给服务端生成预案；preview 只算不存。
+async function postRawDDL(preview) {
+  return postSchemaPlan({ action: 'raw', sql: $('raw-ddl').value }, preview);
+}
+
+async function previewRawDDL() {
+  const box = $('raw-ddl');
+  if (!box.value.trim()) {
+    showNotice('先写一条 DDL。', 'warn');
+    return;
+  }
+  try {
+    const plan = await postRawDDL(true);
+    showNotice('服务端接受这条语句：' + (plan.statements || []).map((s) => s.sql).join('; '));
+  } catch (e) {
+    showNotice(e.message + (e.hint ? '（' + e.hint + '）' : ''), 'error');
+  }
+}
+
+// planRawDDL 生成可执行预案，确认后走同一个 apply。
+// 手写 DDL 必然不可逆，confirmPlan 会把「没有回滚」讲清楚。
+async function planRawDDL() {
+  const box = $('raw-ddl');
+  if (!box.value.trim()) {
+    showNotice('先写一条 DDL。', 'warn');
+    return;
+  }
+  let plan;
+  try {
+    plan = await postRawDDL(false);
+  } catch (e) {
+    showNotice(e.message + (e.hint ? '（' + e.hint + '）' : ''), 'error');
+    return;
+  }
+  if (!(await confirmPlan(plan))) return;
+  await applyPlan(plan.id, undefined, refreshSchema);
+}
 // ---------- 改列类型 ----------
 
 // startRetype 把该行的类型单元格换成输入框，让用户就地改。

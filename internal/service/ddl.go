@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/maintell/DBRover/internal/driver"
+	"github.com/maintell/DBRover/internal/driver/dialect"
 	"github.com/maintell/DBRover/internal/model"
 	"github.com/maintell/DBRover/internal/policy"
 )
@@ -38,6 +39,9 @@ const (
 	DDLDropIndex       DDLAction = "drop_index"
 	DDLAddForeignKey   DDLAction = "add_foreign_key"
 	DDLDropTable       DDLAction = "drop_table"
+	// DDLRaw 是「我已经有 DDL，只想让它经过这道门」：语句由用户写，
+	// 工具不做语义解析，只负责分级、审批、审计与竞态保护。
+	DDLRaw DDLAction = "raw"
 )
 
 // ErrForeignKeyBlocked 表示既有数据不满足要加的外键（有孤儿行，或父表列不唯一）。
@@ -126,6 +130,8 @@ type DDLRequest struct {
 	Index IndexSpec `json:"index"`
 	// ForeignKey 用于 add_foreign_key。
 	ForeignKey ForeignKeySpec `json:"foreign_key"`
+	// RawSQL 用于 raw：一条手写的 DDL 语句。
+	RawSQL string `json:"sql"`
 }
 
 // typePattern 限定类型声明的字符集。
@@ -299,6 +305,10 @@ func (e *Executor) BuildDDLPlan(ctx context.Context, req DDLRequest) (*ChangePla
 	// 建表没有「现有结构」可读，走单独分支。
 	if req.Action == DDLCreateTable {
 		return e.buildCreateTablePlan(ctx, req)
+	}
+	// 手写 DDL 也不依赖「我要改的那张表」：它可能建表、也可能改别的东西。
+	if req.Action == DDLRaw {
+		return e.buildRawDDLPlan(ctx, req)
 	}
 
 	td, err := e.conn.Meta().DescribeTable(ctx, req.Table)
@@ -954,6 +964,69 @@ func (e *Executor) buildCreateTablePlan(ctx context.Context, req DDLRequest) (*C
 			ExpectRows: -1,
 		}},
 		AffectedRows: 0,
+	}
+	e.finishDDLPlan(plan)
+	return plan, nil
+}
+
+// buildRawDDLPlan 把手写 DDL 纳入同一套 Plan/Apply。
+//
+// 三条刻意的限制：
+//   - 一次只允许一条语句。多条没法保证「要么都成、要么都不成」——MySQL 的
+//     DDL 隐式提交，第二条失败时第一条已经生效，而回滚语句是无处生成的。
+//   - 只接受 DDL。DML 有自己的变更集路径（带乐观并发与逐行回滚），
+//     混进来会绕开那些保护。
+//   - **不做语义预检**。收窄、孤儿、依赖这些检查都要理解语句含义，而手写
+//     DDL 我们不解析。预案里必须写明这一点，并且标不可逆——不假装能回来。
+func (e *Executor) buildRawDDLPlan(ctx context.Context, req DDLRequest) (*ChangePlan, error) {
+	raw := strings.TrimSpace(req.RawSQL)
+	if raw == "" {
+		return nil, fmt.Errorf("%w: 手写 DDL 不能为空", ErrInvalidDDL)
+	}
+
+	stmts, err := e.dialect.Split(raw)
+	if err != nil {
+		return nil, fmt.Errorf("%w: 语句切分失败: %v", ErrInvalidDDL, err)
+	}
+	if len(stmts) != 1 {
+		return nil, fmt.Errorf("%w: 一次只能提交一条 DDL（当前 %d 条）；"+
+			"多条无法保证原子性，请拆开逐条执行", ErrInvalidDDL, len(stmts))
+	}
+	text := strings.TrimSpace(stmts[0].Text)
+
+	class, err := e.dialect.Classify(text)
+	if err != nil {
+		return nil, fmt.Errorf("%w: 无法识别语句类型: %v", ErrInvalidDDL, err)
+	}
+	if class != dialect.ClassDDL {
+		return nil, fmt.Errorf("%w: 只接受结构变更语句（DDL），当前是 %s；"+
+			"改数据请用变更集，它带乐观并发与逐行回滚", ErrInvalidDDL, class)
+	}
+
+	plan := &ChangePlan{
+		ID:           "ddl-raw-" + newID(),
+		Table:        req.Table,
+		CreatedAt:    time.Now(),
+		ExpiresAt:    time.Now().Add(planTTL),
+		DDL:          true,
+		Irreversible: true,
+		Statements:   []PlanStatement{{SQL: text, ExpectRows: -1}},
+		AffectedRows: -1,
+	}
+	plan.Notes = append(plan.Notes,
+		"手写 DDL 未做语义预检：收窄、孤儿数据、依赖关系都没有检查，执行前请自行确认。",
+		"手写 DDL 不生成回滚语句——工具不知道这条语句的反向操作是什么。",
+	)
+
+	// 竞态保护只在「指明了表且表存在」时给：拿不到基准定义就别假装有。
+	if strings.TrimSpace(req.Table.Name) != "" {
+		if cur, derr := e.conn.Meta().DDL(ctx, req.Table); derr == nil {
+			plan.ExpectDDLHash = ddlHash(cur)
+		}
+	}
+
+	if err := e.checkBlockers(ctx, plan); err != nil {
+		return nil, err
 	}
 	e.finishDDLPlan(plan)
 	return plan, nil

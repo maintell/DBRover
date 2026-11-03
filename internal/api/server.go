@@ -879,6 +879,7 @@ type schemaPlanRequest struct {
 	PrimaryKey []string               `json:"primary_key"`
 	Index      service.IndexSpec      `json:"index"`
 	ForeignKey service.ForeignKeySpec `json:"foreign_key"`
+	RawSQL     string                 `json:"sql"`
 }
 
 // handleSchemaPlan 生成结构变更预案。执行走同一个 /changes/{pid}/apply。
@@ -897,7 +898,7 @@ func (s *Server) handleSchemaPlan(w http.ResponseWriter, r *http.Request) {
 	plan, err := e.exec.BuildDDLPlan(r.Context(), service.DDLRequest{
 		Table: req.Table, Action: req.Action, Column: req.Column,
 		Columns: req.Columns, PrimaryKey: req.PrimaryKey, Index: req.Index,
-		ForeignKey: req.ForeignKey,
+		ForeignKey: req.ForeignKey, RawSQL: req.RawSQL,
 	})
 	if errors.Is(err, service.ErrLockWait) {
 		writeError(w, http.StatusConflict, "LOCK_WAIT_BLOCKED", "connection",
