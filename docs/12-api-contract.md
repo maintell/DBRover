@@ -406,6 +406,7 @@ POST /connections
 | `SQL_TIMEOUT` | timeout | 504 | 语句超时 |
 | `SQL_CANCELED` | canceled | 499 | 用户取消 |
 | `POLICY_READ_ONLY` | policy | 403 | 只读连接拒绝写 |
+| `CROSS_DATABASE_UNSUPPORTED` | syntax | 400 | 语句里有跨库引用（PostgreSQL 的 `库.模式.表`）：一个连接只对应一个库，执行前拦下并说明改法；**不是**策略拦截，补审批也不会过 |
 | `POLICY_APPROVAL_REQUIRED` | policy | 428 | 需要审批 |
 | `POLICY_APPROVAL_MISMATCH` | policy | 409 | 审批内容与实际语句不一致 |
 | `CHANGE_ROW_CONFLICT` | constraint | 409 | 按原值定位不到行，或影响行数与预案不符 |

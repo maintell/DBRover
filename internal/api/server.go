@@ -1505,6 +1505,11 @@ func (s *Server) handleAudit(w http.ResponseWriter, r *http.Request) {
 
 // classifyBlock 把策略拒绝映射为稳定的错误码与状态码。
 func classifyBlock(out *service.Outcome) (code string, status int, hint string) {
+	// 具体预检给了错误码就用它：这类拦截不是「策略要求确认」，而是这条语句
+	// 在这个引擎上没法执行，用 428 会把客户端引到错误的重试路径上。
+	if out.BlockCode != "" {
+		return out.BlockCode, http.StatusBadRequest, out.BlockHint
+	}
 	if out.Friction == policy.F5 {
 		return "POLICY_READ_ONLY", http.StatusForbidden,
 			"该连接为只读访问模式；如需写入请新建读写连接"

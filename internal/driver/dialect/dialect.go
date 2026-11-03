@@ -104,6 +104,13 @@ type Dialect interface {
 	Fingerprint(sqlText string) (string, error)
 	Classify(sqlText string) (Class, error)
 	Analyze(sqlText string) (Analysis, error)
+
+	// CrossDatabase 检测跨库引用（`库.模式.表`），返回引用原文。
+	//
+	// 只有 PostgreSQL 会命中：一个连接只对应一个库，三段名必然报
+	// "cross-database references are not implemented"。其他引擎的
+	// 三段名是正常写法（见 crossdb.go 的说明）。
+	CrossDatabase(sqlText string) (string, bool)
 }
 
 type impl struct {

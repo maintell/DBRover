@@ -247,6 +247,8 @@ func (p *Policy) Authorize(t Tool) Decision {
 
 **规则：模型没有「另一个连接」这个参数。** 14 个工具的参数里都不存在 `connection_id` / `catalog` / `schema` 之外的越权入口，目标一律落在 Agent 会话绑定的连接上；多给的字段被严格解码拒绝（`ARGS_INVALID`），所以「被诱导去访问另一个连接」无从下手——由 `TestNoToolTakesConnectionID` 与注入用例 INJ-03 锁住。`service` 层另外不信任 `agent` 传来的库/schema，越界即拒。
 
+**被拦下时要说明为什么。** 执行门的拦截是 `Blocked=true` 而不是 error，工具若只看「有没有结果」，模型会收到 `EMPTY_RESULT` + 「确认语句是否为查询」——方向完全错了，白烧一轮。所以拦截原因必须原样回到模型：具体预检给了码就用它（如跨库引用 `CROSS_DATABASE_UNSUPPORTED` + 改法），否则归到 `POLICY_BLOCKED`。由 `TestQueryToolSurfacesCrossDatabaseBlock` 锁住（含变异验证：去掉这个分支就红）。
+
 ---
 
 ## 6. 风险分级器

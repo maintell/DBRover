@@ -415,6 +415,9 @@ func (r *Runtime) toolQueryExecute() Tool {
 			if out.Err != nil {
 				return fail(out.Err.Code, out.Err.Message, out.Err.Hint)
 			}
+			if out.Blocked {
+				return blockEnvelope(out)
+			}
 			if len(out.Results) == 0 {
 				return fail("EMPTY_RESULT", "语句没有返回结果", "确认语句是否为查询")
 			}
@@ -449,6 +452,9 @@ func (r *Runtime) toolQueryExplain() Tool {
 			}
 			if out.Err != nil {
 				return fail(out.Err.Code, out.Err.Message, out.Err.Hint)
+			}
+			if out.Blocked {
+				return blockEnvelope(out)
 			}
 			if len(out.Results) == 0 {
 				return fail("EMPTY_RESULT", "执行计划为空", "确认语句本身可执行")
@@ -721,6 +727,18 @@ func (r *Runtime) toolNote() Tool {
 			return ok("已记下", map[string]any{"notes": len(r.notes)})
 		},
 	}
+}
+
+// blockEnvelope 把「执行门拦下了」翻成工具信封。
+//
+// 不提拦截原因的话，模型只会看到「空结果」，然后按「语句是不是查询」去猜——
+// 猜错方向就白烧一轮。具体预检给了码就用它（如跨库引用），否则归到策略类。
+func blockEnvelope(out *service.Outcome) Envelope {
+	if out.BlockCode != "" {
+		return fail(out.BlockCode, out.Reason, out.BlockHint)
+	}
+	return fail("POLICY_BLOCKED", out.Reason,
+		"换一个可执行的写法；如果确实是写操作，请走 change.plan 与人工审批")
 }
 
 // ---- 结果摘要 ----

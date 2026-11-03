@@ -89,13 +89,17 @@ type StatementResult struct {
 
 // Outcome 是一次执行的结果。
 type Outcome struct {
-	ExecutionID string            `json:"execution_id"`
-	Risk        policy.Level      `json:"risk"`
-	Friction    policy.Friction   `json:"friction"`
-	Blocked     bool              `json:"blocked"`
-	Reason      string            `json:"reason,omitempty"`
-	Results     []StatementResult `json:"results,omitempty"`
-	Duration    time.Duration     `json:"duration_ms"`
+	ExecutionID string          `json:"execution_id"`
+	Risk        policy.Level    `json:"risk"`
+	Friction    policy.Friction `json:"friction"`
+	Blocked     bool            `json:"blocked"`
+	Reason      string          `json:"reason,omitempty"`
+	// BlockCode / BlockHint 让「被拦下的具体原因」变成稳定错误码，而不是靠
+	// Friction 反推。只有具体预检会设置；为空时调用方按原有规则分类。
+	BlockCode string            `json:"block_code,omitempty"`
+	BlockHint string            `json:"block_hint,omitempty"`
+	Results   []StatementResult `json:"results,omitempty"`
+	Duration  time.Duration     `json:"duration_ms"`
 	// ApprovalRequired 表示被拦下的原因是「需要人工确认」。
 	// 调用方应据此签发绑定 StatementHash 的审批凭证。
 	ApprovalRequired bool `json:"approval_required"`
@@ -175,6 +179,28 @@ func (e *Executor) Execute(ctx context.Context, req Request) (*Outcome, error) {
 	// 指纹仍按整段原文算——执行的是被批准文本的子集，不会放大权限。
 	if req.Cursor != nil {
 		stmts = []dialect.Statement{statementAt(stmts, *req.Cursor)}
+	}
+
+	// 1.6 跨库引用预检（docs/05 验收 12）。
+	//
+	// PostgreSQL 一个连接只对应一个库，`库.模式.表` 三段名引擎必然报
+	// "cross-database references are not implemented"。在这里拦下并说清
+	// 该怎么办，比把引擎的原始报错丢给用户有用。
+	for _, st := range stmts {
+		ref, crossDB := e.dialect.CrossDatabase(st.Text)
+		if !crossDB {
+			continue
+		}
+		out.Blocked = true
+		out.BlockCode = "CROSS_DATABASE_UNSUPPORTED"
+		out.BlockHint = "PostgreSQL 的一个连接只能访问当前库：请另开一个连接到该库；" +
+			"确需在一条语句里跨库，可安装 postgres_fdw 或 dblink"
+		out.Reason = fmt.Sprintf("不支持跨库引用 %s：这个连接只能访问当前库", ref)
+		out.Risk = policy.R0
+		out.Friction = policy.F0
+		out.Duration = time.Since(started)
+		e.record(actor, req, out, "denied", req.SQL, out.Reason)
+		return out, nil
 	}
 
 	// 2. 全量预检：任何一条被拒，整批都不执行，避免半途生效。

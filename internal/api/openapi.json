@@ -343,7 +343,7 @@
               }
             }
           },
-          "400": { "description": "请求非法" },
+          "400": { "description": "请求非法；或这条语句在这个引擎上没法执行，如 PostgreSQL 的跨库引用（CROSS_DATABASE_UNSUPPORTED）——补审批也不会过" },
           "403": { "description": "只读连接拒绝写入（POLICY_READ_ONLY）" },
           "409": { "description": "审批凭证无效、过期或与语句不匹配（POLICY_APPROVAL_MISMATCH）" },
           "428": {
