@@ -42,6 +42,14 @@ type AuditSink interface {
 type Request struct {
 	SQL  string
 	Args []any
+	// Cursor 是光标在 SQL 文本里的字节偏移；非 nil 时只执行光标所在的那条语句。
+	//
+	// 用指针而不是「负数表示未设置」：零值必须是「整段脚本」，
+	// 否则任何没设 Cursor 的调用方（脚本、测试、CLI）都会静默变成只跑第一条。
+	//
+	// 由服务端来挑，而不是让前端自己切：切分要认 dollar-quote、DELIMITER、
+	// 字符串里的分号，前端重写一遍必然与引擎侧行为分叉。前端只提供偏移量。
+	Cursor *int
 	// Approval 表示调用方已就人工确认取得的凭证。
 	// F2 及以上的操作缺少该凭证时会被拒绝执行。
 	Approval bool
@@ -151,6 +159,12 @@ func (e *Executor) Execute(ctx context.Context, req Request) (*Outcome, error) {
 		return nil, errors.New("没有可执行的语句")
 	}
 
+	// 1.5 光标定位：只跑光标所在的那一条（docs/05 验收 1、2）。
+	// 指纹仍按整段原文算——执行的是被批准文本的子集，不会放大权限。
+	if req.Cursor != nil {
+		stmts = []dialect.Statement{statementAt(stmts, *req.Cursor)}
+	}
+
 	// 2. 全量预检：任何一条被拒，整批都不执行，避免半途生效。
 	preps, maxLevel, anyWrite := e.gradeAll(ctx, stmts)
 
@@ -257,6 +271,26 @@ func (e *Executor) Execute(ctx context.Context, req Request) (*Outcome, error) {
 }
 
 // gradeAll 对整批语句做分级，返回预检结果。
+// statementAt 挑出光标所在的那条语句。
+//
+// 规则来自编辑器里的实际习惯（docs/05 验收 1、2）：
+//   - 光标在某条语句内部 → 就是那一条；
+//   - 光标落在两条语句之间（空白 / 分号后 / 下一行行首）→ 前一条。
+//     写完一句按回车，光标停在下一行，此时按 Ctrl+Enter 想跑的就是刚写完的那句；
+//   - 光标在第一句之前 → 第一句；
+//   - 光标超出文本末尾 → 最后一句。
+//
+// 不做「取最近的语句」这种更聪明的判断：光标离哪条近是视觉直觉，不是文本事实，
+// 猜错一次就会执行到用户没打算跑的那条。
+func statementAt(stmts []dialect.Statement, cursor int) dialect.Statement {
+	for i := len(stmts) - 1; i >= 0; i-- {
+		if cursor >= stmts[i].Start {
+			return stmts[i]
+		}
+	}
+	return stmts[0]
+}
+
 func (e *Executor) gradeAll(ctx context.Context, stmts []dialect.Statement) ([]prepared, policy.Level, bool) {
 	rels := e.relations(ctx, stmts)
 	preps := make([]prepared, 0, len(stmts))

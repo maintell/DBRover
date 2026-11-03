@@ -2184,15 +2184,30 @@ function renderExec(out) {
 
 // ---------- 执行 ----------
 
+// byteOffset 把 UTF-16 下标换算成 UTF-8 字节偏移。
+//
+// 服务端按 Go 的字符串下标（UTF-8 字节）定位光标，而 textarea 的
+// selectionStart 是 UTF-16 码元下标：光标前面出现中文或 emoji 时两者不等，
+// 直接送过去会挑到相邻的那条语句。
+function byteOffset(text, utf16Index) {
+  if (!utf16Index) return 0;
+  return new TextEncoder().encode(text.slice(0, utf16Index)).length;
+}
+
 async function runSQL(approvalToken) {
   if (!state.current) { showNotice('请先建立连接。', 'warn'); return; }
-  const sql = $('sql').value.trim();
-  if (!sql) return;
+  const el = $('sql');
+  // 选中了一段就跑选中的那段（各家 SQL 客户端都是这个习惯）；
+  // 没选就跑光标所在的那一条，偏移交给服务端去切——前端不重复实现方言规则。
+  const hasSel = el.selectionEnd > el.selectionStart;
+  const sql = hasSel ? el.value.slice(el.selectionStart, el.selectionEnd) : el.value;
+  if (!sql.trim()) return;
 
   setStatus('执行中…');
   $('btn-run').disabled = true;
   try {
     const body = { sql, max_rows: 200 };
+    if (!hasSel) body.cursor = byteOffset(sql, el.selectionStart);
     if (approvalToken) body.approval_token = approvalToken;
     const out = await api(path(API.exec, { id: state.current.id }), {
       method: 'POST',

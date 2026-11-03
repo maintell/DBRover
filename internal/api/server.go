@@ -331,6 +331,9 @@ type execRequest struct {
 	// 客户端不能用布尔值绕过 —— 审批的是「这段 SQL」，不是一个请求。
 	ApprovalToken string `json:"approval_token"`
 	MaxRows       int    `json:"max_rows"`
+	// Cursor 是编辑器里光标的字节偏移；给了就只执行光标所在的那条语句。
+	// 切分在服务端做（前端不重复实现方言规则）。
+	Cursor *int `json:"cursor"`
 }
 
 type execResponse struct {
@@ -578,6 +581,7 @@ func (s *Server) handleExec(w http.ResponseWriter, r *http.Request) {
 		Approval:      approved,
 		StatementHash: hash,
 		MaxRows:       req.MaxRows,
+		Cursor:        req.Cursor,
 		Actor:         "human:http",
 	})
 	if err != nil {
