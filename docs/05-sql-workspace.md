@@ -244,8 +244,8 @@
 | 2 | 光标在两条语句之间执行前一条 | 单测 | ✅ `TestStatementAt`（空白处归前一条）、`TestCursorBetweenStatementsRunsPrevious` |
 | 3 | 含 `;` 的字符串不被切开 | 表驱动单测（各引擎） | ✅ `dialect` 切分用例（dollar-quote / `DELIMITER` / `GO` / 嵌套注释） |
 | 4 | 多语句中第 2 条失败，第 1 条结果保留且可见 | 集成 | ⚠️ 执行器逐条返回结果（失败那条带 `err`，前面的保留）；尚未补一条专门的失败用例 |
-| 5 | 100 万行结果翻页不 OOM，内存增长 < 200MB | 压测 | ⚠️ 导出链路压过 100 万行（内存增长 10.6 MB）；游标翻页没有跑同规模压测 |
-| 6 | 深分页第 10000 页 < 500ms（有主键表） | 基准 | ⚠️ 键集分页已实现，未跑 10000 页基准 |
+| 5 | 100 万行结果翻页不 OOM，内存增长 < 200MB | 压测 | ✅ `TestMillionRowPagination`：100 万行表上按 200 行/页翻 60 页（1.2 万行），总耗时 619 ms、单页均摊 10.3 ms，**HeapAlloc 增长 1.7 MB**。断言只防「灾难性泄漏」（>200MB 才红），细微增长它抓不到 |
+| 6 | 深分页第 10000 页 < 500ms（有主键表） | 基准 | ✅ `TestDeepKeysetPageLatency`：键集分页没有 OFFSET，「第 10000 页」的代价等价于「从很靠后的键取一页」——从 50 万行之后取 200 行，**13.1 ms**。不翻一万次是因为那测的是循环不是查询 |
 | 7 | `Decimal(38,10)` 读回与写入完全一致 | 类型保真测试 | ✅ 见 `docs/06` 精度守卫与真机验收 |
 | 8 | `NULL` 与 `''` 视觉可区分 | 视觉检查 | ✅ 界面用 `NULL` 标记区分；见 `docs/06` |
 | 9 | 取消在 1s 内使引擎侧语句终止 | 集成（查 `pg_stat_activity` / `PROCESSLIST`） | ✅ 入口：执行期间工具栏「取消」→ `POST /connections/{id}/cancel`，客户端 1 毫秒内返回 `SQL_CANCELED`。真机三条都验过引擎侧真的停了：**PostgreSQL** `pg_sleep(30)` 取消后 `pg_stat_activity`（`state='active'`）1→0；**SQLite** interrupt 立刻停；**MySQL** `SLEEP(30)` 取消后 `processlist` 1→0（会话为此钉在单条物理连接上，另发 `KILL QUERY <id>`；只取消本地 ctx 不够，`SLEEP()` 不读 socket）。用例：`TestCancelStopsRunningQuery`、`TestCancelWhenIdleReturnsFalse`、`TestRunningClearedAfterNormalExecution`、`TestCancelSurvivesInterleavedQuery`、`TestCancelWhenIdle`（端点）、`TestCancelStopsStatementOnServer`（MySQL 真机，含变异验证：不发 KILL 就失败） |
