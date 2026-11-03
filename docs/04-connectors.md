@@ -405,7 +405,7 @@ type Dialect interface {
 
 | 做什么 | 怎么触发 | 失败与降级 | 验收 |
 |---|---|---|---|
-| 浏览 keyspace | `GET /connections/{id}/kv/keys?cursor&pattern&type&count` | 游标遍历超时 → 返回已取到的部分 + `has_more: true`，**不假装取完** | 真机 Redis 8.0.5 上 `SCAN` 返回 3 个 key 且 `has_more=false`；接口门禁用例覆盖 keys/entry/value 三个端点 |
+| 浏览 keyspace | 界面左侧（按 `connection.kind=keyvalue` 自动切换）；接口是 `GET /connections/{id}/kv/keys?cursor&pattern&type&count` | 游标遍历超时 → 返回已取到的部分 + `has_more: true`，**不假装取完** | 真机 Redis 8.0.5 + 浏览器实测：6 个 key 列出、pattern 框可用、点 key 进详情 |
 | 看一个 key | `GET /kv/entry?key=...` → 类型 / TTL / 编码 / 元素数 / 体积 | `MEMORY USAGE` 超时 → 只给类型与元素数，体积字段缺失，不猜 | 真机返回 `type=stream ttl=-1 size=1277`；TTL -2 表示 key 不存在 |
 | 读值 | `GET /kv/value?key=...&cursor&count&max_bytes`，按类型分页（`HSCAN`/`SSCAN`/`ZRANGE`/`XRANGE`/`GETRANGE`） | string 超过 8 KB 默认只取前 8 KB 并标 `truncated: true` | 真机读 stream 返回 `pairs=0`（空队列）不报错 |
 | 改值 | `POST /kv/apply`，一次一个结构化写操作（`set_string` / `set_field` / `delete_key` / `delete_item` / `push` / `expire`） | 与命令模式共用同一道门（`service.KVExecutor`）。**刻意不做「一次多条命令」的预案**：Redis 的 `MULTI/EXEC` 出错不回滚，套用关系型那套「整批回滚」文案会骗人 | `TestKVWriteGateAndApprovalBinding`；真机 Redis 8.0.5：写 string（带 TTL 120）→ 读回一致且 `ttl=120`；写 hash field → `HGETALL` 读回；`delete_key` 返回 1 且之后 `TYPE=none`；审计里三条 `kv.mutate` |

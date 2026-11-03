@@ -305,11 +305,14 @@ func connectConfigFrom(req createConnectionRequest, env model.Environment, mode 
 }
 
 type connectionDTO struct {
-	ID              string `json:"id"`
-	Name            string `json:"name"`
-	Engine          string `json:"engine"`
-	Environment     string `json:"environment"`
-	AccessMode      string `json:"access_mode"`
+	ID          string `json:"id"`
+	Name        string `json:"name"`
+	Engine      string `json:"engine"`
+	Environment string `json:"environment"`
+	AccessMode  string `json:"access_mode"`
+	// Kind 是「这条连接该用哪一族端点」：relational | keyvalue。
+	// 由类型断言得出，不让界面去记「哪些引擎是 NoSQL」（ADR-0007）。
+	Kind            string `json:"kind"`
 	DisplayTimeZone string `json:"display_timezone,omitempty"`
 }
 
@@ -462,6 +465,7 @@ func (s *Server) handleCreateConnection(w http.ResponseWriter, r *http.Request) 
 	writeJSON(w, http.StatusCreated, connectionDTO{
 		ID: id, Name: req.Name, Engine: string(engine),
 		Environment: string(env), AccessMode: string(mode),
+		Kind:            kindOf(e),
 		DisplayTimeZone: strings.TrimSpace(req.DisplayTimeZone),
 	})
 }
@@ -474,6 +478,7 @@ func (s *Server) handleListConnections(w http.ResponseWriter, r *http.Request) {
 		items = append(items, connectionDTO{
 			ID: e.conn.ID, Name: e.conn.Name, Engine: string(e.conn.Engine),
 			Environment: string(e.conn.Environment), AccessMode: string(e.conn.AccessMode),
+			Kind:            kindOf(e),
 			DisplayTimeZone: e.conn.DisplayTimeZone,
 		})
 	}
@@ -1776,4 +1781,15 @@ func (s *Server) writeKVOutcome(w http.ResponseWriter, out *service.KVOutcome, f
 			"result":   out.Result,
 		})
 	}
+}
+
+// kindOf 说明这条连接该用哪一族端点。
+//
+// 由类型断言得出而不是查引擎名表：将来加 Mongo/ES 时，只要它们实现
+// KVConnector，界面就自动按 key-value 渲染（ADR-0007）。
+func kindOf(e *entry) string {
+	if e.kv != nil {
+		return "keyvalue"
+	}
+	return "relational"
 }

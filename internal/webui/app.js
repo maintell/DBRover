@@ -24,6 +24,8 @@ const state = {
   schema: null,
   // 导出格式要跨视图刷新保留，否则改个筛选就被重置回 CSV
   exportFormat: 'csv',
+  // key-value 连接的状态：pattern、当前 key 与其元信息/值。
+  kv: { pattern: '', cursor: '', key: null, entry: null, value: null },
 };
 
 const $ = (id) => document.getElementById(id);
@@ -43,6 +45,11 @@ const API = {
   bulkPlan: '/api/v1/connections/:id/bulk/plan',
   compare: '/api/v1/compare',
   changeApply: '/api/v1/changes/:pid/apply',
+  kvKeys: '/api/v1/connections/:id/kv/keys',
+  kvEntry: '/api/v1/connections/:id/kv/entry',
+  kvValue: '/api/v1/connections/:id/kv/value',
+  kvApply: '/api/v1/connections/:id/kv/apply',
+  kvCommand: '/api/v1/connections/:id/kv/command',
 };
 
 // path 把 :param 占位符替换为实际值。
@@ -295,9 +302,12 @@ async function selectConnection(id) {
   state.order = null;
   state.undo = null;
   $('table-toolbar').hidden = true;
+  state.kv = { pattern: '', cursor: '', key: null, entry: null, value: null };
   const hint = document.createElement('div');
   hint.className = 'notice';
-  hint.textContent = '点左侧对象查看数据，或直接在上方执行 SQL。';
+  hint.textContent = c.kind === 'keyvalue'
+    ? '在左侧按 pattern 浏览 key，选中一个看类型与值。'
+    : '点左侧对象查看数据，或直接在上方执行 SQL。';
   $('results').replaceChildren(hint);
   setStatus('');
   await loadIdentity(c.id);
@@ -426,6 +436,11 @@ function newConnection() {
 
 async function loadTables() {
   if (!state.current) return;
+  // key-value 连接的「对象树」是 keyspace，不是表清单。
+  // kind 来自服务端的类型断言结果，界面不记「哪些引擎是 NoSQL」。
+  if (state.current.kind === 'keyvalue') {
+    return loadKeyspace();
+  }
   $('tables').replaceChildren();
   try {
     const out = await api(path(API.tables, { id: state.current.id }));
@@ -2162,3 +2177,325 @@ $('sql').addEventListener('keydown', (e) => {
 const initial = readHashToken() || sessionStorage.getItem('dbrover.token') || '';
 if (initial) saveToken(initial);
 boot();
+
+// ---------- key-value（Redis 等） ----------
+//
+// 这里刻意不做「一次性拉全量」：keyspace 可能几十万 key，SCAN 游标一页页翻，
+// 和 SQL 侧的键集分页是同一个原则。值的读取也分页，string 默认只取 8 KB。
+
+// kvApply 提交一次结构化写操作。审批流程与 SQL 侧同构：
+// 428 拿凭证 → 带 approval_token 重提。凭证绑定操作指纹，换一个 key 复用会被拒。
+async function kvApply(mutation, onDone) {
+  const url = path(API.kvApply, { id: state.current.id });
+  try {
+    const out = await api(url, { method: 'POST', body: JSON.stringify({ mutation }) });
+    showRisk(out.risk, out.friction);
+    setStatus('已执行 · 影响 ' + (out.result && out.result.changed >= 0 ? out.result.changed : '未知'));
+    if (onDone) await onDone();
+  } catch (e) {
+    if (e.code === 'POLICY_APPROVAL_REQUIRED') {
+      const t = e.detail && e.detail.approval && e.detail.approval.token;
+      if (!t) { showNotice('服务端未返回审批凭证', 'error'); return; }
+      try {
+        const out = await api(url, {
+          method: 'POST',
+          body: JSON.stringify({ mutation, approval_token: t }),
+        });
+        showRisk(out.risk, out.friction);
+        if (onDone) await onDone();
+      } catch (e2) {
+        showNotice('执行失败：' + e2.message, 'error');
+      }
+      return;
+    }
+    showNotice('执行失败：' + e.message, 'error');
+  }
+}
+
+// loadKeyspace 拉一页 key。cursor 为空表示从头开始。
+async function loadKeyspace(cursor) {
+  if (!state.current || state.current.kind !== 'keyvalue') return;
+  const box = $('tables');
+  const q = new URLSearchParams({ count: '200' });
+  if (state.kv.pattern) q.set('pattern', state.kv.pattern);
+  if (cursor) q.set('cursor', cursor);
+  let out;
+  try {
+    out = await api(path(API.kvKeys, { id: state.current.id }) + '?' + q.toString());
+  } catch (e) {
+    box.replaceChildren(notice('读取 keyspace 失败：' + e.message, 'error'));
+    return;
+  }
+
+  if (!cursor) box.replaceChildren();
+  $('table-count').textContent = state.kv.pattern ? '匹配 ' + (out.keys || []).length : (out.keys || []).length + ' 个';
+  // 第一次加载时才放 pattern 输入框与计数，避免翻页把它清掉。
+  if (!cursor) {
+    const bar = document.createElement('div');
+    bar.className = 'toolbar';
+    const inp = document.createElement('input');
+    inp.id = 'kv-pattern';
+    inp.className = 'narrow';
+    inp.placeholder = 'pattern，如 user:*';
+    inp.value = state.kv.pattern;
+    inp.onkeydown = (ev) => {
+      if (ev.key === 'Enter') {
+        state.kv.pattern = inp.value.trim();
+        loadKeyspace('');
+      }
+    };
+    const go = document.createElement('button');
+    go.textContent = '筛';
+    go.onclick = () => {
+      state.kv.pattern = inp.value.trim();
+      loadKeyspace('');
+    };
+    bar.append(inp, go);
+    box.appendChild(bar);
+  }
+
+  for (const k of out.keys || []) {
+    const b = document.createElement('button');
+    b.textContent = k;
+    b.title = k;
+    b.onclick = () => openKV(k);
+    box.appendChild(b);
+  }
+  if (!(out.keys || []).length && !cursor) {
+    box.appendChild(notice('没有匹配的 key。'));
+  }
+  if (out.has_more && out.cursor) {
+    const more = document.createElement('button');
+    more.id = 'kv-more';
+    more.textContent = '更多…';
+    more.onclick = () => {
+      more.remove();
+      loadKeyspace(out.cursor);
+    };
+    box.appendChild(more);
+  }
+}
+
+// openKV 打开一个 key：先看元信息，再按类型取一页值。
+async function openKV(key) {
+  state.view = 'kv';
+  state.kv.key = key;
+  $('table-toolbar').hidden = true;
+  let entry;
+  try {
+    entry = await api(path(API.kvEntry, { id: state.current.id }) + '?key=' + encodeURIComponent(key));
+  } catch (e) {
+    showNotice('读取 key 失败：' + e.message, 'error');
+    return;
+  }
+  state.kv.entry = entry;
+  let value = null;
+  if (entry.type !== 'none') {
+    try {
+      value = await api(path(API.kvValue, { id: state.current.id }) +
+        '?key=' + encodeURIComponent(key) + '&count=100');
+    } catch (e) {
+      showNotice('读取值失败：' + e.message, 'error');
+    }
+  }
+  state.kv.value = value;
+  renderKV();
+}
+
+// renderKV 画一个 key 的详情。写操作按钮对只读连接一律置灰——
+// 不是点了再报错，而是根本不出现。
+function renderKV() {
+  const { key, entry, value } = state.kv;
+  const wrap = document.createElement('div');
+  wrap.className = 'schema';
+
+  const meta = document.createElement('div');
+  meta.className = 'meta';
+  meta.append(
+    badge('key ' + key),
+    badge('类型 ' + (entry ? entry.type : '?')),
+    badge(entry && entry.ttl_seconds === -1 ? '永不过期'
+      : entry && entry.ttl_seconds >= 0 ? 'TTL ' + entry.ttl_seconds + 's' : 'TTL —'),
+    badge(entry && entry.length !== null && entry.length !== undefined ? '元素 ' + entry.length : '元素 —'),
+    badge(entry && entry.size_bytes ? fmtSize(entry.size_bytes) : '体积 —'),
+  );
+  if (entry && entry.encoding) meta.appendChild(badge('编码 ' + entry.encoding));
+  wrap.appendChild(meta);
+
+  if (!entry || entry.type === 'none') {
+    wrap.appendChild(notice('这个 key 不存在（可能已被删掉）。'));
+    $('results').replaceChildren(wrap);
+    return;
+  }
+
+  const writable = state.current && state.current.access_mode !== 'read-only';
+
+  if (value && value.type === 'string') {
+    const pre = document.createElement('pre');
+    pre.className = 'preview';
+    pre.textContent = (value.string || '') + (value.truncated ? '\n…（已截断，只取前 8 KB）' : '');
+    wrap.appendChild(pre);
+  } else if (value && (value.pairs || []).length) {
+    const t = document.createElement('table');
+    const thead = document.createElement('thead');
+    const htr = document.createElement('tr');
+    const heads = value.type === 'hash' ? ['field', 'value']
+      : value.type === 'zset' ? ['member', 'score']
+        : value.type === 'stream' ? ['id', '值']
+          : value.type === 'set' ? ['member'] : ['下标', 'value'];
+    for (const h of heads) {
+      const th = document.createElement('th');
+      th.textContent = h;
+      htr.appendChild(th);
+    }
+    thead.appendChild(htr);
+    t.appendChild(thead);
+    const tb = document.createElement('tbody');
+    for (const p of value.pairs) {
+      const tr = document.createElement('tr');
+      if (value.type === 'hash') { tr.append(cell(p.field), cell(p.value)); }
+      else if (value.type === 'zset') { tr.append(cell(p.member), cell(String(p.score))); }
+      else if (value.type === 'stream') { tr.append(cell(p.id), cell(p.value)); }
+      else if (value.type === 'set') { tr.append(cell(p.member)); }
+      else { tr.append(cell(p.field), cell(p.value)); }
+      tb.appendChild(tr);
+    }
+    t.appendChild(tb);
+    wrap.appendChild(t);
+    if (value.has_more) wrap.appendChild(notice('只显示了前一批，更多内容请用命令模式按需读取。'));
+  } else if (value && value.type === 'other') {
+    wrap.appendChild(notice('位图 / HyperLogLog / geo / 模块类型的值不做结构化展示。'));
+  } else {
+    wrap.appendChild(notice('这个 key 没有可展示的值。'));
+  }
+
+  if (writable) {
+    const bar = document.createElement('div');
+    bar.className = 'toolbar';
+    if (entry.type === 'string') {
+      const inp = document.createElement('input');
+      inp.id = 'kv-newval';
+      inp.className = 'narrow';
+      inp.placeholder = '新值';
+      const save = document.createElement('button');
+      save.className = 'primary';
+      save.textContent = '改值';
+      save.onclick = () => kvApply(
+        { kind: 'set_string', key, value: inp.value },
+        () => openKV(key));
+      bar.append(inp, save);
+    }
+    if (entry.type === 'hash') {
+      const f = document.createElement('input');
+      f.id = 'kv-field';
+      f.className = 'narrow';
+      f.placeholder = 'field';
+      const v = document.createElement('input');
+      v.id = 'kv-field-val';
+      v.className = 'narrow';
+      v.placeholder = 'value';
+      const save = document.createElement('button');
+      save.className = 'primary';
+      save.textContent = '写字段';
+      save.onclick = () => kvApply(
+        { kind: 'set_field', key, field: f.value, value: v.value },
+        () => openKV(key));
+      bar.append(f, v, save);
+    }
+    const del = document.createElement('button');
+    del.id = 'kv-del';
+    del.textContent = '删 key';
+    del.onclick = async () => {
+      const ok = await dialog('删除 key', '<p>删除 <code>' + escapeHTML(key) +
+        '</code>？Redis 没有事务回滚，删了就没了。</p>', '删除');
+      if (!ok) return;
+      await kvApply({ kind: 'delete_key', key }, async () => {
+        state.kv.key = null;
+        await loadKeyspace('');
+        $('results').replaceChildren(notice('已删除 ' + key + '。', 'warn'));
+      });
+    };
+    bar.appendChild(del);
+    wrap.appendChild(bar);
+  }
+
+  // 命令模式：结构化「命令 + 参数」，不接受自由文本。
+  const cmdBar = document.createElement('div');
+  cmdBar.className = 'toolbar';
+  const cmd = document.createElement('input');
+  cmd.id = 'kv-cmd';
+  cmd.className = 'narrow';
+  cmd.placeholder = '命令，如 TTL ' + key;
+  const run = document.createElement('button');
+  run.id = 'kv-run';
+  run.textContent = '执行命令';
+  run.onclick = () => runKVCommand(cmd.value);
+  const hint = document.createElement('span');
+  hint.className = 'notice';
+  hint.textContent = 'KEYS 与 DEBUG 被禁用；写命令在生产环境需要确认。';
+  cmdBar.append(cmd, run, hint);
+  wrap.appendChild(cmdBar);
+
+  $('results').replaceChildren(wrap);
+  setStatus('key ' + key);
+}
+
+// runKVCommand 把「命令 + 空白分隔的参数」拆成结构化请求。
+// 不做 shell 风格的引号解析：需要带空格的参数时用 JSON 数组形式。
+async function runKVCommand(text) {
+  const parts = String(text || '').trim().split(/\s+/).filter(Boolean);
+  if (!parts.length) {
+    showNotice('先输入命令。', 'warn');
+    return;
+  }
+  const name = parts[0].toUpperCase();
+  const args = parts.slice(1);
+  const url = path(API.kvCommand, { id: state.current.id });
+  const send = async (token) => {
+    const bodyObj = { name, args };
+    if (token) bodyObj.approval_token = token;
+    return api(url, { method: 'POST', body: JSON.stringify(bodyObj) });
+  };
+  try {
+    let out;
+    try {
+      out = await send(null);
+    } catch (e) {
+      if (e.code !== 'POLICY_APPROVAL_REQUIRED') throw e;
+      const t = e.detail && e.detail.approval && e.detail.approval.token;
+      if (!t) { showNotice('服务端未返回审批凭证', 'error'); return; }
+      const ok = await dialog('这条命令需要确认',
+        '<p>' + escapeHTML(e.message) + '</p><pre>' + escapeHTML(name + ' ' + args.join(' ')) + '</pre>',
+        '执行');
+      if (!ok) return;
+      out = await send(t);
+    }
+    showRisk(out.risk, out.friction);
+    const res = out.result || {};
+    const rows = res.rows || [];
+    const pre = document.createElement('pre');
+    pre.className = 'preview';
+    pre.textContent = rows.length ? rows.map((r) => JSON.stringify(r[0])).join('\n') : '（无返回）';
+    $('results').replaceChildren(pre);
+    setStatus(name + ' 执行完成');
+  } catch (e) {
+    showNotice('命令失败：' + e.message, 'error');
+  }
+}
+
+// notice 造一个小提示块。
+function notice(text, kind) {
+  const d = document.createElement('div');
+  d.className = 'notice' + (kind ? ' ' + kind : '');
+  d.textContent = text;
+  return d;
+}
+
+// badge 造一个元信息小标签。
+function badge(text) {
+  const s = document.createElement('span');
+  s.className = 'badge';
+  s.textContent = text;
+  return s;
+}
+
