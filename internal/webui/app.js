@@ -2282,6 +2282,19 @@ async function explainSQL() {
       return;
     }
     renderExec(out);
+    // 引擎已经说了「这张表在被全表扫描」，工具该替它翻译成人话，
+    // 贴在计划表前面，免得用户自己去数 detail 列。
+    const findings = out.findings || [];
+    if (findings.length) {
+      const box = document.createElement('div');
+      box.className = 'notice warn';
+      for (const f of findings) {
+        const line = document.createElement('div');
+        line.textContent = '· ' + f.message + (f.hint ? '（' + f.hint + '）' : '');
+        box.appendChild(line);
+      }
+      $('results').prepend(box);
+    }
     setStatus('执行计划 · ' + out.duration_ms + ' ms');
   } catch (e) {
     showNotice('取执行计划失败：' + e.message, 'error');

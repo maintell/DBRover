@@ -95,7 +95,7 @@ func TestExplainEndpoint(t *testing.T) {
 	execSQL(t, ts, connID, "CREATE TABLE items (id INTEGER PRIMARY KEY, v TEXT)")
 
 	code, body := do(t, ts, http.MethodPost, "/api/v1/connections/"+connID+"/explain",
-		map[string]any{"sql": "SELECT * FROM items WHERE id = 1"}, true)
+		map[string]any{"sql": "SELECT * FROM items WHERE v = 'x'"}, true)
 	if code != http.StatusOK {
 		t.Fatalf("取计划失败: %d %v", code, body)
 	}
@@ -111,6 +111,22 @@ func TestExplainEndpoint(t *testing.T) {
 	rows, _ := r0["rows"].([]any)
 	if len(rows) == 0 {
 		t.Error("执行计划不该是空结果")
+	}
+
+	// 没有索引的表上 SELECT * 一定是全表扫描，findings 必须把它翻出来。
+	findings, _ := body["findings"].([]any)
+	if len(findings) == 0 {
+		t.Fatalf("应报至少一条计划偏差，响应：%v", body)
+	}
+	hasFullScan := false
+	for _, f := range findings {
+		fm, _ := f.(map[string]any)
+		if fm["code"] == "FULL_SCAN" {
+			hasFullScan = true
+		}
+	}
+	if !hasFullScan {
+		t.Errorf("应报全表扫描: %v", findings)
 	}
 }
 

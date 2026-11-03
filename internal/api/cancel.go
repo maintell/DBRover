@@ -74,10 +74,17 @@ func (s *Server) handleExplain(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadGateway, "SQL_EXEC_FAILED", "connection", err.Error(), "", false)
 		return
 	}
+	// 把计划翻成「哪里可能不对」——只翻译引擎自己说的话（SCAN / Seq Scan / type=ALL），
+	// 不自己估代价：跨引擎自算的代价必然是错的。
+	var findings []service.PlanFinding
+	if len(out.Results) > 0 {
+		findings = service.AnalyzePlan(e.conn.Engine, out.Results[0].Columns, out.Results[0].Rows)
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"execution_id": out.ExecutionID,
 		"risk":         out.Risk,
 		"results":      out.Results,
+		"findings":     findings,
 		"duration_ms":  out.Duration.Milliseconds(),
 		"error":        out.Err,
 	})
