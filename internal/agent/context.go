@@ -78,6 +78,18 @@ func (r *Runtime) retrieveContext(ctx context.Context, question string) string {
 		fmt.Fprintf(&b, "（还有 %d 个未列出，需要时用 meta.search 或 meta.objects）\n", len(names)-len(shown))
 	}
 
+	// 第三路召回：结构邻近（docs/11 §4.2）。
+	//
+	// 为什么值得多花几次元数据查询：问「orders 有多少行」时，真正要改的
+	// 往往不是 orders 本身，而是依赖它的视图或子表；只给命中对象，模型就
+	// 会在「我发现只有 orders」这条路上走到黑。
+	if lines := r.relatedLines(ctx, shown, seen); len(lines) > 0 {
+		b.WriteString("这些对象依赖上面的对象：\n")
+		for _, l := range lines {
+			b.WriteString("- " + l + "\n")
+		}
+	}
+
 	// 只给前几张表的列定义：列定义是最占地方的部分，给多了等于把预算吃光。
 	detail := 0
 	for _, n := range shown {
@@ -219,4 +231,58 @@ func compactHistory(msgs []Message, budget int) ([]Message, int) {
 		compacted++
 	}
 	return out, compacted
+}
+
+// relatedLines 列出「依赖命中对象」的东西（视图与外键）。
+//
+// 只用 Dependents 给出的信息，不做二次猜测：
+//   - 视图依赖：Name 就是视图名，直接可用；
+//   - 外键依赖：Name 是约束名，真正有用的是 Detail（`orders.customer_id → customers.id`），
+//     所以原样带 Detail 而不是硬猜表名。
+//
+// 只查最前面的三个命中对象：依赖查询是逐个对象一次元数据往返，查太多会把
+// 一轮的准备时间从毫秒级拖到百毫秒级。
+func (r *Runtime) relatedLines(ctx context.Context, hits []string, seen map[string]model.ObjectRef) []string {
+	if len(hits) == 0 {
+		return nil
+	}
+	const (
+		maxProbe   = 3
+		maxRelated = 8
+	)
+	var out []string
+	seenLine := map[string]bool{}
+	for i, name := range hits {
+		if i >= maxProbe || len(out) >= maxRelated {
+			break
+		}
+		deps, err := r.cat.Dependents(ctx, seen[name])
+		if err != nil {
+			continue
+		}
+		for _, d := range deps {
+			if len(out) >= maxRelated {
+				break
+			}
+			var line string
+			switch {
+			case strings.EqualFold(d.Kind, "view"):
+				line = d.Name + "（视图，引用 " + name + "）"
+			case d.Detail != "":
+				line = d.Detail + "（外键约束 " + d.Name + "）"
+			default:
+				line = d.Kind + " " + d.Name + "（引用 " + name + "）"
+			}
+			if !d.Exact && !strings.Contains(line, "可能误报") {
+				// 近似结果必须标出来，否则模型会把它当精确事实用。
+				line += "（按文本匹配得到，可能误报）"
+			}
+			if seenLine[line] {
+				continue
+			}
+			seenLine[line] = true
+			out = append(out, line)
+		}
+	}
+	return out
 }

@@ -261,3 +261,29 @@ func hasContextMessage(msgs []Message) bool {
 	}
 	return false
 }
+
+// TestRetrieveContextFollowsDependencies 对应 docs/11 §4.2 的「结构邻近」一路：
+// 命中 customers 时，引用它的视图与外键也要带上——真正要改的往往是它们。
+func TestRetrieveContextFollowsDependencies(t *testing.T) {
+	conn := openInnerConn(t,
+		`CREATE TABLE customers (id INTEGER PRIMARY KEY, name TEXT)`,
+		`CREATE TABLE orders (id INTEGER PRIMARY KEY, customer_id INTEGER REFERENCES customers(id))`,
+		`CREATE VIEW v_customers AS SELECT id, name FROM customers`,
+	)
+	rt := newInnerRuntime(t, conn, ModeReadOnly)
+
+	got := rt.retrieveContext(context.Background(), "customers 有多少个")
+	if !strings.Contains(got, "customers") {
+		t.Fatalf("应检索到 customers: %q", got)
+	}
+	if !strings.Contains(got, "v_customers") {
+		t.Errorf("应带出引用它的视图: %q", got)
+	}
+	if !strings.Contains(got, "orders") {
+		t.Errorf("应带出引用它的外键（detail 里含子表名）: %q", got)
+	}
+	// 视图依赖在 SQLite 上是文本匹配得到的，必须标注可能误报。
+	if strings.Contains(got, "v_customers") && !strings.Contains(got, "可能误报") {
+		t.Errorf("近似结果应标注可能误报: %q", got)
+	}
+}
