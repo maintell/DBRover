@@ -158,7 +158,11 @@ func stripExplain(toks []Token, a *Analysis) []Token {
 			case toks[0].IsKw("ANALYZE"):
 				a.ExplainAnalyze = true
 				toks = toks[1:]
-			case toks[0].IsKw("VERBOSE"), toks[0].IsKw("FORMAT"), toks[0].IsKw("TRADITIONAL"),
+			// SQLite 的写法是 EXPLAIN QUERY PLAN <语句>；不认这两个词，
+			// mainVerb 会拿到 QUERY，整条语句被判成「无法识别 → 按写处理」，
+			// 于是「看执行计划」在只读连接上被拒、在可写连接上要审批。
+			case toks[0].IsKw("QUERY"), toks[0].IsKw("PLAN"),
+				toks[0].IsKw("VERBOSE"), toks[0].IsKw("FORMAT"), toks[0].IsKw("TRADITIONAL"),
 				toks[0].IsKw("TREE"), toks[0].IsKw("JSON"), toks[0].IsKw("EXTENDED"),
 				toks[0].Text == "=":
 				toks = toks[1:]

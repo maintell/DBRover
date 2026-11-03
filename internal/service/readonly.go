@@ -50,12 +50,30 @@ func IsReadOnlyViolation(err error) bool {
 //
 // 只给计划、不执行：Agent 想在动手前看看代价，这个需求真实存在，
 // 但「EXPLAIN ANALYZE」会真的跑一遍，所以这里固定用不带 ANALYZE 的形式。
-func (e *Executor) Explain(ctx context.Context, sqlText string) (*Outcome, error) {
-	wrapped, supported := e.dialect.ExplainSQL(sqlText)
+func (e *Executor) Explain(ctx context.Context, req Request) (*Outcome, error) {
+	// 与执行同一套光标规则：多段脚本里解释光标所在的那一条，
+	// 否则「EXPLAIN 两条语句」会被引擎当成语法错误。
+	if req.Cursor != nil {
+		stmts, err := e.dialect.Split(req.SQL)
+		if err != nil {
+			return nil, err
+		}
+		if len(stmts) == 0 {
+			return nil, errors.New("没有可解释的语句")
+		}
+		req.SQL = statementAt(stmts, *req.Cursor).Text
+	}
+	wrapped, supported := e.dialect.ExplainSQL(req.SQL)
 	if !supported {
 		return nil, ErrExplainUnsupported
 	}
-	return e.Execute(ctx, Request{SQL: wrapped, MaxRows: 200})
+	// 走同一个执行门：Actor 与 MaxRows 原样带过去，审计里记的才是真正发起的人。
+	req.SQL = wrapped
+	req.Cursor = nil
+	if req.MaxRows <= 0 {
+		req.MaxRows = 200
+	}
+	return e.Execute(ctx, req)
 }
 
 // ErrExplainUnsupported 表示该引擎没有能用单条语句表达的执行计划。

@@ -418,7 +418,7 @@ func (r *Runtime) toolQueryExplain() Tool {
 			if bad := decodeArgs(args, &in); bad != nil {
 				return *bad
 			}
-			out, err := r.exec.Explain(ctx, in.SQL)
+			out, err := r.exec.Explain(ctx, service.Request{SQL: in.SQL, Actor: r.actor})
 			if err != nil {
 				if err == service.ErrExplainUnsupported {
 					return fail("EXPLAIN_UNSUPPORTED", err.Error(),

@@ -840,6 +840,16 @@
         }
       }
     },
+    "/api/v1/connections/{id}/explain": {
+      "post": {
+        "summary": "取一条查询的执行计划（不执行语句本身；可带 cursor 只解释光标所在那条）",
+        "responses": {
+          "200": { "description": "ok" },
+          "400": { "description": "这个引擎不支持单条语句取计划（MSSQL / Oracle）" },
+          "404": { "description": "连接不存在" }
+        }
+      }
+    },
     "/api/v1/agent/status": {
       "get": {
         "summary": "Agent 是否可用（模型服务配置状态）",

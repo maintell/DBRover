@@ -127,6 +127,7 @@ func TestClassify(t *testing.T) {
 		{"BEGIN", model.EnginePostgres, "BEGIN", ClassTCL, false, "BEGIN", ""},
 		{"无法识别按写处理", model.EnginePostgres, "CALL p()", ClassUnknown, true, "CALL", ""},
 		{"EXPLAIN 只读", model.EnginePostgres, "EXPLAIN SELECT 1", ClassQuery, false, "SELECT", ""},
+		{"EXPLAIN QUERY PLAN 只读", model.EngineSQLite, "EXPLAIN QUERY PLAN SELECT * FROM t", ClassQuery, false, "SELECT", ""},
 		{"EXPLAIN ANALYZE 写语句", model.EnginePostgres, "EXPLAIN ANALYZE DELETE FROM t", ClassDML, true, "DELETE", ""},
 		{"SELECT INTO", model.EngineMSSQL, "SELECT * INTO newtab FROM t", ClassQuery, true, "SELECT", ""},
 	}

@@ -42,6 +42,7 @@ const API = {
   export: '/api/v1/connections/:id/export',
   exec: '/api/v1/connections/:id/exec',
   cancel: '/api/v1/connections/:id/cancel',
+  explain: '/api/v1/connections/:id/explain',
   changePlan: '/api/v1/connections/:id/changes/plan',
   bulkPlan: '/api/v1/connections/:id/bulk/plan',
   compare: '/api/v1/compare',
@@ -2195,13 +2196,21 @@ function byteOffset(text, utf16Index) {
   return new TextEncoder().encode(text.slice(0, utf16Index)).length;
 }
 
-async function runSQL(approvalToken) {
-  if (!state.current) { showNotice('请先建立连接。', 'warn'); return; }
+// currentStatement 返回「现在该执行/解释的那段 SQL」与光标偏移。
+//
+// 选中了一段就用选中的那段（各家 SQL 客户端都是这个习惯）；没选就用全文，
+// 由服务端按光标偏移挑出那一条——前端不重复实现方言切分规则。
+function currentStatement() {
   const el = $('sql');
-  // 选中了一段就跑选中的那段（各家 SQL 客户端都是这个习惯）；
-  // 没选就跑光标所在的那一条，偏移交给服务端去切——前端不重复实现方言规则。
   const hasSel = el.selectionEnd > el.selectionStart;
   const sql = hasSel ? el.value.slice(el.selectionStart, el.selectionEnd) : el.value;
+  return { sql: sql, cursor: hasSel ? null : byteOffset(sql, el.selectionStart) };
+}
+
+async function runSQL(approvalToken) {
+  if (!state.current) { showNotice('请先建立连接。', 'warn'); return; }
+  const cur = currentStatement();
+  const sql = cur.sql;
   if (!sql.trim()) return;
 
   setStatus('执行中…');
@@ -2210,7 +2219,7 @@ async function runSQL(approvalToken) {
   $('btn-cancel').hidden = false;
   try {
     const body = { sql, max_rows: 200 };
-    if (!hasSel) body.cursor = byteOffset(sql, el.selectionStart);
+    if (cur.cursor !== null) body.cursor = cur.cursor;
     if (approvalToken) body.approval_token = approvalToken;
     const out = await api(path(API.exec, { id: state.current.id }), {
       method: 'POST',
@@ -2250,6 +2259,33 @@ async function runSQL(approvalToken) {
   } finally {
     $('btn-run').disabled = false;
     $('btn-cancel').hidden = true;
+  }
+}
+
+// explainSQL 取执行计划：只看计划，不执行语句本身。
+async function explainSQL() {
+  if (!state.current) { showNotice('请先建立连接。', 'warn'); return; }
+  const cur = currentStatement();
+  if (!cur.sql.trim()) return;
+
+  setStatus('取执行计划…');
+  try {
+    const body = { sql: cur.sql };
+    if (cur.cursor !== null) body.cursor = cur.cursor;
+    const out = await api(path(API.explain, { id: state.current.id }), {
+      method: 'POST',
+      body: JSON.stringify(body),
+    });
+    if (out.error) {
+      showNotice(out.error.message, 'error');
+      setStatus('计划失败');
+      return;
+    }
+    renderExec(out);
+    setStatus('执行计划 · ' + out.duration_ms + ' ms');
+  } catch (e) {
+    showNotice('取执行计划失败：' + e.message, 'error');
+    setStatus('失败');
   }
 }
 
@@ -2502,6 +2538,8 @@ $('btn-forget').onclick = () => {
 $('btn-run').onclick = () => runSQL(false);
 
 // 取消：独立一次请求。执行那条请求正阻塞着等结果，没法用它自己取消自己。
+$('btn-explain').onclick = () => explainSQL();
+
 $('btn-cancel').onclick = async () => {
   if (!state.current) return;
   try {

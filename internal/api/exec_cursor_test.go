@@ -2,6 +2,7 @@ package api_test
 
 import (
 	"net/http"
+	"strings"
 	"testing"
 )
 
@@ -84,5 +85,56 @@ func TestCancelWhenIdle(t *testing.T) {
 	}
 	if body["canceled"] != false {
 		t.Errorf("空闲时 canceled 应为 false，实际 %v", body["canceled"])
+	}
+}
+
+// TestExplainEndpoint 取执行计划：不执行语句本身，但能拿到计划行。
+func TestExplainEndpoint(t *testing.T) {
+	_, ts, dir := newServer(t)
+	connID := createConn(t, ts, dir, "test", "read-write")
+	execSQL(t, ts, connID, "CREATE TABLE items (id INTEGER PRIMARY KEY, v TEXT)")
+
+	code, body := do(t, ts, http.MethodPost, "/api/v1/connections/"+connID+"/explain",
+		map[string]any{"sql": "SELECT * FROM items WHERE id = 1"}, true)
+	if code != http.StatusOK {
+		t.Fatalf("取计划失败: %d %v", code, body)
+	}
+	results, _ := body["results"].([]any)
+	if len(results) != 1 {
+		t.Fatalf("结果条数 = %d，响应：%v", len(results), body)
+	}
+	r0, _ := results[0].(map[string]any)
+	sqlText, _ := r0["sql"].(string)
+	if !strings.HasPrefix(strings.ToUpper(sqlText), "EXPLAIN QUERY PLAN") {
+		t.Errorf("SQLite 上应该用 EXPLAIN QUERY PLAN，实际 %q", sqlText)
+	}
+	rows, _ := r0["rows"].([]any)
+	if len(rows) == 0 {
+		t.Error("执行计划不该是空结果")
+	}
+}
+
+// TestExplainUsesCursor 多段脚本里只解释光标所在的那一条。
+func TestExplainUsesCursor(t *testing.T) {
+	_, ts, dir := newServer(t)
+	connID := createConn(t, ts, dir, "test", "read-write")
+	execSQL(t, ts, connID, "CREATE TABLE items (id INTEGER PRIMARY KEY, v TEXT)")
+
+	first := "UPDATE items SET v = 'x' WHERE id = 1;"
+	script := first + "\nSELECT * FROM items;"
+
+	code, body := do(t, ts, http.MethodPost, "/api/v1/connections/"+connID+"/explain",
+		map[string]any{"sql": script, "cursor": len(first) + 2}, true)
+	if code != http.StatusOK {
+		t.Fatalf("取计划失败: %d %v", code, body)
+	}
+	results, _ := body["results"].([]any)
+	r0, _ := results[0].(map[string]any)
+	sqlText, _ := r0["sql"].(string)
+	if strings.Contains(strings.ToUpper(sqlText), "UPDATE") {
+		t.Errorf("解释的应该是 SELECT，实际 %q", sqlText)
+	}
+	if !strings.Contains(strings.ToUpper(sqlText), "SELECT * FROM ITEMS") {
+		t.Errorf("解释的语句不对: %q", sqlText)
 	}
 }
