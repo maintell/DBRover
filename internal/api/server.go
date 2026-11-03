@@ -106,6 +106,7 @@ func (s *Server) routes() []route {
 		{http.MethodGet, "/api/v1/connections/{id}/tables/{name}/schema", false, s.handleTableSchema},
 		{http.MethodPost, "/api/v1/connections/{id}/schema/plan", false, s.handleSchemaPlan},
 		{http.MethodPost, "/api/v1/connections/{id}/bulk/plan", false, s.handleBulkPlan},
+		{http.MethodPost, "/api/v1/compare", false, s.handleCompare},
 		{http.MethodPost, "/api/v1/changes/{pid}/apply", false, s.handleChangeApply},
 		{http.MethodPost, "/api/v1/connections/{id}/query", false, s.handleQuery},
 		{http.MethodGet, "/api/v1/results/{cid}/page", false, s.handlePage},
@@ -875,6 +876,45 @@ func (s *Server) handleBulkPlan(w http.ResponseWriter, r *http.Request) {
 	s.mu.Unlock()
 
 	writeJSON(w, http.StatusCreated, res)
+}
+
+type compareRequest struct {
+	Left  string `json:"left"`
+	Right string `json:"right"`
+}
+
+// handleCompare 比对两个已打开连接的结构。
+//
+// 只读：不生成预案、不改任何一边。返回的 upgrade/downgrade 只是文本，
+// 要落地仍需走变更预案。
+func (s *Server) handleCompare(w http.ResponseWriter, r *http.Request) {
+	var req compareRequest
+	if err := decode(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, "REQUEST_INVALID", "internal", err.Error(), "", false)
+		return
+	}
+	if req.Left == "" || req.Right == "" {
+		writeError(w, http.StatusBadRequest, "REQUEST_INVALID", "internal",
+			"需要 left 与 right 两个连接 id", "", false)
+		return
+	}
+
+	s.mu.RLock()
+	left, lok := s.conns[req.Left]
+	right, rok := s.conns[req.Right]
+	s.mu.RUnlock()
+	if !lok || !rok {
+		writeError(w, http.StatusNotFound, "CONNECTION_NOT_FOUND", "connection",
+			"左侧或右侧连接不存在", "", false)
+		return
+	}
+
+	res, err := service.Compare(r.Context(), left.drv, right.drv)
+	if err != nil {
+		writeError(w, http.StatusBadGateway, "COMPARE_FAILED", "internal", err.Error(), "", true)
+		return
+	}
+	writeJSON(w, http.StatusOK, res)
 }
 
 func (s *Server) handleChangePlan(w http.ResponseWriter, r *http.Request) {

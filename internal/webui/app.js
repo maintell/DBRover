@@ -39,6 +39,7 @@ const API = {
   exec: '/api/v1/connections/:id/exec',
   changePlan: '/api/v1/connections/:id/changes/plan',
   bulkPlan: '/api/v1/connections/:id/bulk/plan',
+  compare: '/api/v1/compare',
   changeApply: '/api/v1/changes/:pid/apply',
 };
 
@@ -805,6 +806,114 @@ async function applyPlan(pid, token, after) {
     }
     showNotice('应用变更失败：' + e.message, 'error');
   }
+}
+
+// ---------- 结构比对 ----------
+
+// showCompare 比对两个已打开连接的结构。只读：不生成预案、不改任何一边。
+function showCompare() {
+  if (!state.conns.length) {
+    showNotice('至少要有两个连接才能比对。', 'warn');
+    return;
+  }
+  const opts = (pick) => state.conns
+    .map((c) => '<option value="' + c.id + '"' + (c.id === pick ? ' selected' : '') + '>' +
+      escapeHTML(c.name || c.id) + ' · ' + escapeHTML(c.engine) + '</option>')
+    .join('');
+  const html =
+    '<label class="field">左侧（被改的一方）</label><select id="cmp-left" style="width:100%">' +
+    opts(state.current && state.current.id) + '</select>' +
+    '<label class="field">右侧（目标结构）</label><select id="cmp-right" style="width:100%">' +
+    opts(state.conns.length > 1 ? state.conns[1].id : undefined) + '</select>';
+
+  dialog('结构比对', html, '比对').then(async (ok) => {
+    if (!ok) return;
+    await runCompare($('cmp-left').value, $('cmp-right').value);
+  });
+}
+
+async function runCompare(left, right) {
+  try {
+    const res = await api(API.compare, {
+      method: 'POST',
+      body: JSON.stringify({ left, right }),
+    });
+    renderCompare(res);
+  } catch (e) {
+    showNotice('比对失败：' + e.message, 'error');
+  }
+}
+
+function renderCompare(res) {
+  const wrap = document.createElement('div');
+  wrap.className = 'schema';
+
+  const summary = document.createElement('div');
+  const tables = res.tables || [];
+  summary.className = 'notice';
+  summary.textContent = tables.length
+    ? '有差异的表：' + tables.length + ' 张（左侧 ' + res.left_engine + ' / 右侧 ' + res.right_engine + '）'
+    : '两侧结构一致（左侧 ' + res.left_engine + ' / 右侧 ' + res.right_engine + '）';
+  wrap.appendChild(summary);
+
+  if (tables.length) {
+    const t = document.createElement('table');
+    const thead = document.createElement('thead');
+    const htr = document.createElement('tr');
+    for (const label of ['表', '状态', '差异']) {
+      const th = document.createElement('th');
+      th.textContent = label;
+      htr.appendChild(th);
+    }
+    thead.appendChild(htr);
+    t.appendChild(thead);
+    const tb = document.createElement('tbody');
+    for (const td of tables) {
+      const tr = document.createElement('tr');
+      tr.appendChild(cell(td.name));
+      tr.appendChild(cell(td.status));
+      // 仅在单侧的列没有「原因」，写清楚它是缺了还是多了，别留一个空冒号。
+      tr.appendChild(cell((td.columns || []).map((c) => {
+        if (c.status === 'only_left') return c.name + '：仅在左侧';
+        if (c.status === 'only_right') return c.name + '：仅在右侧';
+        return c.name + '：' + (c.reason || []).join('；');
+      }).join('\n')));
+      tb.appendChild(tr);
+    }
+    t.appendChild(tb);
+    wrap.appendChild(t);
+  }
+
+  const addPre = (title, lines) => {
+    if (!lines || !lines.length) return;
+    const h = document.createElement('div');
+    h.className = 'head';
+    h.textContent = title;
+    wrap.appendChild(h);
+    const pre = document.createElement('pre');
+    pre.className = 'preview';
+    pre.textContent = lines.join('\n');
+    wrap.appendChild(pre);
+  };
+  addPre('升级脚本（左侧 → 右侧，仅增量）', res.upgrade);
+  addPre('回退脚本', res.downgrade);
+
+  if ((res.need_review || []).length) {
+    const h = document.createElement('div');
+    h.className = 'head';
+    h.textContent = '需要人工决策';
+    wrap.appendChild(h);
+    const ul = document.createElement('ul');
+    for (const n of res.need_review) {
+      const li = document.createElement('li');
+      li.textContent = n;
+      ul.appendChild(li);
+    }
+    wrap.appendChild(ul);
+  }
+
+  $('results').replaceChildren(wrap);
+  setStatus('比对完成');
 }
 
 // ---------- 条件批量修改 ----------
@@ -1706,6 +1815,7 @@ $('token').addEventListener('keydown', (e) => {
 $('conn').onchange = (e) => selectConnection(e.target.value);
 $('btn-reload').onclick = () => loadTables();
 $('btn-new-conn').onclick = () => newConnection();
+$('btn-compare').onclick = () => showCompare();
 $('btn-new-table').onclick = () => showCreateTable();
 $('btn-forget').onclick = () => {
   forgetToken();

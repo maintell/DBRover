@@ -586,6 +586,33 @@
         }
       }
     },
+    "/api/v1/compare": {
+      "post": {
+        "summary": "比对两个连接的结构",
+        "description": "只读：不生成预案、不改任何一边。返回每张表的状态（only_left / only_right / changed / need_review）与逐列差异原因。upgrade 只包含增量语句（建缺失的表、加缺失的列）；删除与改类型一律进 need_review，不自动生成脚本。",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["left", "right"],
+                "properties": {
+                  "left": { "type": "string", "description": "左侧连接 id" },
+                  "right": { "type": "string", "description": "右侧连接 id" }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": { "description": "比对结论：tables + upgrade + downgrade + need_review" },
+          "400": { "description": "缺少 left / right（REQUEST_INVALID）" },
+          "404": { "description": "连接不存在" },
+          "502": { "description": "读取结构失败（COMPARE_FAILED）" }
+        }
+      }
+    },
     "/api/v1/audit": {
       "get": {
         "summary": "审计事件",
