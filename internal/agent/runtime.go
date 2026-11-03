@@ -40,6 +40,9 @@ type Options struct {
 	MaxSteps        int
 	MaxToolFailures int
 	MaxDuration     time.Duration
+	// ContextBudget 是历史消息的字符预算，0 表示默认（24000）。
+	// 超过就把最早的工具结果压成一指代（见 compactHistory）。
+	ContextBudget int
 	// Actor 是审计里的发起者，默认 agent:local。
 	Actor string
 }
@@ -81,6 +84,7 @@ type Runtime struct {
 	maxSteps        int
 	maxToolFailures int
 	maxDuration     time.Duration
+	contextBudget   int
 	tools           map[string]Tool
 
 	mu       sync.Mutex
@@ -132,6 +136,7 @@ func NewRuntime(o Options) (*Runtime, error) {
 		maxSteps:        o.MaxSteps,
 		maxToolFailures: o.MaxToolFailures,
 		maxDuration:     o.MaxDuration,
+		contextBudget:   o.ContextBudget,
 		plans:           map[string]*service.ChangePlan{},
 		approved:        map[string]bool{},
 		failures:        map[string]int{},
@@ -313,8 +318,19 @@ func (r *Runtime) ask(ctx context.Context, question string, emit func(Event)) (*
 
 	r.mu.Lock()
 	r.failures = map[string]int{}
-	msgs := append(append([]Message(nil), r.history...), Message{Role: "user", Content: question})
+	msgs := append([]Message(nil), r.history...)
 	r.mu.Unlock()
+
+	// Tier 1：按问题里的词检索相关对象，放在问题之前——模型先知道「库里有这些」，
+	// 再看问题，不至于把表名凭空编出来。
+	if background := r.retrieveContext(ctx, question); background != "" {
+		// Name 标成 context：这是「这一轮临时查到的背景」，不该进入长期历史。
+		// 不标的话每轮都会往历史里堆一块，几十轮之后预算全被它吃掉，
+		// 而压缩只动工具结果，压不掉它。
+		msgs = append(msgs, Message{Role: "system", Name: "context", Content: background})
+	}
+	msgs = append(msgs, Message{Role: "user", Content: question})
+	msgs, _ = compactHistory(msgs, r.contextBudget)
 
 	res := &Result{}
 	var lastSig string
@@ -364,6 +380,8 @@ func (r *Runtime) ask(ctx context.Context, question string, emit func(Event)) (*
 				Role: "tool", Name: call.Name, ToolCallID: call.ID,
 				Content: envText,
 			})
+			// 每加一条就检查预算：等到最后再压，上下文可能已经超了。
+			msgs, _ = compactHistory(msgs, r.contextBudget)
 
 			sig := call.Name + "|" + compactJSON(call.Arguments)
 			if sig == lastSig {
@@ -447,9 +465,20 @@ func (r *Runtime) maxFailure() int {
 	return max
 }
 
+// commit 把这一轮的消息写进历史，并去掉临时注入的检索背景。
+//
+// 历史只留「真的说过的话 + 工具结果 + 结论」：检索背景每轮都会重新查一次，
+// 留着它既占预算，又会在库结构变了之后变成过期信息。
 func (r *Runtime) commit(msgs []Message, res *Result) {
+	kept := make([]Message, 0, len(msgs))
+	for _, m := range msgs {
+		if m.Role == "system" && m.Name == "context" {
+			continue
+		}
+		kept = append(kept, m)
+	}
 	r.mu.Lock()
-	r.history = msgs
+	r.history = kept
 	r.mu.Unlock()
 	res.Notes = r.Notes()
 }
