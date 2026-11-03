@@ -78,6 +78,18 @@ func TestCompareSchemas(t *testing.T) {
 		t.Errorf("t1 状态 = %s, 期望 changed 或 need_review", byName["t1"].Status)
 	}
 
+	// 有差异的表要带两侧原文：差异清单说的是「哪一列不对」，
+	// 判断该怎么改还得看整张表长什么样。
+	if byName["gone"].LeftDDL == "" {
+		t.Error("仅左侧的表应带左侧原文")
+	}
+	if byName["newtab"].RightDDL == "" {
+		t.Error("仅右侧的表应带右侧原文")
+	}
+	if byName["t1"].LeftDDL == "" || byName["t1"].RightDDL == "" {
+		t.Error("两侧都有差异的表应带双侧原文")
+	}
+
 	// 升级脚本：建缺失的表 + 加缺失的列；不该出现 DROP。
 	upgrade := strings.Join(res.Upgrade, "\n")
 	if !strings.Contains(upgrade, "newtab") {
@@ -242,5 +254,71 @@ func TestCompareForeignKeysEndToEnd(t *testing.T) {
 	review := strings.Join(res.NeedReview, "\n")
 	if !strings.Contains(review, "不支持用 ALTER TABLE 加约束") {
 		t.Errorf("应说明左侧引擎不支持: %s", review)
+	}
+}
+
+// TestCompareViews 对应 docs/07 §4.1 / 验收 9：视图定义参与结构比对。
+//
+// 三个结论都要能出现：仅左侧、仅右侧、查询体不同；相同的视图不出现在清单里。
+// 与列的取舍不同：删视图不丢数据（定义就在回退脚本里），所以两个方向都生成脚本。
+func TestCompareViews(t *testing.T) {
+	dir := t.TempDir()
+	left := openCompareSide(t, dir, "viewl.db",
+		`CREATE TABLE t (id INTEGER PRIMARY KEY)`,
+		`CREATE VIEW v_same AS SELECT id FROM t`,
+		`CREATE VIEW v_gone AS SELECT id FROM t`,
+		`CREATE VIEW v_chg AS SELECT id FROM t`,
+	)
+	right := openCompareSide(t, dir, "viewr.db",
+		`CREATE TABLE t (id INTEGER PRIMARY KEY)`,
+		`CREATE VIEW v_same AS SELECT id FROM t`,
+		`CREATE VIEW v_new AS SELECT id FROM t`,
+		`CREATE VIEW v_chg AS SELECT id FROM t WHERE id > 0`,
+	)
+
+	res, err := service.Compare(context.Background(), left, right)
+	if err != nil {
+		t.Fatalf("Compare: %v", err)
+	}
+
+	byName := map[string]service.ViewDiff{}
+	for _, v := range res.Views {
+		byName[v.Name] = v
+	}
+	if _, ok := byName["v_same"]; ok {
+		t.Error("查询体相同的视图不该出现在差异清单里")
+	}
+	if byName["v_gone"].Status != service.CompareOnlyLeft {
+		t.Errorf("v_gone 状态 = %s, 期望 only_left", byName["v_gone"].Status)
+	}
+	if byName["v_new"].Status != service.CompareOnlyRight {
+		t.Errorf("v_new 状态 = %s, 期望 only_right", byName["v_new"].Status)
+	}
+	if byName["v_chg"].Status != service.CompareChanged {
+		t.Errorf("v_chg 状态 = %s, 期望 changed", byName["v_chg"].Status)
+	}
+	if byName["v_gone"].Left == "" || byName["v_new"].Right == "" {
+		t.Error("单侧视图也要带上原文供人眼对照")
+	}
+
+	upgrade := strings.Join(res.Upgrade, "\n")
+	if !strings.Contains(upgrade, `DROP VIEW IF EXISTS "v_gone"`) {
+		t.Errorf("升级脚本应删掉左侧多出的视图:\n%s", upgrade)
+	}
+	if !strings.Contains(upgrade, "CREATE VIEW v_new") {
+		t.Errorf("升级脚本应建出右侧新增的视图:\n%s", upgrade)
+	}
+
+	downgrade := strings.Join(res.Downgrade, "\n")
+	if !strings.Contains(downgrade, "CREATE VIEW v_gone") {
+		t.Errorf("回退脚本应把删掉的视图建回来:\n%s", downgrade)
+	}
+	if !strings.Contains(downgrade, `DROP VIEW IF EXISTS "v_new"`) {
+		t.Errorf("回退脚本应删掉新建的视图:\n%s", downgrade)
+	}
+
+	review := strings.Join(res.NeedReview, "\n")
+	if !strings.Contains(review, "v_chg") || !strings.Contains(review, "视图定义有差异") {
+		t.Errorf("改视图要进 need_review（SQLite 没有 CREATE OR REPLACE）: %s", review)
 	}
 }

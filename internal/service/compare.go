@@ -75,9 +75,25 @@ type TableDiff struct {
 	Indexes     []IndexDiff      `json:"indexes,omitempty"`
 	ForeignKeys []ForeignKeyDiff `json:"foreign_keys,omitempty"`
 	Checks      []CheckDiff      `json:"checks,omitempty"`
-	// LeftDDL / RightDDL 供人眼对照；只在状态不是 same 时给出。
+	// LeftDDL / RightDDL 是两侧的原始结构原文，供人眼对照；只在状态不是 same 时给出。
+	// 两侧都有（状态 changed）时给全，仅在单侧时只给存在的那一侧。
 	LeftDDL  string `json:"left_ddl,omitempty"`
 	RightDDL string `json:"right_ddl,omitempty"`
+}
+
+// ViewDiff 描述一个视图的差异。
+//
+// 只比「查询体」，不比头部：MySQL 的 SHOW CREATE VIEW 会带上 ALGORITHM / DEFINER /
+// SQL SECURITY，PostgreSQL 的 pg_get_viewdef 只给查询、SQLite 原样存原文。
+// 这三段头部是部署属性（谁建的、以谁的身份跑），不是结构差异，混进来会让
+// 同一段查询在两边永远显示「不一样」。
+type ViewDiff struct {
+	Name string `json:"name"`
+	// Left / Right 是两侧视图的原始 DDL（取不到时为空）。
+	Left   string        `json:"left,omitempty"`
+	Right  string        `json:"right,omitempty"`
+	Reason []string      `json:"reason,omitempty"`
+	Status CompareStatus `json:"status"`
 }
 
 // CompareResult 是两侧结构比对的结论。
@@ -85,6 +101,7 @@ type CompareResult struct {
 	LeftEngine  model.Engine `json:"left_engine"`
 	RightEngine model.Engine `json:"right_engine"`
 	Tables      []TableDiff  `json:"tables"`
+	Views       []ViewDiff   `json:"views,omitempty"`
 	// Upgrade 是「把左侧改成右侧」的语句；Downgrade 是反向。
 	// v1 只生成「建缺失的表 / 加缺失的列」这类增量语句，删除与改类型一律不自动生成。
 	Upgrade   []string `json:"upgrade,omitempty"`
@@ -134,15 +151,21 @@ func Compare(ctx context.Context, left, right driver.Connector) (*CompareResult,
 
 		switch {
 		case lok && !rok:
-			res.Tables = append(res.Tables, TableDiff{Name: lt.Ref.Name, Status: CompareOnlyLeft, LeftDDL: ""})
+			res.Tables = append(res.Tables, TableDiff{
+				Name: lt.Ref.Name, Status: CompareOnlyLeft,
+				LeftDDL: ddlOrEmpty(ctx, left, lt.Ref),
+			})
 			// 左有右无：升级要删表，但删表不可逆，不自动生成。
 			res.NeedReview = append(res.NeedReview,
 				lt.Ref.Name+"：左侧存在而右侧不存在，删除表需要人工确认")
 		case !lok && rok:
-			d := TableDiff{Name: rt.Ref.Name, Status: CompareOnlyRight}
+			d := TableDiff{
+				Name: rt.Ref.Name, Status: CompareOnlyRight,
+				RightDDL: ddlOrEmpty(ctx, right, rt.Ref),
+			}
 			res.Tables = append(res.Tables, d)
-			if ddl, err := right.Meta().DDL(ctx, rt.Ref); err == nil {
-				res.Upgrade = append(res.Upgrade, ddl+";")
+			if d.RightDDL != "" {
+				res.Upgrade = append(res.Upgrade, terminate(d.RightDDL))
 			}
 			// 反向（降级）是删表，同样不自动生成。
 			res.NeedReview = append(res.NeedReview,
@@ -152,6 +175,10 @@ func Compare(ctx context.Context, left, right driver.Connector) (*CompareResult,
 			if td.Status == CompareSame {
 				continue
 			}
+			// 有差异时把两侧原文都带上：差异清单说的是「哪一列不对」，
+			// 要判断该怎么改还得看整张表长什么样。
+			td.LeftDDL = ddlOrEmpty(ctx, left, lt.Ref)
+			td.RightDDL = ddlOrEmpty(ctx, right, rt.Ref)
 			res.Tables = append(res.Tables, td)
 			appendColumnScripts(&res.Upgrade, &res.Downgrade, &res.NeedReview,
 				td, leftDialect, rightDialect)
@@ -160,7 +187,232 @@ func Compare(ctx context.Context, left, right driver.Connector) (*CompareResult,
 				td, leftDialect, rightDialect, left.Capabilities().AddForeignKey)
 		}
 	}
+
+	appendViewDiffs(ctx, res, left, right, crossEngine, leftDialect)
 	return res, nil
+}
+
+// ddlOrEmpty 取对象原文，失败时返回空串。
+//
+// 比对的主结论不该因为「某一侧取不到 DDL」而整体失败：视图和某些系统对象
+// 本来就可能没有原文。取不到就是没有对照材料，差异照样按元数据算。
+func ddlOrEmpty(ctx context.Context, c driver.Connector, ref model.ObjectRef) string {
+	ddl, err := c.Meta().DDL(ctx, ref)
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(ddl)
+}
+
+// terminate 给语句补上结尾分号，已经有就不重复加。
+func terminate(sqlText string) string {
+	s := strings.TrimSpace(sqlText)
+	if strings.HasSuffix(s, ";") {
+		return s
+	}
+	return s + ";"
+}
+
+// viewDef 是一侧某个视图的定义。
+type viewDef struct {
+	ref  model.ObjectRef
+	ddl  string // 原始 DDL；取不到时为空
+	body string // 归一化后的查询体；ddl 为空时也为空
+}
+
+// describeViews 取一侧的全部视图，键为小写视图名。
+func describeViews(ctx context.Context, c driver.Connector) (map[string]viewDef, error) {
+	objs, err := c.Meta().Objects(ctx, "", "", model.KindView)
+	if err != nil {
+		return nil, err
+	}
+	out := make(map[string]viewDef, len(objs))
+	for _, o := range objs {
+		d := viewDef{ref: o}
+		if ddl := ddlOrEmpty(ctx, c, o); ddl != "" {
+			d.ddl = ddl
+			d.body = normalizeViewBody(viewQueryBody(ddl))
+		}
+		out[strings.ToLower(o.Name)] = d
+	}
+	return out, nil
+}
+
+// appendViewDiffs 比对两侧视图定义，把结论直接写进 res。
+//
+// 与列的取舍不同：删视图不丢数据（定义就在回退脚本里），所以两个方向都生成脚本。
+// 跨引擎时视图原文是另一套方言写的，直接放到升级脚本里会执行失败，
+// 因此只给原文并记 need_review——这一点与表结构原文的处理保持一致。
+func appendViewDiffs(ctx context.Context, res *CompareResult, left, right driver.Connector,
+	crossEngine bool, leftDialect dialect.Dialect) {
+
+	lv, lerr := describeViews(ctx, left)
+	rv, rerr := describeViews(ctx, right)
+	if lerr != nil || rerr != nil {
+		which, err := "左侧", lerr
+		if lerr == nil {
+			which, err = "右侧", rerr
+		}
+		res.NeedReview = append(res.NeedReview, which+"视图清单读取失败："+err.Error())
+		return
+	}
+
+	names := map[string]bool{}
+	for n := range lv {
+		names[n] = true
+	}
+	for n := range rv {
+		names[n] = true
+	}
+	sorted := make([]string, 0, len(names))
+	for n := range names {
+		sorted = append(sorted, n)
+	}
+	sort.Strings(sorted)
+
+	for _, name := range sorted {
+		l, lok := lv[name]
+		r, rok := rv[name]
+
+		switch {
+		case lok && !rok:
+			d := ViewDiff{Name: l.ref.Name, Left: l.ddl, Status: CompareOnlyLeft}
+			res.Views = append(res.Views, d)
+			res.Upgrade = append(res.Upgrade, leftDialect.DropViewSQL(leftDialect.QuoteQualified("", l.ref.Name))+";")
+			if l.ddl != "" {
+				res.Downgrade = append(res.Downgrade, terminate(l.ddl))
+			} else {
+				res.NeedReview = append(res.NeedReview,
+					l.ref.Name+"：左侧视图取不到定义，回退脚本无法生成")
+			}
+			res.NeedReview = append(res.NeedReview,
+				l.ref.Name+"：左侧有而右侧没有视图，升级脚本会删掉它（不丢数据，定义在回退脚本里）")
+
+		case !lok && rok:
+			d := ViewDiff{Name: r.ref.Name, Right: r.ddl, Status: CompareOnlyRight}
+			res.Views = append(res.Views, d)
+			if crossEngine {
+				res.NeedReview = append(res.NeedReview,
+					r.ref.Name+"：右侧有而左侧没有视图，但两侧引擎不同，"+
+						"右侧的 CREATE VIEW 原文不一定能在左侧执行，需人工改写")
+			} else if r.ddl != "" {
+				res.Upgrade = append(res.Upgrade, terminate(r.ddl))
+			} else {
+				res.NeedReview = append(res.NeedReview,
+					r.ref.Name+"：右侧视图取不到定义，升级脚本无法生成")
+			}
+			res.Downgrade = append(res.Downgrade,
+				leftDialect.DropViewSQL(leftDialect.QuoteQualified("", r.ref.Name))+";")
+
+		default:
+			reasons := viewReasons(l, r)
+			if len(reasons) == 0 {
+				continue
+			}
+			res.Views = append(res.Views, ViewDiff{
+				Name: l.ref.Name, Left: l.ddl, Right: r.ddl,
+				Reason: reasons, Status: CompareChanged,
+			})
+			// 改视图要 CREATE OR REPLACE（SQLite 没有这个写法，只能 DROP + CREATE），
+			// 两侧引擎支持程度不一，不在这里假装能生成。
+			res.NeedReview = append(res.NeedReview,
+				l.ref.Name+"：视图定义有差异（"+strings.Join(reasons, "；")+"），"+
+					"改视图需人工确认后手写 DDL")
+		}
+	}
+}
+
+// viewReasons 判断同一视图在两侧是否等价。
+//
+// 任一取不到定义时不下「相同」的结论——把「不知道」判成相同，比报差异更危险。
+func viewReasons(l, r viewDef) []string {
+	if l.body == "" || r.body == "" {
+		side := "左侧"
+		if l.body != "" {
+			side = "右侧"
+		}
+		return []string{side + "取不到视图定义，无法比对查询体"}
+	}
+	if l.body == r.body {
+		return nil
+	}
+	return []string{"查询体不同"}
+}
+
+// viewQueryBody 取出 CREATE VIEW 语句里的查询体。
+//
+// 不用正则找 " AS "：AS 也可能出现在字符串字面量或括号里的列别名中。
+// 这里的判据是「第一个位于括号外层、不在引号里的 AS 」——也就是
+// CREATE ... VIEW <名字> [(列清单)] AS <查询> 的那个分界。
+func viewQueryBody(ddl string) string {
+	inQuote := byte(0)
+	depth := 0
+	for i := 0; i < len(ddl); i++ {
+		c := ddl[i]
+		if inQuote != 0 {
+			if c == inQuote {
+				// 两个相同引号连写是转义（SQL 标准），成对跳过
+				if i+1 < len(ddl) && ddl[i+1] == inQuote {
+					i++
+					continue
+				}
+				inQuote = 0
+			}
+			continue
+		}
+		switch c {
+		case '\'', '"', '`':
+			inQuote = c
+		case '[':
+			inQuote = ']'
+		case '(':
+			depth++
+		case ')':
+			if depth > 0 {
+				depth--
+			}
+		case 'A', 'a':
+			if depth == 0 && keywordAt(ddl, i, "AS") {
+				return strings.TrimSpace(ddl[i+2:])
+			}
+		}
+	}
+	return strings.TrimSpace(ddl)
+}
+
+// keywordAt 判断 s[i:] 是否以关键字 word 开头，且两侧都是标识符边界。
+func keywordAt(s string, i int, word string) bool {
+	if i+len(word) > len(s) {
+		return false
+	}
+	if !strings.EqualFold(s[i:i+len(word)], word) {
+		return false
+	}
+	if i > 0 && isIdentByte(s[i-1]) {
+		return false
+	}
+	if i+len(word) < len(s) && isIdentByte(s[i+len(word)]) {
+		return false
+	}
+	return true
+}
+
+func isIdentByte(c byte) bool {
+	return c == '_' ||
+		(c >= '0' && c <= '9') ||
+		(c >= 'a' && c <= 'z') ||
+		(c >= 'A' && c <= 'Z') ||
+		c >= 0x80 // 非 ASCII 也可能是标识符字符
+}
+
+// normalizeViewBody 抹平纯写法差异：折叠空白、去掉结尾分号。
+//
+// 刻意不做的两件事：不去标识符引号、不改大小写。把 "A" 与 "a" 判成相同
+// 只在大小写不敏感的引擎上成立，而字符串字面量处处大小写敏感——
+// 误报一次可以人工核对，误判「相同」会把真的差异藏起来。
+func normalizeViewBody(s string) string {
+	out := strings.Join(strings.Fields(s), " ")
+	return strings.TrimSuffix(strings.TrimSpace(out), ";")
 }
 
 // describeAll 取一侧的全部表结构，键为小写表名。

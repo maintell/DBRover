@@ -23,7 +23,7 @@ docker run -d --name dbrover-pg  -e POSTGRES_PASSWORD=testpass     -e POSTGRES_D
 | `bulk-20k-sqlite.ps1` | 分批批量修改：2 万行 20 批、NDJSON 进度逐条到达、`curl --max-time` 中途断开只保留已提交的批、预案仍有效可重新提交补齐 | 不需要 |
 | `bulk-engines.ps1 -Engine mysql -Port 13306 -User root` | 同上但 3000 行 3 批，重点是**逐批都是「改成相同值」**时 `RowsAffected` 仍等于本批主键数（MySQL 的 `clientFoundRows`）；另含复合主键表 1500 行（批大小自动降到 200） | MySQL 或 PostgreSQL |
 | `precision.ps1 -Engine mysql -Port 13306 -User root` | `BIGINT` 上下界与 `NUMERIC(38,10)` 极值在「独立 SQL → 表浏览接口 → 原样写回 → 改成新精度值」全链路逐字符一致；反向验证 JSON 数字形态的大整数被 `400 NUMBER_PRECISION_LOSS` 拒绝 | MySQL 或 PostgreSQL |
-| `compare-cross.ps1` | 跨引擎结构比对：MySQL ↔ PG 的同构表应当**零差异**（主键索引不误报、`BTREE`/`btree` 等价、整数显示宽度已归一） | MySQL + PostgreSQL |
+| `compare-cross.ps1` | 结构比对三段：① 跨引擎同构表**零差异**（主键索引不误报、`BTREE`/`btree` 等价、整数显示宽度已归一）；② 跨引擎单侧视图分类正确、原文带出、跨引擎的 `CREATE VIEW` 不自动进升级脚本；③ 同引擎（MySQL 两个库）同构视图**零误报**——`DEFINER` / `ALGORITHM` 头部不计入差异 | MySQL + PostgreSQL |
 | `fk-add.ps1 -Engine mysql -Port 13306 -User root` | 加外键的端到端：孤儿数据 → 409 `FK_PRECHECK_BLOCKED` 带样本；清数据后出预案（含生成的外键名与动作子句）→ 执行 → 结构里出现外键 → 用返回的 `undo` 预案摘掉 | MySQL 或 PostgreSQL |
 | `timezone.ps1 -Engine mysql -Port 13306 -User root` | 展示时区：同一条数据在 `display_timezone=Asia/Shanghai` 与默认（UTC）两条连接上读出的 RFC3339 是不是同一瞬间；再把值改成另一种带偏移的写法写回，用 UTC 连接读回仍同一瞬间（存的是瞬间，展示才换算） | MySQL 或 PostgreSQL |
 | `deps-drop.ps1 -Engine mysql -Port 13306 -User root` | 删除前依赖检查：造「父表 + 引用它的视图 + 引用它的外键」→ 删表返回 409 `DEPENDENCY_BLOCKED` 并同时点名视图与外键 → 拆掉两者后出预案（不可逆 + 补偿建表 + 「数据不会回来」的说明）→ 执行后表真的没了 | MySQL 或 PostgreSQL |

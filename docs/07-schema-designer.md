@@ -160,6 +160,7 @@ ChangePlan
 - 覆盖：表/列/类型/可空/默认值/注释/索引/外键/检查约束/视图定义。
 - 输出三分类：**仅左侧**（删除）、**仅右侧**（新增）、**差异**（修改）。
 - 生成「升级脚本」与「回退脚本」。
+- 每条差异都带两侧结构原文（`left_ddl` / `right_ddl`）供人眼对照——差异清单只回答「哪一列不对」，要判断怎么改还得看整张表长什么样。
 
 ### 4.2 比对规则
 
@@ -167,13 +168,17 @@ ChangePlan
 - **原始类型文本先归一化，再比对**：`character varying(n)` 与 `varchar(n)`、`integer` 与 `int` 是同一类型的两种打印方式（PostgreSQL 的 `FormatType` 与 MySQL 的 `COLUMN_TYPE` 各说各话），归一后不报差异；MySQL 的整数显示宽度（`bigint(20)`、`int(11)`）在 MySQL 8 已废弃，同样剥掉。`decimal(10,2)` 这类带两位数字的括号必须保留——那是精度不是宽度。这条不做「聪明的类型映射」，只抹平同义写法。
 - 默认值比对做归一化（去外层括号、统一 `now()` 与 `CURRENT_TIMESTAMP` 视为等价需**引擎内**判断，跨引擎不视为等价）。
 - 索引比对按「列序列 + 唯一性 + 条件」为键，不按索引名（名字不同不一定是差异）。
+- **视图只比查询体**：从 `CREATE VIEW` 原文里取第一个位于括号外层、不在引号里的 `AS` 之后的部分（`CREATE ... VIEW x [(列清单)] AS <查询>` 的分界）。`ALGORITHM=` / `DEFINER=` / `SQL SECURITY` 这些头部是**部署属性**（谁建的、以谁的身份跑），不是结构差异，不进比对——混进来会让同一段查询在两边永远显示「不一样」。查询体只折叠空白、去掉结尾分号；**不去引号、不改大小写**（字符串字面量大小写敏感，误判「相同」比误报更危险）。
+- **取不到定义时不下「相同」的结论**：任一侧的视图定义读不出来就报差异并说明是哪一侧，把「不知道」判成相同会把真差异藏起来。
 - 跨引擎比对的类型差异一律标为「需人工决策」，不自动映射。
+- 脚本生成按「丢了能不能拿回来」分类：删索引、删视图、删外键都不丢数据，两个方向都生成；删表、删列、改类型会丢数据，只进 `need_review`。跨引擎时右侧的 `CREATE VIEW` 原文是另一套方言写的，不直接放进升级脚本，只给原文并记 `need_review`。
 
 ### 4.3 边界
 
 - 不做数据比对（那是迁移模块的事）。
 - 不自动执行比对结果，必须经过 Change Plan。
 - 大 schema（>2000 对象）分批比对并显示进度。
+- **物化视图与例程（存储过程/函数）不参与比对**：物化视图的删与建不是一条 `DROP VIEW`，例程体在三种引擎里几乎没有可比性（SQLite 根本没有）。这两类目前只能靠「结构原文」人工看。
 
 ---
 
@@ -277,7 +282,7 @@ SELECT COUNT(*) FROM t WHERE c > 2147483647 OR c < -2147483648;
 | DDL 事务性差异 | §2.3 / 验收 3 | 由 `Capabilities().DDLTransactional` 声明，预案据此设 `rolls_back_as_compensation`；MySQL 上提示「隐式提交，补偿不是撤销」 | `TestDDLPlanOnRealEngines`（MySQL 补偿 / PG 真回滚） |
 | 改列类型 | §1.1 / §5.2 | `action` 为 `alter_column_type`；语句文本由 `Dialect.AlterColumnTypeSQL` 渲染（PG `ALTER COLUMN … TYPE`、MySQL `MODIFY COLUMN` 带完整列定义）；**生成预案前做收窄预检**，装不下现存数据即 `ErrNarrowingBlocked` 并给出样本 | `TestBoundsFor`、`TestDDLAlterColumnTypeOnRealEngines`（MySQL + PG）、浏览器实测（含拦截与放行两条路径） |
 | 索引管理（建 / 删） | §1.1 / §2.4 / 验收 4、6 | `action` 为 `create_index` / `drop_index`；语句文本由 `Dialect.CreateIndexSQL` / `DropIndexSQL` 渲染（MySQL 的 `DROP INDEX` 要带 `ON <table>`，PG/SQLite 不能带）；建唯一索引前先查重复值，命中即 `ErrDuplicateRows` 并给样本；主键索引拒绝删除；删索引不动数据，回滚按原定义重建。**建索引预案附带在线变更建议**（`Dialect.IndexBuildAdvice`）：PG 提示 `CREATE INDEX CONCURRENTLY` 并说明它不能在事务里跑、需要到 SQL 工作区单跑；MySQL 提示 `ALGORITHM=INPLACE, LOCK=NONE`；SQLite 不给（没有这个概念） | `TestDDLCreateAndDropIndex`、`TestDDLUniqueIndexBlocksDuplicates`、`TestDDLIndexOnRealEngines`（MySQL + PG，直接验证 `DROP INDEX` 写法与建议非空）、`TestIndexBuildAdvice`、浏览器实测 |
-| 结构比对（v1） | §4 / 验收 9 | `POST /compare`：两个已打开连接逐表比对，输出 `only_left` / `only_right` / `changed` / `need_review` 与逐项原因（列：中立类型、原始类型、可空、默认值、注释、主键与唯一标记；索引：列序列+唯一性+谓词；外键：本表列 → 引用表+引用列，动作子句参与比较但不参与键；检查约束：归一化表达式）。原始类型文本先做同义归一（`character varying(n)`≡`varchar(n)`、`integer`≡`int`、剥掉 MySQL 整数显示宽度）。索引增删两个方向都给脚本；外键在左侧引擎支持 `AddForeignKey` 时给加/删约束脚本（否则进 `need_review` 说明要重建表）；删表/删列/改类型与检查约束仍进 `need_review` | `TestCompareSchemas`、`TestCompareIndexes`、`TestCompareIndexNameOnlyDifference`、`TestCompareForeignKeys`、`TestCompareChecks`、`TestCompareForeignKeysEndToEnd`、`TestNormalizeTypeText`、`TestCompareEndpoint`、浏览器实测；`TestCompareIndexes` 含变异验证；跨引擎冒烟：MySQL 5.7 ↔ PostgreSQL 17 同构表**零差异** |
+| 结构比对（v1） | §4 / 验收 9 | `POST /compare`：两个已打开连接逐表比对，输出 `only_left` / `only_right` / `changed` / `need_review` 与逐项原因（列：中立类型、原始类型、可空、默认值、注释、主键与唯一标记；索引：列序列+唯一性+谓词；外键：本表列 → 引用表+引用列，动作子句参与比较但不参与键；检查约束：归一化表达式）。原始类型文本先做同义归一（`character varying(n)`≡`varchar(n)`、`integer`≡`int`、剥掉 MySQL 整数显示宽度）。索引增删、视图增删两个方向都给脚本（删它们不丢数据）；外键在左侧引擎支持 `AddForeignKey` 时给加/删约束脚本（否则进 `need_review` 说明要重建表）；删表/删列/改类型与检查约束仍进 `need_review`。**视图只比查询体**（`ALGORITHM` / `DEFINER` / `SQL SECURITY` 是部署属性，不进比对），查不出定义时不下「相同」结论。每条差异都带两侧结构原文 `left_ddl` / `right_ddl` | `TestCompareSchemas`、`TestCompareIndexes`、`TestCompareIndexNameOnlyDifference`、`TestCompareForeignKeys`、`TestCompareChecks`、`TestCompareForeignKeysEndToEnd`、`TestCompareViews`、`TestViewQueryBody`、`TestNormalizeViewBody`、`TestViewReasons`、`TestNormalizeTypeText`、`TestCompareEndpoint`、浏览器实测；`TestCompareIndexes` 与视图提取（`TestViewQueryBody`）均含变异验证；真机 `scripts/accept/compare-cross.ps1` 三段：MySQL 5.7 ↔ PostgreSQL 17 同构表**零差异**、跨引擎单侧视图分类与原文、MySQL 两库同构视图**零误报**（`DEFINER` / `ALGORITHM` 头部不计入） |
 | 加外键 | §1.1 / 验收 5 | `action` 为 `add_foreign_key`；生成预案前**先跑与预检端点同一套检查**（孤儿数据 + 父表列唯一性），不通过即 `ErrForeignKeyBlocked` → 409 `FK_PRECHECK_BLOCKED` 并带样本；动作子句走白名单（CASCADE / RESTRICT / NO ACTION / SET NULL），`SET NULL` 撞上 NOT NULL 引用列时提前拒绝；名字为空按 `fk_<表>_<列>` 生成（回滚要靠它摘约束，不能是随机名）；回滚是 `ALTER TABLE … DROP` 约束，不动数据 | `TestValidateFKShape`、`TestDefaultFKName`、`TestDDLAddForeignKeyNeedsCapability`、`TestSchemaPlanAddForeignKeyNeedsCapability`、`TestDDLAddForeignKeyOnRealEngines`（MySQL 5.7 + PG 17：孤儿阻断带样本 → 清数据后出预案 → 执行 → 结构里出现外键 → 回滚摘掉） |
 | 手写 DDL（单向） | §1.2 / 验收 12 | `action` 为 `raw` + `sql`：切分 → 必须是恰好一条 → 必须是 DDL 类 → 生成预案走同一个 apply。**不做语义预检**（不查收窄/孤儿/依赖），**不生成回滚语句**，预案里两条都写明并标不可逆；指明了存在的表时仍带定义哈希做竞态保护。多条语句、DML、空语句各有明确拒绝理由 | `TestRawDDLPlan`（五条断言：正常 ALTER、多语句拒绝、DML 拒绝并指路变更集、空语句拒绝、执行后列真的加上） |
 | 删表 + 依赖阻断 | §5.1 / 验收 8 | `action` 为 `drop_table`：生成预案前先查依赖，被视图或入向外键引用即 `409 DEPENDENCY_BLOCKED` 并列出引用方（近似结果带「可能误报」标注）；删表必然不可逆，回滚语句只是把空表建回来，预案里明说「数据不会回来」 | `TestDDLDropTableBlockedByView`、`TestDDLDropColumnBlockedByForeignKey`、`TestSchemaPlanDropTableBlockedByDependency`、`drivertest` 的 `DependentsReported`（三引擎）、`scripts/accept/deps-drop.ps1`（MySQL 5.7 + PG 17 真机：外键 + 视图双阻断 → 拆掉后出预案 → 执行 → 表消失） |
@@ -299,7 +304,7 @@ SELECT COUNT(*) FROM t WHERE c > 2147483647 OR c < -2147483648;
 | 磁盘余量探测 | §2.5 | 未做：DDL 前不检查可用空间，大表重建可能把磁盘写满 | 待实现；需要各引擎的库体积与所在卷余量 |
 | 类型收窄预检与样本行 | §5.2 / 验收 7 | 改类型未做，故也没有越界检查 | 待实现 |
 | 例程依赖检查 | §5.1 | 只查视图与外键；存储过程/函数体里引用目标对象查不出来 | 待实现；文本搜索例程体误报率太高，加之前要先想清楚怎么标注 |
-| 结构比对的完整形态 | §4 / 验收 9 | 已比表、列、索引、外键、检查约束；尚未比视图定义与例程；回退脚本覆盖索引与外键，删表/删列/改类型与检查约束仍不生成 | 待实现；视图定义比对要做归一化（引擎各自的 `CREATE VIEW` 文本差异太大） |
+| 结构比对的完整形态 | §4 / 验收 9 | 已比表、列、索引、外键、检查约束、视图定义；回退脚本覆盖索引、外键与视图；删表/删列/改类型与检查约束仍不生成（会丢数据，有意推给人）；物化视图与例程不参与比对（`§4.3`） | 物化视图与例程待实现；前者要区分 `DROP MATERIALIZED VIEW`，后者在三种引擎里几乎无可比性 |
 | 手写 SQL 模式（表单 ↔ SQL 双向同步） | §1.2 / 验收 12 | 已做**单向**：写一条 DDL → 校验 → 走同一个 Plan/Apply。**没做**「SQL 反解回表单」——那需要完整的 DDL 解析器 | 双向同步待实现；单向已覆盖「我已经有语句，只想让它经过这道门」这个真实需求 |
 
 ### 8.3 验收清单状态

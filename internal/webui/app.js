@@ -1044,10 +1044,14 @@ function renderCompare(res) {
 
   const summary = document.createElement('div');
   const tables = res.tables || [];
+  const views = res.views || [];
   summary.className = 'notice';
-  summary.textContent = tables.length
-    ? '有差异的表：' + tables.length + ' 张（左侧 ' + res.left_engine + ' / 右侧 ' + res.right_engine + '）'
-    : '两侧结构一致（左侧 ' + res.left_engine + ' / 右侧 ' + res.right_engine + '）';
+  const sides = '（左侧 ' + res.left_engine + ' / 右侧 ' + res.right_engine + '）';
+  if (tables.length || views.length) {
+    summary.textContent = '有差异：表 ' + tables.length + ' 张、视图 ' + views.length + ' 个' + sides;
+  } else {
+    summary.textContent = '两侧结构一致' + sides;
+  }
   wrap.appendChild(summary);
 
   if (tables.length) {
@@ -1092,11 +1096,39 @@ function renderCompare(res) {
         if (x.status === 'only_right') return '检查约束 ' + x.key + '：仅在右侧';
         return '检查约束 ' + x.key + '：' + (x.reason || []).join('；');
       });
-      tr.appendChild(cell(colLines.concat(idxLines, fkLines, ckLines).join('\n')));
+      let lines = colLines.concat(idxLines, fkLines, ckLines);
+      if (!lines.length) {
+        // 整张表只在单侧时没有逐项差异可列——此时结构原文就是唯一的对照材料。
+        lines = [clipLines(td.left_ddl || td.right_ddl || '（两侧都没有取到原文）', 12)];
+      }
+      tr.appendChild(cell(lines.join('\n')));
       tb.appendChild(tr);
     }
     t.appendChild(tb);
     wrap.appendChild(t);
+  }
+
+  if (views.length) {
+    const h = document.createElement('div');
+    h.className = 'head';
+    h.textContent = '视图差异';
+    wrap.appendChild(h);
+    const ul = document.createElement('ul');
+    const label = {
+      only_left: '仅在左侧（升级会删掉它，定义在回退脚本里）',
+      only_right: '仅在右侧',
+      changed: '查询体不同',
+      need_review: '需人工决策',
+    };
+    for (const v of views) {
+      const li = document.createElement('li');
+      const state = label[v.status] || v.status;
+      // 状态本身已经把「查询体不同」说清楚了，别再重复一遍。
+      const reasons = (v.reason || []).filter((r) => r !== state);
+      li.textContent = v.name + '：' + state + (reasons.length ? '：' + reasons.join('；') : '');
+      ul.appendChild(li);
+    }
+    wrap.appendChild(ul);
   }
 
   const addPre = (title, lines) => {
@@ -1913,6 +1945,13 @@ function cell(text, cls) {
   td.textContent = text;
   if (cls) td.className = cls;
   return td;
+}
+
+// clipLines 截断过长的结构原文：一行表格不该把整页撑开。
+function clipLines(text, max) {
+  const lines = String(text || '').split('\n');
+  if (lines.length <= max) return lines.join('\n');
+  return lines.slice(0, max).join('\n') + '\n…（共 ' + lines.length + ' 行）';
 }
 
 // renderTable 渲染结果网格。

@@ -81,6 +81,12 @@ type Dialect interface {
 	// MySQL 用 DROP FOREIGN KEY，PostgreSQL 用 DROP CONSTRAINT——同一件事两个名字。
 	DropForeignKeySQL(table, name string) string
 
+	// DropViewSQL 渲染删视图语句。name 应当是已引用好的限定名。
+	//
+	// 视图是独立对象，不带 ON <table>。默认带 IF EXISTS：重复执行不该炸。
+	// Oracle 没有 IF EXISTS 这个写法，只能裸 DROP VIEW——此时对象不存在就该报错。
+	DropViewSQL(name string) string
+
 	// IndexBuildAdvice 返回「怎么建索引才不锁表」的建议；没有可说的时候返回空串。
 	//
 	// 这不是语句，是提示：PostgreSQL 的 CREATE INDEX CONCURRENTLY 不能在事务里跑，
@@ -194,6 +200,14 @@ func (d impl) DropIndexSQL(table, name string) string {
 	default:
 		return "DROP INDEX " + d.quote(name)
 	}
+}
+
+// DropViewSQL 渲染删视图语句。
+func (d impl) DropViewSQL(name string) string {
+	if d.engine == model.EngineOracle {
+		return "DROP VIEW " + name
+	}
+	return "DROP VIEW IF EXISTS " + name
 }
 
 // AddForeignKeySQL 渲染加外键语句。
