@@ -36,7 +36,22 @@ const (
 	DDLAlterColumnType DDLAction = "alter_column_type"
 	DDLCreateIndex     DDLAction = "create_index"
 	DDLDropIndex       DDLAction = "drop_index"
+	DDLAddForeignKey   DDLAction = "add_foreign_key"
 )
+
+// ErrForeignKeyBlocked 表示既有数据不满足要加的外键（有孤儿行，或父表列不唯一）。
+var ErrForeignKeyBlocked = errors.New("既有数据不满足该外键，加约束会失败")
+
+// ForeignKeySpec 是加外键的描述。Name 为空时按表名与列名生成一个确定的名字。
+type ForeignKeySpec struct {
+	Name       string   `json:"name"`
+	Columns    []string `json:"columns"`
+	RefTable   string   `json:"ref_table"`
+	RefColumns []string `json:"ref_columns"`
+	// OnDelete / OnUpdate 只接受白名单里的动作（见 fkActions）。
+	OnDelete string `json:"on_delete,omitempty"`
+	OnUpdate string `json:"on_update,omitempty"`
+}
 
 // safeDefaultText 把元数据里的默认值转成可拼进语句的文本。
 //
@@ -103,6 +118,8 @@ type DDLRequest struct {
 	PrimaryKey []string     `json:"primary_key"`
 	// Index 用于 create_index / drop_index（drop 时只用到 Name）。
 	Index IndexSpec `json:"index"`
+	// ForeignKey 用于 add_foreign_key。
+	ForeignKey ForeignKeySpec `json:"foreign_key"`
 }
 
 // typePattern 限定类型声明的字符集。
@@ -456,6 +473,49 @@ func (e *Executor) BuildDDLPlan(ctx context.Context, req DDLRequest) (*ChangePla
 		}}
 		plan.AffectedRows = 0
 
+	case DDLAddForeignKey:
+		if !e.conn.Capabilities().AddForeignKey {
+			return nil, fmt.Errorf("%w: 该引擎不支持用 ALTER TABLE 追加外键（SQLite 只能重建整表）", ErrInvalidDDL)
+		}
+		fk, ferr := e.normalizeForeignKey(ctx, req, td)
+		if ferr != nil {
+			return nil, ferr
+		}
+		// 既有数据不满足约束时在这里就停手：让引擎去扫全表只会得到一句
+		// 不带样本的报错，大表上还可能要持锁很久。
+		pre, perr := e.PrecheckForeignKey(ctx, FKPrecheckRequest{
+			Child:      req.Table,
+			Parent:     parentRef(req.Table, fk.RefTable),
+			Columns:    fk.Columns,
+			RefColumns: fk.RefColumns,
+		})
+		if perr != nil {
+			return nil, perr
+		}
+		if pre.Blocked {
+			detail := pre.Reason
+			if len(pre.Samples) > 0 {
+				detail += "，例如 " + strings.Join(pre.Samples, "、")
+			}
+			return nil, fmt.Errorf("%w：%s", ErrForeignKeyBlocked, detail)
+		}
+		plan.Statements = []PlanStatement{{
+			SQL: e.dialect.AddForeignKeySQL(table, fk.Name, fk.Columns,
+				e.dialect.QuoteQualified(schemaOf(req.Table, e.cfgSchema()), fk.RefTable),
+				fk.RefColumns, fk.OnDelete, fk.OnUpdate),
+			ExpectRows: -1,
+		}}
+		// 回滚是把约束摘掉：不动数据，所以不标不可逆。
+		plan.Rollback = []PlanStatement{{
+			SQL:        e.dialect.DropForeignKeySQL(table, fk.Name),
+			ExpectRows: -1,
+		}}
+		if td.RowEstimate > 0 {
+			plan.AffectedRows = td.RowEstimate // 建约束会校验既有行
+		} else {
+			plan.AffectedRows = -1
+		}
+
 	default:
 		return nil, fmt.Errorf("%w: 不支持的动作 %q", ErrInvalidDDL, req.Action)
 	}
@@ -465,8 +525,149 @@ func (e *Executor) BuildDDLPlan(ctx context.Context, req DDLRequest) (*ChangePla
 	return plan, nil
 }
 
-// finishDDLPlan 补上风险、摩擦与回滚语义。
-// 结构变更与数据变更共用同一套分级：不因为「是 DDL」就给个特例等级。
+// fkActions 是外键动作的白名单。动作会被拼进 SQL，只能从这里取。
+var fkActions = map[string]bool{
+	"":          true,
+	"CASCADE":   true,
+	"RESTRICT":  true,
+	"NO ACTION": true,
+	"SET NULL":  true,
+}
+
+// parentRef 把一个表名补成父表引用，沿用子表的模式。
+func parentRef(child model.ObjectRef, name string) model.ObjectRef {
+	return model.ObjectRef{Kind: model.KindTable, Name: name, Schema: child.Schema}
+}
+
+// normalizeForeignKey 校验并规范化加外键请求。
+func (e *Executor) normalizeForeignKey(ctx context.Context, req DDLRequest, child *model.TableDetail) (ForeignKeySpec, error) {
+	fk, err := validateFKShape(req.Table, child, req.ForeignKey)
+	if err != nil {
+		return fk, err
+	}
+
+	// 父表必须存在，且这几列必须在里面。
+	parent, err := e.conn.Meta().DescribeTable(ctx, parentRef(req.Table, fk.RefTable))
+	if err != nil {
+		return fk, err
+	}
+	refs := make([]string, len(fk.RefColumns))
+	for i, c := range fk.RefColumns {
+		name, err := normalizeColumnName(c)
+		if err != nil {
+			return fk, err
+		}
+		col, ok := findColumn(parent, name)
+		if !ok {
+			return fk, fmt.Errorf("%w: 父表 %s 没有列 %q", ErrInvalidDDL, fk.RefTable, name)
+		}
+		refs[i] = col.Name
+	}
+	fk.RefTable = parent.Ref.Name
+	fk.RefColumns = refs
+	return fk, nil
+}
+
+// validateFKShape 是不碰数据库的那一半校验：形状、名字、动作、可空性。
+// 单独拆出来的理由很实际——SQLite 不支持加外键，如果校验裹在能力检查后面，
+// 这些规则在没有真机的环境里就一条都测不到。
+func validateFKShape(childRef model.ObjectRef, child *model.TableDetail, in ForeignKeySpec) (ForeignKeySpec, error) {
+	out := ForeignKeySpec{
+		Name: strings.TrimSpace(in.Name), RefTable: strings.TrimSpace(in.RefTable),
+	}
+
+	if out.RefTable == "" {
+		return out, fmt.Errorf("%w: 必须指定父表", ErrInvalidDDL)
+	}
+	if len(in.Columns) == 0 {
+		return out, fmt.Errorf("%w: 至少要指定一列", ErrInvalidDDL)
+	}
+	if len(in.Columns) != len(in.RefColumns) {
+		return out, fmt.Errorf("%w: 子表列与父表列数量不一致（%d vs %d）",
+			ErrInvalidDDL, len(in.Columns), len(in.RefColumns))
+	}
+
+	cols := make([]string, len(in.Columns))
+	for i, c := range in.Columns {
+		name, err := normalizeColumnName(c)
+		if err != nil {
+			return out, err
+		}
+		col, ok := findColumn(child, name)
+		if !ok {
+			return out, fmt.Errorf("%w: 子表没有列 %q", ErrInvalidDDL, name)
+		}
+		cols[i] = col.Name
+	}
+	refCols := make([]string, len(in.RefColumns))
+	for i, c := range in.RefColumns {
+		name, err := normalizeColumnName(c)
+		if err != nil {
+			return out, err
+		}
+		refCols[i] = name
+	}
+	out.Columns, out.RefColumns = cols, refCols
+
+	onDelete, err := normalizeFKAction("ON DELETE", in.OnDelete)
+	if err != nil {
+		return out, err
+	}
+	onUpdate, err := normalizeFKAction("ON UPDATE", in.OnUpdate)
+	if err != nil {
+		return out, err
+	}
+	out.OnDelete, out.OnUpdate = onDelete, onUpdate
+
+	// SET NULL 要求引用列可空：MySQL 会直接拒绝，PG 会建成功但删除父行时才报错，
+	// 后者更难查，所以统一在这里挡住。
+	if onDelete == "SET NULL" || onUpdate == "SET NULL" {
+		for _, name := range cols {
+			if col, ok := findColumn(child, name); ok && !col.Nullable {
+				return out, fmt.Errorf("%w: 列 %q 是 NOT NULL，不能用 SET NULL", ErrInvalidDDL, col.Name)
+			}
+		}
+	}
+
+	if out.Name == "" {
+		out.Name = defaultFKName(childRef.Name, cols)
+	}
+	if _, err := normalizeColumnName(out.Name); err != nil {
+		return out, fmt.Errorf("%w: 外键名 %q 不合法", ErrInvalidDDL, in.Name)
+	}
+	if len(out.Name) > 64 {
+		return out, fmt.Errorf("%w: 外键名过长（上限 64 字符）", ErrInvalidDDL)
+	}
+	for _, existing := range child.ForeignKeys {
+		if strings.EqualFold(existing.Name, out.Name) {
+			return out, fmt.Errorf("%w: 外键 %q 已存在", ErrInvalidDDL, existing.Name)
+		}
+	}
+	return out, nil
+}
+
+// normalizeFKAction 只放行白名单里的动作。
+func normalizeFKAction(what, v string) (string, error) {
+	act := strings.ToUpper(strings.Join(strings.Fields(strings.TrimSpace(v)), " "))
+	if !fkActions[act] {
+		return "", fmt.Errorf("%w: %s 只接受 CASCADE / RESTRICT / NO ACTION / SET NULL", ErrInvalidDDL, what)
+	}
+	return act, nil
+}
+
+// defaultFKName 在没有给名字时生成一个确定的名字。
+// 确定性很重要：回滚要靠这个名字摘约束，随机名会让撤销无从下手。
+func defaultFKName(table string, cols []string) string {
+	name := "fk_" + table + "_" + strings.Join(cols, "_")
+	if len(name) <= 64 {
+		return name
+	}
+	// 太长就截断再补一个短哈希，避免不同外键撞名。
+	sum := sha256.Sum256([]byte(name))
+	return name[:55] + "_" + hex.EncodeToString(sum[:4])
+}
+
+// finishDDLPlan 补上风险、摩擦与回滚语义。// 结构变更与数据变更共用同一套分级：不因为「是 DDL」就给个特例等级。
 func (e *Executor) finishDDLPlan(plan *ChangePlan) {
 	plan.RollsBackAsCompensation = !e.conn.Capabilities().DDLTransactional
 

@@ -60,6 +60,7 @@ func (c *Connector) Capabilities() model.Capabilities {
 		DDLTransactional:  true,
 		// SQLite 不能改列类型，只能重建表。
 		AlterColumnType: false,
+		AddForeignKey:   false,
 	}
 }
 

@@ -1450,6 +1450,61 @@ function renderSchema(out) {
     wrap.appendChild(it);
   }
 
+  // 外键区。SQLite 不支持用 ALTER TABLE 加约束，服务端能力声明会拒绝，
+  // 这里就不摆一个点了必然失败的表单——不可用的能力不出现，而不是出现再报错。
+  if (out.capabilities && out.capabilities.add_foreign_key) {
+    const fkHead = document.createElement('div');
+    fkHead.className = 'head';
+    fkHead.textContent = '外键';
+    wrap.appendChild(fkHead);
+
+    const fkForm = document.createElement('div');
+    fkForm.className = 'toolbar';
+    fkForm.innerHTML =
+      '<input id="fk-cols" class="narrow" placeholder="本表列（逗号分隔）" autocomplete="off" spellcheck="false">' +
+      '<input id="fk-ref" class="narrow" placeholder="父表" autocomplete="off" spellcheck="false">' +
+      '<input id="fk-refcols" class="narrow" placeholder="父表列（逗号分隔）" autocomplete="off" spellcheck="false">' +
+      '<select id="fk-ondelete" title="父行被删除时">' +
+      '<option value="">ON DELETE 未指定</option>' +
+      '<option value="RESTRICT">ON DELETE RESTRICT</option>' +
+      '<option value="CASCADE">ON DELETE CASCADE</option>' +
+      '<option value="SET NULL">ON DELETE SET NULL</option>' +
+      '<option value="NO ACTION">ON DELETE NO ACTION</option>' +
+      '</select>' +
+      '<button id="fk-add" class="primary">加外键</button>';
+    wrap.appendChild(fkForm);
+
+    const fks = out.foreign_keys || [];
+    if (!fks.length) {
+      const none = document.createElement('div');
+      none.className = 'notice';
+      none.textContent = '这个表还没有外键。';
+      wrap.appendChild(none);
+    } else {
+      const ft = document.createElement('table');
+      const fth = document.createElement('thead');
+      const fhtr = document.createElement('tr');
+      for (const label of ['名称', '本表列', '引用', '删除时', '更新时']) {
+        const th = document.createElement('th');
+        th.textContent = label;
+        fth.appendChild(th);
+      }
+      ft.appendChild(fth);
+      const ftb = document.createElement('tbody');
+      for (const fk of fks) {
+        const tr = document.createElement('tr');
+        tr.appendChild(cell(fk.name || '（未命名）'));
+        tr.appendChild(cell((fk.columns || []).join(', ')));
+        tr.appendChild(cell((fk.ref_table || '') + '(' + (fk.ref_columns || []).join(', ') + ')'));
+        tr.appendChild(cell(fk.on_delete || ''));
+        tr.appendChild(cell(fk.on_update || ''));
+        ftb.appendChild(tr);
+      }
+      ft.appendChild(ftb);
+      wrap.appendChild(ft);
+    }
+  }
+
   if (out.ddl) {
     const ddl = document.createElement('pre');
     ddl.className = 'preview';
@@ -1466,6 +1521,7 @@ function renderSchema(out) {
   $('sch-nullable').onchange = onInput;
   $('sch-add').onclick = () => planAddColumn();
   $('ix-add').onclick = () => planCreateIndex();
+  if ($('fk-add')) $('fk-add').onclick = () => planAddForeignKey();
   setStatus(state.tableName + ' · ' + cols.length + ' 列' +
     (pk.length ? '（主键 ' + pk.join(', ') + '）' : '（无主键）'));
 }
@@ -1584,6 +1640,40 @@ async function planDropIndex(name) {
     plan = await fetchIndexPlan('drop_index', { name }, false);
   } catch (e) {
     showNotice('生成结构预案失败：' + e.message, 'error');
+    return;
+  }
+  if (!(await confirmPlan(plan))) return;
+  await applyPlan(plan.id, undefined, refreshSchema);
+}
+
+// ---------- 外键 ----------
+
+// planAddForeignKey 先让服务端做孤儿数据预检，再出预案。
+// 预检不通过时服务端返回 409 并带样本——就地贴出来，比「约束创建失败」有用得多。
+async function planAddForeignKey() {
+  const cols = $('fk-cols').value.split(/[,，\s]+/).filter(Boolean);
+  const ref = $('fk-ref').value.trim();
+  const refCols = $('fk-refcols').value.split(/[,，\s]+/).filter(Boolean);
+  if (!cols.length || !ref || !refCols.length) {
+    showNotice('本表列、父表、父表列都要填。', 'warn');
+    return;
+  }
+  if (cols.length !== refCols.length) {
+    showNotice('本表列与父表列数量要一致（' + cols.length + ' vs ' + refCols.length + '）。', 'warn');
+    return;
+  }
+
+  let plan;
+  try {
+    plan = await postSchemaPlan({
+      action: 'add_foreign_key',
+      foreign_key: {
+        columns: cols, ref_table: ref, ref_columns: refCols,
+        on_delete: $('fk-ondelete').value,
+      },
+    }, false);
+  } catch (e) {
+    showNotice(e.message + (e.hint ? '（' + e.hint + '）' : ''), 'error');
     return;
   }
   if (!(await confirmPlan(plan))) return;

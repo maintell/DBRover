@@ -252,7 +252,7 @@ SELECT COUNT(*) FROM t WHERE c > 2147483647 OR c < -2147483648;
 
 | 能力 | 契约位置 | 实现 | 验证 |
 |---|---|---|---|
-| 结构详情 | §1.1 | `GET /tables/{name}/schema` 返回列 / 索引 / 外键 / 主键 + DDL 原文；DDL 还原失败时仍返回结构并单给 `ddl_error`，不让整页打不开 | `TestSchemaLifecycle` |
+| 结构详情 | §1.1 | `GET /tables/{name}/schema` 返回列 / 索引 / 外键 / 主键 + DDL 原文 + `capabilities`（前端据此决定摆不摆某个入口：不可用的能力不出现，而不是出现了再点出一个必然失败的错）；DDL 还原失败时仍返回结构并单给 `ddl_error`，不让整页打不开 | `TestSchemaLifecycle` |
 | 加列 / 删列 | §1.1（子集） | `POST /schema/plan`，`action` 为 `add_column` / `drop_column`；执行复用 `/changes/{id}/apply` | `TestDDLPlanAddColumn`、`TestDDLPlanDropColumnIsIrreversible` |
 | 建表 | §1.1（子集） | `action` 为 `create_table`，按列清单生成 `CREATE TABLE … PRIMARY KEY (…)`；**必须给主键**（无主键的新表在本工具里不可浏览、不可编辑），主键列强制 `NOT NULL`；回滚是 `DROP TABLE` | `TestDDLCreateTable`、`TestSchemaCreateTableAndUndo`、浏览器实测 |
 | 表单改动即时生成 DDL 且可见 | §1.2 / 验收 1 | 输入变化 250ms 后调 `?preview=1` 取服务端生成的语句并展示；预览不保管预案 | 浏览器实测 |
@@ -263,7 +263,8 @@ SELECT COUNT(*) FROM t WHERE c > 2147483647 OR c < -2147483648;
 | 改列类型 | §1.1 / §5.2 | `action` 为 `alter_column_type`；语句文本由 `Dialect.AlterColumnTypeSQL` 渲染（PG `ALTER COLUMN … TYPE`、MySQL `MODIFY COLUMN` 带完整列定义）；**生成预案前做收窄预检**，装不下现存数据即 `ErrNarrowingBlocked` 并给出样本 | `TestBoundsFor`、`TestDDLAlterColumnTypeOnRealEngines`（MySQL + PG）、浏览器实测（含拦截与放行两条路径） |
 | 索引管理（建 / 删） | §1.1 / 验收 6 | `action` 为 `create_index` / `drop_index`；语句文本由 `Dialect.CreateIndexSQL` / `DropIndexSQL` 渲染（MySQL 的 `DROP INDEX` 要带 `ON <table>`，PG/SQLite 不能带）；建唯一索引前先查重复值，命中即 `ErrDuplicateRows` 并给样本；主键索引拒绝删除；删索引不动数据，回滚按原定义重建 | `TestDDLCreateAndDropIndex`、`TestDDLUniqueIndexBlocksDuplicates`、`TestDDLIndexOnRealEngines`（MySQL + PG，直接验证 `DROP INDEX` 写法）、浏览器实测 |
 | 结构比对（v1） | §4 / 验收 9 | `POST /compare`：两个已打开连接逐表比对，输出 `only_left` / `only_right` / `changed` / `need_review` 与逐列原因（中立类型、原始类型、可空、默认值、注释、主键与唯一标记）；**索引参与比对**，按「列序列 + 唯一性 + 谓词」为键、不按名字，只改名字或访问方法不生成脚本而进 `need_review`；主键索引不当作普通索引处理；原始类型文本先做同义归一（`character varying(n)`≡`varchar(n)`、`integer`≡`int`、剥掉 MySQL 整数显示宽度）。列的删除与改类型仍进 `need_review`，索引的增删因为不丢数据、两个方向都生成脚本（升级与回退） | `TestCompareSchemas`、`TestCompareIndexes`、`TestCompareIndexNameOnlyDifference`、`TestNormalizeTypeText`、`TestCompareEndpoint`、浏览器实测（3 张差异表 + 升级脚本 + 3 条待决策）；`TestCompareIndexes` 含变异验证（去掉脚本生成即失败）；跨引擎冒烟：MySQL 5.7 ↔ PostgreSQL 17 同构表**零差异**（主键索引未误报、`BTREE`/`btree` 等价、整数显示宽度已归一） |
-| 外键孤儿数据预检（只读） | §5.1 / §5.2 / 验收 5 | ``POST /connections/{id}/fk/precheck``：检出子表里父表找不到对应行的数据（任一子列为 NULL 不计），判断父表参与列是否唯一（主键或**列集合完全一致**的唯一索引），orphans>0 即 ``blocked`` 并给最多 5 条样本 | ``TestFKPrecheckCleanData``、``TestFKPrecheckOrphansBlocked``、``TestFKPrecheckCompositeUniqueness``、``TestFKPrecheckEndpoint`` |
+| 加外键 | §1.1 / 验收 5 | `action` 为 `add_foreign_key`；生成预案前**先跑与预检端点同一套检查**（孤儿数据 + 父表列唯一性），不通过即 `ErrForeignKeyBlocked` → 409 `FK_PRECHECK_BLOCKED` 并带样本；动作子句走白名单（CASCADE / RESTRICT / NO ACTION / SET NULL），`SET NULL` 撞上 NOT NULL 引用列时提前拒绝；名字为空按 `fk_<表>_<列>` 生成（回滚要靠它摘约束，不能是随机名）；回滚是 `ALTER TABLE … DROP` 约束，不动数据 | `TestValidateFKShape`、`TestDefaultFKName`、`TestDDLAddForeignKeyNeedsCapability`、`TestSchemaPlanAddForeignKeyNeedsCapability`、`TestDDLAddForeignKeyOnRealEngines`（MySQL 5.7 + PG 17：孤儿阻断带样本 → 清数据后出预案 → 执行 → 结构里出现外键 → 回滚摘掉） |
+| 外键预检（只读） | §5.1 / §5.2 / 验收 5 | `POST /connections/{id}/fk/precheck`：检出子表里父表找不到对应行的数据（任一子列为 NULL 不计），判断父表参与列是否唯一（主键或**列集合完全一致**的唯一索引），orphans>0 即 `blocked` 并给最多 5 条样本 | `TestFKPrecheckCleanData`、`TestFKPrecheckOrphansBlocked`、`TestFKPrecheckCompositeUniqueness`、`TestFKPrecheckEndpoint` |
 | 删列的影响面 | §5.2 | 展示该列**非空行数**（`COUNT(*) WHERE col IS NOT NULL`），并标 `不可逆`；NULL 行不计入 | 浏览器实测（3 行有值 → 显示「影响 3 行」） |
 | 加列可撤销 | §2.6 | 撤销预案 = `DROP COLUMN`，复用撤销通道；删列因数据丢失不生成撤销 | 浏览器实测（加列后撤销，结构与 DDL 复原） |
 
@@ -272,7 +273,7 @@ SELECT COUNT(*) FROM t WHERE c > 2147483647 OR c < -2147483648;
 | 缺口 | 契约位置 | 影响 | 处置 |
 |---|---|---|---|
 | 改默认值 / 改可空 | §1.1 | 改列类型时会把原有的可空性与默认值一起保留，但还不能单独修改它们 | 待实现；改默认值涉及表达式白名单，改可空涉及 NOT NULL 预检 |
-| 加外键与检查约束的 DDL | §1.1 / §5.2 | 孤儿数据预检已实现（见上），但**加外键的语句本身没做**：SQLite 不支持 `ALTER TABLE ADD CONSTRAINT`，MySQL/PG 目前没有可用真机验收。不把没验过的 DDL 交给用户去生产环境跑 | 待真机可用后实现（需要 `Capabilities` 新增能力位 + `ALTER TABLE ... ADD CONSTRAINT` 渲染） |
+| 检查约束的 DDL | §1.1 / §5.2 | 既没有加检查约束的动作，结构比对也不比它（`TableDetail.Checks` 已由驱动填充，只是没被用起来） | 待实现；加检查约束要先做「存量行是否满足表达式」的预检，否则和孤儿数据是同一类问题 |
 | 视图 / 物化视图 / 例程 / 触发器 / 序列 / 用户类型设计器 | §1.1、§6 | 全部缺失 | 待实现 |
 | 引擎特有项（`EngineExtra`）表单 | §1.3 | 未渲染，仅能看 DDL 原文 | 待实现；依赖各引擎补充元数据 |
 | 在线变更建议（`CONCURRENTLY`、`ALGORITHM=INPLACE` 等） | §2.4 / 验收 4 | 无建议与「一键插入编辑器」 | 待实现 |
@@ -284,6 +285,6 @@ SELECT COUNT(*) FROM t WHERE c > 2147483647 OR c < -2147483648;
 
 ### 8.3 验收清单状态
 
-已过：1（预览）、3（MySQL 警示）、6（唯一索引前查重复值并阻断，含样本）、7（收窄预检 + 样本）、10（定义变更阻断）。
-未过：2（MSSQL/Oracle 未实现，无法 5 引擎回放）、4（在线变更建议）、8（依赖检查）、11（长事务探测）、12（手写 SQL 模式）；5（外键孤儿数据预检）部分过：预检可用且能阻断并给样本，但「加外键」动作本身未实现；9（结构比对）部分过：差异分类、索引级差异、升级脚本与索引回退脚本已可用，但删表/删列/改类型不生成回退脚本，外键与检查约束尚未比对。
+已过：1（预览）、3（MySQL 警示）、5（加外键前检测孤儿并阻断，含样本；MySQL/PG 真机跑通「阻断 → 出预案 → 执行 → 结构出现 → 回滚摘掉」）、6（唯一索引前查重复值并阻断，含样本）、7（收窄预检 + 样本）、10（定义变更阻断）。
+未过：2（MSSQL/Oracle 未实现，无法 5 引擎回放）、4（在线变更建议）、8（依赖检查）、11（长事务探测）、12（手写 SQL 模式）；9（结构比对）部分过：差异分类、索引级差异、升级脚本与索引回退脚本已可用，但删表/删列/改类型不生成回退脚本，外键与检查约束尚未比对。
 

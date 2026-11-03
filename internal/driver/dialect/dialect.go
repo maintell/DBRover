@@ -73,6 +73,14 @@ type Dialect interface {
 	// MySQL 必须写 DROP INDEX <name> ON <table>，PostgreSQL / SQLite 不能带 ON。
 	DropIndexSQL(table, name string) string
 
+	// AddForeignKeySQL 渲染加外键语句。
+	// MySQL 与 PostgreSQL 的写法一致；SQLite 不支持，调用方应先看 Capabilities。
+	AddForeignKeySQL(table, name string, columns []string, refTable string, refColumns []string, onDelete, onUpdate string) string
+
+	// DropForeignKeySQL 渲染删外键语句。
+	// MySQL 用 DROP FOREIGN KEY，PostgreSQL 用 DROP CONSTRAINT——同一件事两个名字。
+	DropForeignKeySQL(table, name string) string
+
 	Split(script string) ([]Statement, error)
 	Normalize(sqlText string) (string, error)
 	Fingerprint(sqlText string) (string, error)
@@ -181,9 +189,51 @@ func (d impl) DropIndexSQL(table, name string) string {
 	}
 }
 
-func quoteDouble(s string) string { return `"` + strings.ReplaceAll(s, `"`, `""`) + `"` }
+// AddForeignKeySQL 渲染加外键语句。
+//
+// MySQL 与 PostgreSQL 的写法一致。动作子句（ON DELETE / ON UPDATE）只在
+// 调用方给了合法值时出现；合法性由 service 的白名单保证，这里不做判断。
+func (d impl) AddForeignKeySQL(table, name string, columns []string, refTable string,
+	refColumns []string, onDelete, onUpdate string) string {
 
+	cols := make([]string, len(columns))
+	for i, c := range columns {
+		cols[i] = d.quote(c)
+	}
+	refs := make([]string, len(refColumns))
+	for i, c := range refColumns {
+		refs[i] = d.quote(c)
+	}
+
+	sql := "ALTER TABLE " + table + " ADD CONSTRAINT " + d.quote(name) +
+		" FOREIGN KEY (" + strings.Join(cols, ", ") + ")" +
+		" REFERENCES " + refTable + " (" + strings.Join(refs, ", ") + ")"
+	if onDelete != "" {
+		sql += " ON DELETE " + onDelete
+	}
+	if onUpdate != "" {
+		sql += " ON UPDATE " + onUpdate
+	}
+	return sql
+}
+
+// DropForeignKeySQL 渲染删外键语句。
+//
+// 同一件事两个名字：MySQL 在 ALTER TABLE 后面说 DROP FOREIGN KEY，
+// PostgreSQL 说 DROP CONSTRAINT（它不区分约束类型）。
+func (d impl) DropForeignKeySQL(table, name string) string {
+	switch d.engine {
+	case model.EngineMySQL, model.EngineMSSQL:
+		return "ALTER TABLE " + table + " DROP FOREIGN KEY " + d.quote(name)
+	default:
+		return "ALTER TABLE " + table + " DROP CONSTRAINT " + d.quote(name)
+	}
+}
+
+// quoteBacktick 用反引号引用标识符（MySQL）。
 func quoteBacktick(s string) string { return "`" + strings.ReplaceAll(s, "`", "``") + "`" }
+
+func quoteDouble(s string) string { return `"` + strings.ReplaceAll(s, `"`, `""`) + `"` }
 
 func quoteBracket(s string) string { return "[" + strings.ReplaceAll(s, "]", "]]") + "]" }
 

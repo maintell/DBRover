@@ -753,6 +753,9 @@ func (s *Server) handleTableSchema(w http.ResponseWriter, r *http.Request) {
 		"row_estimate": detail.RowEstimate,
 		"primary_key":  detail.PrimaryKeyColumns(),
 		"ddl":          ddlText,
+		// 结构页据能力决定摆不摆某个入口：不可用的能力不出现，
+		// 而不是出现了再让人点出一个必然失败的错。
+		"capabilities": e.drv.Capabilities(),
 	}
 	if derr != nil {
 		// DDL 还原失败不该让整个结构页打不开：结构本身仍然可用。
@@ -763,12 +766,13 @@ func (s *Server) handleTableSchema(w http.ResponseWriter, r *http.Request) {
 }
 
 type schemaPlanRequest struct {
-	Table      model.ObjectRef      `json:"table"`
-	Action     service.DDLAction    `json:"action"`
-	Column     service.ColumnSpec   `json:"column"`
-	Columns    []service.ColumnSpec `json:"columns"`
-	PrimaryKey []string             `json:"primary_key"`
-	Index      service.IndexSpec    `json:"index"`
+	Table      model.ObjectRef        `json:"table"`
+	Action     service.DDLAction      `json:"action"`
+	Column     service.ColumnSpec     `json:"column"`
+	Columns    []service.ColumnSpec   `json:"columns"`
+	PrimaryKey []string               `json:"primary_key"`
+	Index      service.IndexSpec      `json:"index"`
+	ForeignKey service.ForeignKeySpec `json:"foreign_key"`
 }
 
 // handleSchemaPlan 生成结构变更预案。执行走同一个 /changes/{pid}/apply。
@@ -787,7 +791,13 @@ func (s *Server) handleSchemaPlan(w http.ResponseWriter, r *http.Request) {
 	plan, err := e.exec.BuildDDLPlan(r.Context(), service.DDLRequest{
 		Table: req.Table, Action: req.Action, Column: req.Column,
 		Columns: req.Columns, PrimaryKey: req.PrimaryKey, Index: req.Index,
+		ForeignKey: req.ForeignKey,
 	})
+	if errors.Is(err, service.ErrForeignKeyBlocked) {
+		writeError(w, http.StatusConflict, "FK_PRECHECK_BLOCKED", "policy",
+			err.Error(), "先清理孤儿数据，或改成能对上父表的引用列", false)
+		return
+	}
 	if errors.Is(err, service.ErrDuplicateRows) {
 		writeError(w, http.StatusConflict, "DUPLICATE_ROWS", "policy",
 			err.Error(), "先清理重复值，或去掉「唯一」再建", false)

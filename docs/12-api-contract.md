@@ -398,6 +398,7 @@ POST /connections
 | `CHANGE_APPLY_ABORTED` | policy | 409 | 分批执行被中止：已提交的批不回滚，预案仍有效 |
 | `SCHEMA_CHANGED` | constraint | 409 | 表定义在生成预案后变过 |
 | `NARROWING_BLOCKED` | constraint | 409 | 改列类型会截断现存数据 |
+| `FK_PRECHECK_BLOCKED` | constraint | 409 | 有孤儿数据或父表列不唯一，加外键会失败（带样本） |
 | `DUPLICATE_ROWS` | constraint | 409 | 唯一索引预检发现重复值 |
 | `BULK_CONFIRM_TABLE_REQUIRED` | policy | 428 | 无条件批量修改需回填表名 |
 | `BULK_NO_ROLLBACK_ACK` | policy | 428 | 影响行数超过回滚上限，需显式接受 |

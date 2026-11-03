@@ -63,6 +63,7 @@ func (c *Connector) Capabilities() model.Capabilities {
 		// PG 的 DDL 在事务内，可真实回滚。
 		DDLTransactional: true,
 		AlterColumnType:  true,
+		AddForeignKey:    true,
 	}
 }
 

@@ -2,6 +2,7 @@ package api_test
 
 import (
 	"net/http"
+	"strings"
 	"testing"
 )
 
@@ -79,5 +80,40 @@ func TestFKPrecheckEndpointRejectsBadInput(t *testing.T) {
 	}, true)
 	if code != http.StatusBadRequest {
 		t.Errorf("列数不一致应 400, 实际 %d, body=%v", code, body)
+	}
+}
+
+// TestSchemaPlanAddForeignKeyNeedsCapability 验证接口层：
+// SQLite 不支持用 ALTER TABLE 加外键，必须明确拒绝而不是报「未知动作」。
+// 真机上的成功路径由 service 层的 TestDDLAddForeignKeyOnRealEngines 覆盖。
+func TestSchemaPlanAddForeignKeyNeedsCapability(t *testing.T) {
+	_, ts, dir := newServer(t)
+	id := createConn(t, ts, dir, "test", "read-write")
+	for _, q := range []string{
+		"CREATE TABLE fk_p (id INTEGER PRIMARY KEY)",
+		"CREATE TABLE fk_c (id INTEGER PRIMARY KEY, pid INTEGER)",
+	} {
+		if code := execApproved(t, ts, id, q); code != http.StatusOK {
+			t.Fatalf("准备表失败 (%s): %d", q, code)
+		}
+	}
+
+	code, body := do(t, ts, http.MethodPost, "/api/v1/connections/"+id+"/schema/plan", map[string]any{
+		"table":  map[string]any{"kind": "table", "name": "fk_c"},
+		"action": "add_foreign_key",
+		"foreign_key": map[string]any{
+			"columns": []string{"pid"}, "ref_table": "fk_p", "ref_columns": []string{"id"},
+		},
+	}, true)
+	if code != http.StatusBadRequest {
+		t.Fatalf("status = %d, 期望 400, body=%v", code, body)
+	}
+	errObj, _ := body["error"].(map[string]any)
+	msg, _ := errObj["message"].(string)
+	if !strings.Contains(msg, "不支持") {
+		t.Errorf("应说清是引擎不支持, 实际 %q", msg)
+	}
+	if strings.Contains(msg, "不支持的动作") {
+		t.Errorf("动作已被识别，不该落到「未知动作」分支: %q", msg)
 	}
 }

@@ -226,6 +226,9 @@ type Capabilities struct {
 	// SQLite 为 false：它只能重建表，因此上层必须给出明确拒绝而不是生成必然失败的语句。
 	// 见 ADR-0005：能力有无写进 Capabilities，语句文本差异归 dialect。
 	AlterColumnType bool `json:"alter_column_type"`
+	// AddForeignKey 表示引擎支持用 ALTER TABLE 追加外键约束。
+	// SQLite 为 false：它的 ALTER TABLE 只认 RENAME / ADD COLUMN，加约束必须重建整表。
+	AddForeignKey bool `json:"add_foreign_key"`
 }
 
 // Connection 是一个可复用的连接配置。它不持有物理连接。
