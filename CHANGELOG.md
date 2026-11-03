@@ -53,6 +53,19 @@
 - **CLI**（`cmd/dbrover`）：`version` / `health` / `tables` / `exec` / `serve` / `tunnel`，退出码 0（成功）/ 1（失败）/ 2（被策略拒绝）。
 - **CI**：`ci.yml`（PR 与主干只跑测试）、`release.yml`（仅 tag 触发，只做交叉编译与发布）。规则由 `internal/ci` 的测试强制。
 
+- **AI Agent 运行时**（`internal/agent`）：Provider 抽象 + OpenAI 兼容客户端（DeepSeek / 通义 / Moonshot / vLLM / Ollama 走同一套协议，用 `base_url` + `model` 区分）、14 个工具、权限三模式 × 环境上限 × 连接访问模式、执行循环（步数 / 时长 / 循环检测 / 同工具失败上限）、审批门（预案只由服务端保管，Agent 无法自批）。只读判定在服务侧（`ReadOnlyQuery`），不靠调用方自觉。接 HTTP（`/agent/status`、`/agent/conversations`、`/messages`（含 `?stream=1` NDJSON）、`/approvals`、`/export`）与界面（步骤时间线、可展开 SQL、审批卡片、会话导出）。
+- **Agent 上下文检索与压缩**：按问题里的词检索相关对象（中文额外取 2~3 字前缀，因为中文没有空格），对命中的对象再查一次入向依赖（视图与外键），最多注入 40 个对象名 / 5 张表列定义；历史超过字符预算时把最早的工具结果截断并注明「已压缩」。
+- **Agent 评测集**（`internal/agent/eval`）：14 条录制回放用例（只读分析 6、失败自愈 1、安全边界 4、提示注入 3），**SQLite / MySQL 5.7 / PostgreSQL 17 三引擎真机全过**；`TestEvalSuite` 断言不安全行为率 = 0、平均工具调用数 ≤ 8。
+- **按光标所在语句执行**：`exec` 接受 `cursor`（UTF-8 字节偏移），服务端挑出光标所在的那一条；选中一段则跑选中的那段。切分仍在服务端，前端只提供偏移。
+- **取消正在执行的语句**（`POST /connections/{id}/cancel` + 工具栏「取消」）：SQLite interrupt、PostgreSQL 断开即停、**MySQL 用 `KILL QUERY`**（会话为此钉在单条物理连接上，只取消本地 ctx 不够——`SLEEP()` 不读 socket）。
+- **执行计划**（`POST /connections/{id}/explain` + 「计划」按钮）：SQLite 用 `EXPLAIN QUERY PLAN`、PG/MySQL 用 `EXPLAIN`、MSSQL/Oracle 明确 400。新增 `AnalyzePlan` 把计划翻成偏差项（全表扫描 / 扫整个索引 / 额外排序 / 临时树 / 嵌套循环）并在界面上高亮。
+- **结构比对补视图定义**：只比查询体（`ALGORITHM` / `DEFINER` / `SQL SECURITY` 是部署属性，不计入差异），取不到定义时不判「相同」；差异表带两侧原文 `left_ddl` / `right_ddl`。
+- **Windows 凭据库 + `dbrover secret`**（`internal/infra/secret`）：syscall 调 advapi32 的 `CredWriteW` / `CredReadW` / `CredDeleteW`；`secret set|clear|status` 的口令只从 stdin 读（不接受命令行参数）；Agent 的 API Key 取用顺序是「环境变量 → 凭据库」。非 Windows 返回 `ErrUnsupported`，不退化成明文文件。
+- **`serve -open`**：就绪（`/api/v1/health` 通）之后用系统默认浏览器打开带 token 的地址，各平台一条命令，不引依赖。
+- **多语句失败保留已完成结果**：错误体新增 `error.results`，带「失败之前已完成的语句」结果（含失败那条的 `err`），状态码与错误码不变；界面失败时先画已完成的结果。
+- **百万行翻页压测**：100 万行表按 200 行/页翻 60 页（1.2 万行），总 619 ms、单页均摊 10.3 ms、HeapAlloc 增长 1.7 MB；从 50 万行之后取一页 13.1 ms。
+- **`scripts/check.ps1` 磁盘前置检查 + `-TmpDir`**：临时目录所在盘可用空间 < 2 GB 时直接拒绝并给改法——盘满时链接阶段报 `There is not enough space on the disk`，看起来像代码错误。
+
 ### 安全
 
 - **大整数不再静默丢精度**：`BIGINT` 超过 2^53 时，界面保持字符串、服务端按列类型还原；客户端若把它写成 JSON 数字，直接 `400 NUMBER_PRECISION_LOSS` 并提示改用字符串，而不是把丢了低位的值写进库。此前界面 `coerce()` 用 `Number()` 转换整数列，编辑 `9223372036854775807` 会变成 `...5808`。
@@ -64,14 +77,20 @@
 - 游标 ID 全局唯一，避免多连接间结果集串库。
 - Origin 校验：只接受同源或不带 Origin 的非浏览器客户端。
 
+- **审计链接式哈希**：每条事件带 `prev_hash` / `hash`（`SHA256(prev_hash || 规范化 JSON)`），重启时接着上一条算；`GET /api/v1/audit/verify` 校验整条链并指到出问题的行号。改一行、删一行、插一行都能发现。
+- **审计本地锚点**（`serve -audit-anchor <path>`）：每写 1 条（首条立即封）与每 100 条，把「条数 + 链头」连同 HMAC-SHA256 写进独立文件，密钥存系统凭据库。整段重写成一条自洽的新链时，链校验过得去、锚点过不去。
+- **口令不进审计**：`CREATE/ALTER USER … IDENTIFIED BY`、`SET PASSWORD`、`ALTER ROLE … PASSWORD`、连接串里的 `password=` 一律脱敏成 `'***'`，账号名与动作保留。
+- **明文口令门禁**：带口令建连接后，连接列表、审计接口、审计文件三处原始字节都不得含该口令（`TestNoPlaintextPassword`，含变异验证）。
+- **两处 `[hidden]` 被 CSS 覆盖**的修复不再复现：取消按钮与待提交条都显式写了 `#x[hidden]{display:none}`。### 已知限制
+
 ### 已知限制
 
-- 已实现 SQLite / MySQL / PostgreSQL 三个关系引擎；SQL Server、Oracle 与非关系型（Redis / MongoDB / Elasticsearch）仍是占位目录。
-- 编辑入口只覆盖最基础形态：JSON / BLOB / 复数类型走统一文本单元格，批次阈值分档、批量修改、时区显示策略均未做（见 `docs/06-data-editor.md` §8.2）。导出只支持 CSV 与 NDJSON（100 万行内存增长 10.6 MB，已压测），xlsx / SQL INSERT / Markdown 与测试数据生成未做。
-- 结构设计器只做建表、加列、删列、改列类型、索引建删、表与列级结构比对：改默认值/可空、加外键与检查约束（预检已做）、视图与例程设计器、索引级比对、回退脚本、在线变更建议、依赖检查均未做（见 `docs/07-schema-designer.md` §8.2）。
-- 审计只做到「记录过什么」，链式哈希与完整性校验未实现，无法证明「没被人改过」。
-- 正式 React 前端未开始；`internal/webui` 是免构建的临时界面。
+- 已实现 SQLite / MySQL / PostgreSQL 三个关系引擎与 Redis（只读浏览 + 写路径 + 命令模式）；SQL Server、Oracle、MongoDB、Elasticsearch 仍未实现。
+- 结构设计器已覆盖建表、加列、删列、改列类型（收窄预检）、索引建删（唯一索引查重）、加外键（孤儿预检）、删表（依赖阻断）、手写 DDL（单向）；结构比对覆盖表 / 列 / 索引 / 外键 / 检查约束 / 视图定义。**未做**：视图与例程设计器、检查约束的增删、手写 DDL 反解回表单（需完整 DDL 解析器）。
+- 执行计划只覆盖 3/5 引擎（MSSQL 需 `SET SHOWPLAN_ALL`、Oracle 需 `EXPLAIN PLAN FOR`），且只做「偏差项提示」，不做代价估算。
+- 审计不防「能同时改审计文件、锚点文件并读到本机凭据库密钥」的本地管理员；真正的外部锚点（把链头发到另一台机器）未做。
+- 凭据库只有 Windows 实现；macOS（Keychain）与 Linux（Secret Service）未做。
+- Agent 的注释检索与向量召回未做（名称匹配 + 结构邻近已做）；评测集是录制回放，不检验模型本身的智力。
+- 正式 React 前端未开始；`internal/webui` 是免构建的临时界面。桌面壳（Wails）未做，`serve -open` 是轻量替代。
 - OpenAPI 契约已落文件并由测试约束，但尚未接入代码生成。
-- 图形化界面未做：ER 图、执行计划可视化、结构设计器均未实现。
-
 [Unreleased]: https://github.com/maintell/DBRover/commits/main
