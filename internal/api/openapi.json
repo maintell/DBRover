@@ -131,7 +131,7 @@
                   "name": { "type": "string" },
                   "engine": {
                     "type": "string",
-                    "enum": ["sqlite", "mysql", "pg"],
+                    "enum": ["sqlite", "mysql", "postgres", "redis"],
                     "description": "sqlite 时 host 是数据库文件路径；其余引擎按网络连接处理"
                   },
                   "host": { "type": "string", "description": "文件路径或主机名" },
@@ -613,7 +613,91 @@
         }
       }
     },
-    "/api/v1/compare": {
+    "/api/v1/connections/{id}/kv/keys": {
+      "get": {
+        "summary": "遍历 key（SCAN）",
+        "description": "key-value 连接专用。用 SCAN 游标而不是 KEYS：后者会阻塞整个实例，集群模式下还没有它。对关系型连接调用返回 400 CAPABILITY_UNSUPPORTED。",
+        "parameters": [
+          { "name": "id", "in": "path", "required": true, "schema": { "type": "string" } },
+          { "name": "cursor", "in": "query", "description": "上一页返回的游标；空表示从头", "schema": { "type": "string" } },
+          { "name": "pattern", "in": "query", "schema": { "type": "string" } },
+          { "name": "type", "in": "query", "schema": { "type": "string", "enum": ["string", "hash", "list", "set", "zset", "stream"] } },
+          { "name": "count", "in": "query", "schema": { "type": "integer", "default": 200 } }
+        ],
+        "responses": {
+          "200": {
+            "description": "一页 key。has_more 为 true 时 cursor 才有意义",
+            "content": { "application/json": { "schema": {
+              "type": "object",
+              "properties": {
+                "keys": { "type": "array", "items": { "type": "string" } },
+                "cursor": { "type": "string" },
+                "has_more": { "type": "boolean" }
+              }
+            } } }
+          },
+          "400": { "description": "关系型连接调用了 kv 端点（CAPABILITY_UNSUPPORTED）" },
+          "502": { "description": "SCAN 失败（KV_SCAN_FAILED）" }
+        }
+      }
+    },
+    "/api/v1/connections/{id}/kv/entry": {
+      "get": {
+        "summary": "读一个 key 的元信息",
+        "description": "类型 / TTL / 编码 / 元素数 / 体积。体积取不到时 size_bytes 缺失（不写 0）——MEMORY USAGE 在大 key 上可能超时。key 用查询参数传，因为 Redis 的 key 是二进制安全的，斜杠与空格都合法。",
+        "parameters": [
+          { "name": "id", "in": "path", "required": true, "schema": { "type": "string" } },
+          { "name": "key", "in": "query", "required": true, "schema": { "type": "string" } }
+        ],
+        "responses": {
+          "200": { "description": "类型 / ttl_seconds（-1 永不过期、-2 不存在）/ length / size_bytes / preview" },
+          "400": { "description": "缺少 key 或连接不是 key-value" },
+          "502": { "description": "读取失败（KV_INSPECT_FAILED）" }
+        }
+      }
+    },
+    "/api/v1/connections/{id}/kv/value": {
+      "get": {
+        "summary": "按类型分页读值",
+        "description": "string 用 GETRANGE 限长（默认 8 KB）并显式给 truncated；hash/set 用 HSCAN/SSCAN；zset/list 按名次分页；stream 用 XRANGE。位图 / HLL / geo / 模块类型只返回类型，不假装能编辑。",
+        "parameters": [
+          { "name": "id", "in": "path", "required": true, "schema": { "type": "string" } },
+          { "name": "key", "in": "query", "required": true, "schema": { "type": "string" } },
+          { "name": "cursor", "in": "query", "schema": { "type": "string" } },
+          { "name": "count", "in": "query", "schema": { "type": "integer", "default": 100 } },
+          { "name": "max_bytes", "in": "query", "description": "只对 string 生效", "schema": { "type": "integer", "default": 8192 } }
+        ],
+        "responses": {
+          "200": { "description": "值 + cursor / has_more / truncated" },
+          "400": { "description": "缺少 key 或连接不是 key-value" },
+          "502": { "description": "读取失败（KV_VALUE_FAILED）" }
+        }
+      }
+    },
+    "/api/v1/connections/{id}/kv/command": {
+      "post": {
+        "summary": "命令模式（第一版只放行只读命令）",
+        "description": "结构化命令名 + 参数，不做自由文本解析。风险分级见 ADR-0007 §3：risk > R1（写/高危）一律 403 POLICY_WRITE_NOT_ENABLED，因为写路径要过审批与审计，尚未做；KEYS 与 DEBUG 直接拒绝（POLICY_COMMAND_BLOCKED）并给出替代方案。",
+        "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "string" } }],
+        "requestBody": {
+          "required": true,
+          "content": { "application/json": { "schema": {
+            "type": "object",
+            "required": ["name"],
+            "properties": {
+              "name": { "type": "string", "description": "命令名，如 GET / TTL / SCAN" },
+              "args": { "type": "array", "items": {} }
+            }
+          } } }
+        },
+        "responses": {
+          "200": { "description": "命令结果（rows）+ changed=-1 表示未知" },
+          "400": { "description": "请求非法或连接不是 key-value" },
+          "403": { "description": "命令被拒（POLICY_COMMAND_BLOCKED / POLICY_WRITE_NOT_ENABLED）" },
+          "502": { "description": "执行失败（KV_COMMAND_FAILED）" }
+        }
+      }
+    },    "/api/v1/compare": {
       "post": {
         "summary": "比对两个连接的结构",
         "description": "只读：不生成预案、不改任何一边。返回每张表的状态（only_left / only_right / changed / need_review）与逐列差异原因。索引参与比对，按「列序列 + 唯一性 + 谓词」为键、不按名字；只改索引名或访问方法不生成脚本而进 need_review。列的删除与改类型一律进 need_review；索引的增删因为不丢数据，upgrade 与 downgrade 两个方向都给脚本。",

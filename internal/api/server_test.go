@@ -21,7 +21,7 @@ const testToken = "test-token-123"
 func newServer(t *testing.T) (*api.Server, *httptest.Server, string) {
 	t.Helper()
 	dir := t.TempDir()
-	opener := func(engine model.Engine, cfg driver.ConnectConfig) (driver.Connector, error) {
+	opener := func(engine model.Engine, cfg driver.ConnectConfig) (any, error) {
 		c := sqlite.New()
 		if err := c.Open(context.Background(), cfg); err != nil {
 			return nil, err

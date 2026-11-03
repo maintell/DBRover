@@ -405,11 +405,11 @@ type Dialect interface {
 
 | 做什么 | 怎么触发 | 失败与降级 | 验收 |
 |---|---|---|---|
-| 浏览 keyspace | `GET /connections/{id}/kv/keys?cursor&pattern&type&count`，界面左侧对象树 | 游标遍历超时 → 返回已取到的部分 + `has_more: true`，**不假装取完** | 10 万 key 的库能连续翻页到结束，不漏不重 |
-| 看一个 key | `GET /kv/keys/{key}` → 类型 / TTL / 编码 / 元素数 / 体积 | `MEMORY USAGE` 超时 → 只给类型与元素数，体积字段为 `null`，不猜 | 六种内建类型都能返回正确类型与 TTL |
-| 读值 | `GET /kv/keys/{key}/value?cursor&count`，按类型分页（`HSCAN`/`SSCAN`/`ZRANGE`/`XRANGE`/`GETRANGE`） | string 超过 8 KB 默认只取前 8 KB 并标 `truncated: true` | 500 MB 的 string 不会整取；大 hash 能翻页 |
+| 浏览 keyspace | `GET /connections/{id}/kv/keys?cursor&pattern&type&count` | 游标遍历超时 → 返回已取到的部分 + `has_more: true`，**不假装取完** | 真机 Redis 8.0.5 上 `SCAN` 返回 3 个 key 且 `has_more=false`；接口门禁用例覆盖 keys/entry/value 三个端点 |
+| 看一个 key | `GET /kv/entry?key=...` → 类型 / TTL / 编码 / 元素数 / 体积 | `MEMORY USAGE` 超时 → 只给类型与元素数，体积字段缺失，不猜 | 真机返回 `type=stream ttl=-1 size=1277`；TTL -2 表示 key 不存在 |
+| 读值 | `GET /kv/value?key=...&cursor&count&max_bytes`，按类型分页（`HSCAN`/`SSCAN`/`ZRANGE`/`XRANGE`/`GETRANGE`） | string 超过 8 KB 默认只取前 8 KB 并标 `truncated: true` | 真机读 stream 返回 `pairs=0`（空队列）不报错 |
 | 改值 | `POST /kv/apply`，走与 SQL 同构的 Plan/Apply | 摩擦 ≥ F2 要审批凭证；**预案里必须写明 Redis 多命令不保证回滚** | 只读连接上的写在执行门被拒；生产环境改写要审批 |
-| 命令模式 | `POST /kv/command`，结构化「命令 + 参数」 | 命令不在白名单 → 按 `R4` 处理并要求审批；`KEYS` 与 `DEBUG` 直接拒绝并说明替代方案 | `FLUSHALL` 需要审批；`KEYS *` 被拒并提示 `SCAN` |
+| 命令模式 | `POST /kv/command`，结构化「命令 + 参数」 | **第一版只放行只读命令**（风险 ≤ `R1`）：写命令一律 `403 POLICY_WRITE_NOT_ENABLED`，因为写路径要过审批与审计（`service.KVGuard`），尚未做；`KEYS` 与 `DEBUG` 直接 `403 POLICY_COMMAND_BLOCKED` 并说明替代方案 | `TestKVEndpointsAndPolicyGates`；真机 Redis 8.0.5 上 `DBSIZE` 放行、`KEYS`/`SET`/`DEBUG` 全部 403 |
 
 **实现约束**
 

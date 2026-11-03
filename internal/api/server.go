@@ -28,7 +28,11 @@ import (
 )
 
 // Opener 按引擎创建并打开连接器。由调用方（cmd）注入，避免 api 直接依赖具体驱动。
-type Opener func(engine model.Engine, cfg driver.ConnectConfig) (driver.Connector, error)
+//
+// 返回 any 而不是 driver.Connector：关系型返回 Connector，非关系型返回
+// KVConnector，由 api 用**类型断言**分流（ADR-0007）。返回值改成具体接口
+// 就等于逼 api 判断引擎名，那是 ADR-0005 明令禁止的。
+type Opener func(engine model.Engine, cfg driver.ConnectConfig) (any, error)
 
 // Server 是回环 HTTP 服务。
 type Server struct {
@@ -53,7 +57,10 @@ type storedPlan struct {
 
 type entry struct {
 	conn model.Connection
+	// drv 与 kv 二选一：关系型走 drv，key-value 引擎走 kv。
+	// 两者都不为 nil 的情况不存在——分流在 handleCreateConnection 里一次定死。
 	drv  driver.Connector
+	kv   driver.KVConnector
 	exec *service.Executor
 }
 
@@ -77,9 +84,52 @@ func (s *Server) Close() {
 	s.cursorOwner = map[string]*entry{}
 	s.mu.Unlock()
 	for _, e := range conns {
+		e.close()
+	}
+}
+
+// close 释放这条连接持有的资源。drv 与 kv 二选一，所以两边都要判空。
+func (e *entry) close() {
+	if e.exec != nil {
 		e.exec.Close()
+	}
+	if e.drv != nil {
 		_ = e.drv.Close()
 	}
+	if e.kv != nil {
+		_ = e.kv.Close()
+	}
+}
+
+// health 取连接健康信息。关系型与 key-value 走各自的接口，调用方不用关心。
+func (e *entry) health(ctx context.Context) (*driver.HealthInfo, error) {
+	switch {
+	case e.drv != nil:
+		return e.drv.Health(ctx)
+	case e.kv != nil:
+		return e.kv.Health(ctx)
+	default:
+		return nil, errors.New("连接未初始化")
+	}
+}
+
+// relational 返回关系型连接器；key-value 连接返回 false。
+//
+// 用它而不是在每个 handler 里判 `e.drv == nil`：把「这条连接是不是关系型」
+// 收敛成一个方法，将来加第三种连接器时只要改这里。
+func (e *entry) relational() (driver.Connector, bool) {
+	if e.drv == nil {
+		return nil, false
+	}
+	return e.drv, true
+}
+
+// keyValue 返回 key-value 连接器；关系型连接返回 false。
+func (e *entry) keyValue() (driver.KVConnector, bool) {
+	if e.kv == nil {
+		return nil, false
+	}
+	return e.kv, true
 }
 
 // route 是一条路由声明。路由表是唯一注册来源，
@@ -114,6 +164,12 @@ func (s *Server) routes() []route {
 		{http.MethodDelete, "/api/v1/results/{cid}", false, s.handleCloseCursor},
 		{http.MethodGet, "/api/v1/audit", false, s.handleAudit},
 		{http.MethodGet, "/api/v1/connections/{id}/export", false, s.handleExport},
+		// key-value 端点用查询参数传 key，不放进路径：Redis 的 key 是二进制安全的，
+		// 冒号、斜杠、空格都合法，放进路径会被 URL 转义规则咬住。
+		{http.MethodGet, "/api/v1/connections/{id}/kv/keys", false, s.handleKVKeys},
+		{http.MethodGet, "/api/v1/connections/{id}/kv/entry", false, s.handleKVEntry},
+		{http.MethodGet, "/api/v1/connections/{id}/kv/value", false, s.handleKVValue},
+		{http.MethodPost, "/api/v1/connections/{id}/kv/command", false, s.handleKVCommand},
 	}
 }
 
@@ -364,7 +420,7 @@ func (s *Server) handleCreateConnection(w http.ResponseWriter, r *http.Request) 
 	cfg := connectConfigFrom(req, env, mode)
 	engine := model.Engine(req.Engine)
 
-	conn, err := s.opener(engine, cfg)
+	opened, err := s.opener(engine, cfg)
 	if err != nil {
 		writeError(w, http.StatusBadGateway, "DB_CONNECT_FAILED", "connection", err.Error(),
 			"检查文件路径与访问模式", false)
@@ -380,8 +436,20 @@ func (s *Server) handleCreateConnection(w http.ResponseWriter, r *http.Request) 
 			Environment: env, AccessMode: mode,
 			DisplayTimeZone: strings.TrimSpace(req.DisplayTimeZone),
 		},
-		drv:  conn,
-		exec: service.NewExecutor(conn, env, mode, s.audit),
+	}
+	// 用类型断言分流，不看引擎名（ADR-0007）。关系型需要执行门，
+	// key-value 走自己的 KV 端点，不构造 Executor。
+	switch v := opened.(type) {
+	case driver.Connector:
+		e.drv = v
+		e.exec = service.NewExecutor(v, env, mode, s.audit)
+	case driver.KVConnector:
+		e.kv = v
+	default:
+		s.mu.Unlock()
+		writeError(w, http.StatusBadGateway, "DB_CONNECT_FAILED", "connection",
+			"驱动返回了无法识别的连接器类型", "", false)
+		return
 	}
 	s.conns[id] = e
 	s.mu.Unlock()
@@ -417,8 +485,7 @@ func (s *Server) handleDeleteConnection(w http.ResponseWriter, r *http.Request) 
 		writeError(w, http.StatusNotFound, "CONNECTION_NOT_FOUND", "connection", "连接不存在", "", false)
 		return
 	}
-	e.exec.Close()
-	_ = e.drv.Close()
+	e.close()
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -428,7 +495,7 @@ func (s *Server) handleConnHealth(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "CONNECTION_NOT_FOUND", "connection", "连接不存在", "", false)
 		return
 	}
-	h, err := e.drv.Health(r.Context())
+	h, err := e.health(r.Context())
 	if err != nil {
 		writeError(w, http.StatusBadGateway, "DB_HEALTH_FAILED", "connection", err.Error(), "", true)
 		return
@@ -448,7 +515,13 @@ func (s *Server) handleTables(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "CONNECTION_NOT_FOUND", "connection", "连接不存在", "", false)
 		return
 	}
-	objs, err := e.drv.Meta().Objects(r.Context(), "", "", model.KindTable, model.KindView)
+	drv, ok := e.relational()
+	if !ok {
+		writeError(w, http.StatusBadRequest, "CAPABILITY_UNSUPPORTED", "internal",
+			"这是一个 key-value 连接，没有表的概念", "改用 GET /api/v1/connections/{id}/kv/keys", false)
+		return
+	}
+	objs, err := drv.Meta().Objects(r.Context(), "", "", model.KindTable, model.KindView)
 	if err != nil {
 		writeError(w, http.StatusBadGateway, "DB_METADATA_FAILED", "connection", err.Error(), "", true)
 		return
@@ -748,6 +821,12 @@ func (s *Server) handleTableSchema(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "CONNECTION_NOT_FOUND", "connection", "连接不存在", "", false)
 		return
 	}
+	drv, isRel := e.relational()
+	if !isRel {
+		writeError(w, http.StatusBadRequest, "CAPABILITY_UNSUPPORTED", "internal",
+			"这是一个 key-value 连接，没有表结构", "改用 GET /api/v1/connections/{id}/kv/entry?key=...", false)
+		return
+	}
 	ref := model.ObjectRef{Kind: model.KindTable, Name: r.PathValue("name"), Schema: r.URL.Query().Get("schema")}
 
 	detail, err := e.exec.DescribeTable(r.Context(), ref)
@@ -772,7 +851,7 @@ func (s *Server) handleTableSchema(w http.ResponseWriter, r *http.Request) {
 		"ddl":          ddlText,
 		// 结构页据能力决定摆不摆某个入口：不可用的能力不出现，
 		// 而不是出现了再让人点出一个必然失败的错。
-		"capabilities": e.drv.Capabilities(),
+		"capabilities": drv.Capabilities(),
 	}
 	if derr != nil {
 		// DDL 还原失败不该让整个结构页打不开：结构本身仍然可用。
@@ -1492,4 +1571,122 @@ type AddrError struct{ Addr string }
 
 func (e *AddrError) Error() string {
 	return "拒绝监听非回环地址 " + e.Addr + "（需要 --allow-remote 显式开启）"
+}
+
+// ---- key-value 端点 ----
+//
+// 这一族端点的路径里没有引擎名：Mongo / ES 将来也走同一族，只是内部映射不同
+// （ADR-0007）。对关系型连接调用它们会得到 400 CAPABILITY_UNSUPPORTED。
+
+// kvConn 取 key-value 连接器，顺便把「这不是 kv 连接」的错误写出去。
+func (s *Server) kvConn(w http.ResponseWriter, r *http.Request) (driver.KVConnector, bool) {
+	e, ok := s.lookup(r)
+	if !ok {
+		writeError(w, http.StatusNotFound, "CONNECTION_NOT_FOUND", "connection", "连接不存在", "", false)
+		return nil, false
+	}
+	kv, ok := e.keyValue()
+	if !ok {
+		writeError(w, http.StatusBadRequest, "CAPABILITY_UNSUPPORTED", "internal",
+			"这是一个关系型连接，没有 key 的概念", "改用 /tables 与 /tables/{name}/rows", false)
+		return nil, false
+	}
+	return kv, true
+}
+
+func (s *Server) handleKVKeys(w http.ResponseWriter, r *http.Request) {
+	kv, ok := s.kvConn(w, r)
+	if !ok {
+		return
+	}
+	q := r.URL.Query()
+	count, _ := strconv.Atoi(q.Get("count"))
+	page, err := kv.Scan(r.Context(), driver.KVScanOptions{
+		Cursor:  q.Get("cursor"),
+		Pattern: q.Get("pattern"),
+		Type:    driver.KVType(q.Get("type")),
+		Count:   count,
+	})
+	if err != nil {
+		writeError(w, http.StatusBadGateway, "KV_SCAN_FAILED", "internal", err.Error(), "", true)
+		return
+	}
+	writeJSON(w, http.StatusOK, page)
+}
+
+func (s *Server) handleKVEntry(w http.ResponseWriter, r *http.Request) {
+	kv, ok := s.kvConn(w, r)
+	if !ok {
+		return
+	}
+	key := r.URL.Query().Get("key")
+	if strings.TrimSpace(key) == "" {
+		writeError(w, http.StatusBadRequest, "REQUEST_INVALID", "internal", "缺少 key", "", false)
+		return
+	}
+	entry, err := kv.Inspect(r.Context(), key)
+	if err != nil {
+		writeError(w, http.StatusBadGateway, "KV_INSPECT_FAILED", "internal", err.Error(), "", true)
+		return
+	}
+	writeJSON(w, http.StatusOK, entry)
+}
+
+func (s *Server) handleKVValue(w http.ResponseWriter, r *http.Request) {
+	kv, ok := s.kvConn(w, r)
+	if !ok {
+		return
+	}
+	q := r.URL.Query()
+	key := q.Get("key")
+	if strings.TrimSpace(key) == "" {
+		writeError(w, http.StatusBadRequest, "REQUEST_INVALID", "internal", "缺少 key", "", false)
+		return
+	}
+	count, _ := strconv.Atoi(q.Get("count"))
+	maxBytes, _ := strconv.Atoi(q.Get("max_bytes"))
+	val, err := kv.Value(r.Context(), key, driver.KVValueOptions{
+		Cursor: q.Get("cursor"), Count: count, MaxBytes: maxBytes,
+	})
+	if err != nil {
+		writeError(w, http.StatusBadGateway, "KV_VALUE_FAILED", "internal", err.Error(), "", true)
+		return
+	}
+	writeJSON(w, http.StatusOK, val)
+}
+
+// handleKVCommand 是命令模式的入口。
+//
+// **第一版只放行只读命令**（风险 R0/R1）：写路径要过审批与审计，那是
+// service.KVGuard 的活，还没做。这里宁可窄，也不给一个能绕过只读的口子。
+func (s *Server) handleKVCommand(w http.ResponseWriter, r *http.Request) {
+	kv, ok := s.kvConn(w, r)
+	if !ok {
+		return
+	}
+	var req struct {
+		Name string `json:"name"`
+		Args []any  `json:"args"`
+	}
+	if err := decode(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, "REQUEST_INVALID", "internal", err.Error(), "", false)
+		return
+	}
+	if reason, blocked := policy.RedisCommandBlocked(req.Name); blocked {
+		writeError(w, http.StatusForbidden, "POLICY_COMMAND_BLOCKED", "policy", reason,
+			"用 keyspace 浏览器或命令里的替代写法", false)
+		return
+	}
+	if level, reason := policy.RedisCommandRisk(req.Name); level > policy.R1 {
+		writeError(w, http.StatusForbidden, "POLICY_WRITE_NOT_ENABLED", "policy",
+			fmt.Sprintf("%s 属于写/高危命令（%s：%s），命令模式的写路径尚未开放", req.Name, level, reason),
+			"写操作将在下一阶段连同审批与审计一起开放", false)
+		return
+	}
+	res, err := kv.Command(r.Context(), req.Name, req.Args)
+	if err != nil {
+		writeError(w, http.StatusBadGateway, "KV_COMMAND_FAILED", "internal", err.Error(), "", true)
+		return
+	}
+	writeJSON(w, http.StatusOK, res)
 }

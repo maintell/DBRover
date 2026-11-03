@@ -18,6 +18,7 @@ import (
 	"github.com/maintell/DBRover/internal/driver"
 	"github.com/maintell/DBRover/internal/driver/mysql"
 	"github.com/maintell/DBRover/internal/driver/pg"
+	"github.com/maintell/DBRover/internal/driver/redis"
 	"github.com/maintell/DBRover/internal/driver/sqlite"
 	"github.com/maintell/DBRover/internal/infra/tunnel"
 	"github.com/maintell/DBRover/internal/model"
@@ -189,9 +190,16 @@ func (c *connFlags) open() (driver.Connector, model.Environment, model.AccessMod
 		}
 	}
 
-	conn, err := openConnector(engine, cfg)
+	opened, err := openConnector(engine, cfg)
 	if err != nil {
 		return nil, "", "", err
+	}
+	// CLI 的 health / tables / exec 都建立在关系型语义上（表、行、SQL）。
+	// 非关系型引擎（Redis）走 serve 的 /kv 端点，这里明确拒绝而不是给个空实现。
+	conn, ok := opened.(driver.Connector)
+	if !ok {
+		return nil, "", "", fmt.Errorf(
+			"CLI 的 health / tables / exec 只支持关系型引擎；%s 请用 `serve` 后的 /kv 端点", engine)
 	}
 	return conn, env, mode, nil
 }
@@ -336,7 +344,7 @@ func cmdExec(args []string) error {
 }
 
 // openConnector 是按引擎分发的连接器工厂。api 层只接受函数，不认识具体驱动。
-func openConnector(engine model.Engine, cfg driver.ConnectConfig) (driver.Connector, error) {
+func openConnector(engine model.Engine, cfg driver.ConnectConfig) (any, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 
@@ -355,6 +363,13 @@ func openConnector(engine model.Engine, cfg driver.ConnectConfig) (driver.Connec
 		return c, nil
 	case model.EnginePostgres:
 		c := pg.New()
+		if err := c.Open(ctx, cfg); err != nil {
+			return nil, err
+		}
+		return c, nil
+	case model.EngineRedis:
+		// 非关系型：实现的是 driver.KVConnector，不是 driver.Connector（ADR-0007）。
+		c := redis.New()
 		if err := c.Open(ctx, cfg); err != nil {
 			return nil, err
 		}

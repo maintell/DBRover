@@ -329,19 +329,30 @@ async function loadIdentity(id) {
 const ENGINES = [
   ['sqlite', 'SQLite'],
   ['mysql', 'MySQL'],
-  ['pg', 'PostgreSQL'],
+  // 引擎名必须用后端的规范值：`pg` 是早先的别名，服务端只认 `postgres`
+  //（catalog 当 schema 那次修复之后统一了），传错会得到「暂不支持的引擎」。
+  ['postgres', 'PostgreSQL'],
+  ['redis', 'Redis（键值，第一版只读）'],
 ];
 
 // applyEngineLayout 按引擎切换字段：SQLite 只有一个文件路径，
-// 网络引擎才需要主机/端口/账号/库名。
+// 网络引擎才需要主机/端口/账号/库名；Redis 只要主机/端口/口令 + 逻辑库编号。
 function applyEngineLayout() {
   const engine = $('f-engine').value;
   const net = engine !== 'sqlite';
+  const kv = engine === 'redis';
   $('f-net').hidden = !net;
   $('f-host-label').textContent = net ? '主机' : '数据库文件路径';
   $('f-host').placeholder = net ? '192.168.2.88' : 'demo.db';
-  $('f-port').value = engine === 'mysql' ? '3306' : engine === 'pg' ? '5432' : '';
-  if (net) $('f-catalog').value = $('f-catalog').value || 'postgres';
+  $('f-port').value = engine === 'mysql' ? '3306'
+    : engine === 'postgres' ? '5432'
+    : kv ? '6379' : '';
+  // Redis 的 catalog 是逻辑库编号，schema 概念不存在。
+  $('f-catalog').placeholder = kv ? '0' : '库名';
+  $('f-schema').hidden = kv;
+  if (net) {
+    $('f-catalog').value = $('f-catalog').value || (kv ? '0' : 'postgres');
+  }
 }
 
 function newConnection() {

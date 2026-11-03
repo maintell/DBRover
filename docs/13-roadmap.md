@@ -28,7 +28,7 @@
 | M1 最小闭环 | 🚧 进行中 | SQLite / MySQL / PostgreSQL 三引擎端到端已通；API、临时前端、CLI 已可用；**SQL Server 未做**（磁盘已够，尚未开工） |
 | M2 写入与变更安全 | ✅ 基本完成 | 变更集、乐观并发、Plan/Apply、行内编辑、筛选排序、结构设计器、批量修改（含分批与中止）、一键撤销、导出、结构比对、依赖检查 —— 见下表 |
 | M3 AI Agent | ⛔ 未开始 | 卡在「接哪个模型服务」这个决策上（`docs/11`） |
-| M4 引擎补齐 | 🚧 未开始 | Redis / Mongo / ES / MSSQL / Oracle 均未实现；非关系型的接口模型已由 ADR-0007 定好 |
+| M4 引擎补齐 | 🚧 进行中 | **Redis 第一版已通**（只读浏览 + 只读命令模式，真机 Redis 8.0.5 验证）；Mongo / ES / MSSQL / Oracle 未实现 |
 
 **验收状态（唯一权威在各自文档的验收清单）**
 
@@ -281,7 +281,7 @@ M1/M2 已完成并有测试覆盖的部分：
 | D3 | Agent 默认 provider | 产品 | M3 前 |
 | D4 | 是否 v1 就做服务化 | 产品 | M5 后 |
 | D5 | 许可证 | 负责人 | 公开前 |
-| D6 | Redis 客户端是否引入 `github.com/redis/go-redis/v9` | 负责人 | 接 Redis 前（ADR-0007 已给出理由：纯 Go、无 CGO；备选是自己实现 RESP2） |
+| D6 | Redis 客户端是否引入 `github.com/redis/go-redis/v9` | ~~负责人~~ 已按 ADR-0007 引入 v9.7.3 | 已执行（纯 Go、无 CGO；备选是自己实现 RESP2，ADR 里写了否决理由） |
 
 ---
 
