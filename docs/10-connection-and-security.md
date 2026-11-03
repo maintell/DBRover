@@ -326,6 +326,7 @@ Statement
 - 默认永久保留。
 - 提供按时间归档（导出后删除本地），需显式操作。
 - 单条审计事件默认不含结果数据；开启「含结果摘要」需显式同意。
+- **语句里的口令先脱敏再落审计**：`CREATE USER … IDENTIFIED BY '…'`、`ALTER ROLE … PASSWORD '…'`、`SET PASSWORD … = '…'`、连接串里的 `password='…'` 都会被替换成 `'***'`，账号名与动作保留（否则「谁改了哪个账号的口令」就查不出来）。覆盖不到 PG 的 `PASSWORD $$…$$` 与预处理参数——前者要在词法层解 dollar-quote，后者口令根本不在文本里。
 
 ---
 
@@ -372,7 +373,7 @@ Statement
 | 4 | 只读连接执行 `DELETE` 被拒（PG/MySQL/SQLite 由引擎拒，MSSQL 由分析拒） | 集成 |
 | 5 | 只读连接执行 `WITH x AS (DELETE ... RETURNING *) SELECT` 被拒 | 单测（PG） |
 | 6 | 只读连接执行 `SELECT 1; DELETE FROM t` 只拒第二条 | 单测 |
-| 7 | 配置序列化、日志、审计三处均无明文密码 | 单测（CI 强制） |
+| 7 | 配置序列化、日志、审计三处均无明文密码 | 单测（CI 强制） | ✅ `TestNoPlaintextPassword`：带口令建连接后，`GET /connections`、`GET /audit`、审计文件三处原始字节都不含该口令；另外改口令类语句走真实 `record` 路径验证脱敏（`ALTER USER … IDENTIFIED BY '***'`），并用变异验证过——把 `RedactSQL` 去掉该用例立刻红。`TestRedactSQL` 覆盖 5 种引擎写法 |
 | 8 | 审批 A、执行 B 被拒绝（哈希不匹配） | 单测 |
 | 9 | 审计链被手工修改一行后可被检测 | 单测 | ✅ `TestAuditChainDetectsTamper`（改一行 → `broken_at` 指到该行）、`TestAuditChainDetectsDeletedLine`（删一行 → 接不上）、`TestAuditChainVerifyOK` / `TestAuditChainContinuesAfterRestart`（跨重启不断链）；端点 `GET /api/v1/audit/verify`，用例 `TestAuditVerifyRealLog`。**不防**整段重写，需外部锚点（未做） |
 | 10 | 提示注入用例中 Agent 不执行注入指令 | 集成（端到端） |

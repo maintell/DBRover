@@ -404,15 +404,16 @@ func (e *Executor) record(actor string, req Request, out *Outcome, outcome, sqlT
 		return
 	}
 	e.audit.Record(AuditEvent{
-		ID:         out.ExecutionID,
-		At:         time.Now(),
-		Actor:      actor,
-		Action:     "query.execute",
-		Target:     string(e.conn.Engine()),
-		Risk:       out.Risk,
-		Friction:   out.Friction,
-		Outcome:    outcome,
-		SQL:        sqlText,
+		ID:       out.ExecutionID,
+		At:       time.Now(),
+		Actor:    actor,
+		Action:   "query.execute",
+		Target:   string(e.conn.Engine()),
+		Risk:     out.Risk,
+		Friction: out.Friction,
+		Outcome:  outcome,
+		// 口令不落审计：这行语句的文本里可能就带着新口令（docs/10 §6.2 能力边界）。
+		SQL:        RedactSQL(sqlText),
 		DurationMS: out.Duration.Milliseconds(),
 		Reason:     reason,
 	})
