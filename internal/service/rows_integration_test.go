@@ -84,18 +84,51 @@ func rowsTargets(t *testing.T) []rowsTarget {
 
 func (tgt rowsTarget) open(t *testing.T) driver.Connector {
 	t.Helper()
-	conn := tgt.newConn()
-	if err := conn.Open(context.Background(), driver.ConnectConfig{
+	cfg := driver.ConnectConfig{
 		Host: tgt.host, Port: tgt.port,
 		User: tgt.user, Password: tgt.pass,
 		Catalog:     tgt.catalog,
 		AccessMode:  model.AccessReadWrite,
 		Environment: model.EnvTest,
-	}); err != nil {
-		t.Fatalf("连接 %s: %v", tgt.name, err)
+	}
+	conn := tgt.newConn()
+	if err := conn.Open(context.Background(), cfg); err != nil {
+		// 测试库不存在是环境问题，不该让人对着驱动的原始报错猜：建一次再重试。
+		tgt.ensureCatalog(t)
+		cfg2 := cfg
+		conn = tgt.newConn()
+		if err2 := conn.Open(context.Background(), cfg2); err2 != nil {
+			t.Fatalf("连接 %s: %v（自动建库后仍失败）", tgt.name, err)
+		}
 	}
 	t.Cleanup(func() { _ = conn.Close() })
 	return conn
+}
+
+// ensureCatalog 尽力建一次测试库（已存在就忽略）。
+//
+// 让 `go test ./internal/service/` 在空实例上直接跑得起来：此前必须先手工
+// CREATE DATABASE，否则每条真机用例都报 unknown database。
+func (tgt rowsTarget) ensureCatalog(t *testing.T) {
+	t.Helper()
+	ctx := context.Background()
+	boot := tgt.newConn()
+	if err := boot.Open(ctx, driver.ConnectConfig{
+		Host: tgt.host, Port: tgt.port,
+		User: tgt.user, Password: tgt.pass,
+		AccessMode:  model.AccessReadWrite,
+		Environment: model.EnvTest,
+	}); err != nil {
+		return
+	}
+	defer func() { _ = boot.Close() }()
+	s, err := boot.Acquire(ctx)
+	if err != nil {
+		return
+	}
+	defer func() { _ = s.Close() }()
+	// 两种引擎都接受 CREATE DATABASE <name>；已存在时的报错忽略即可。
+	_, _ = s.Execute(ctx, "CREATE DATABASE "+tgt.catalog, nil)
 }
 
 // prepareTable 建表并写入 seed 行，同时登记「用独立连接删表」的清理动作。
