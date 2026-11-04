@@ -101,3 +101,24 @@ func TestBackupKeepsIndexes(t *testing.T) {
 		t.Error("恢复后唯一索引没有生效：重复的 c 被插进去了")
 	}
 }
+
+// TestInvalidIndexNames 钉住「nil 不等于无效」。
+//
+// 这条看起来琐碎，但错一次就是两种事故：把 nil 当无效 → MySQL/SQLite 上每个
+// 索引都被报成坏的，警告变成噪音、没人再看；把 false 当正常 → PG 上那个不参与
+// 查询的索引永远藏着。
+func TestInvalidIndexNames(t *testing.T) {
+	okFlag, badFlag := true, false
+	detail := &model.TableDetail{Indexes: []model.Index{
+		{Name: "ok_idx", Valid: &okFlag},
+		{Name: "broken_idx", Valid: &badFlag},
+		{Name: "no_concept"}, // MySQL / SQLite：引擎没有这个状态
+	}}
+	got := InvalidIndexNames(detail)
+	if len(got) != 1 || got[0] != "broken_idx" {
+		t.Fatalf("只该报真正无效的那个：%v", got)
+	}
+	if names := InvalidIndexNames(nil); len(names) != 0 {
+		t.Fatalf("没有表结构时该返回空：%v", names)
+	}
+}

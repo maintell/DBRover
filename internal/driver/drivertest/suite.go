@@ -79,6 +79,8 @@ func Run(t *testing.T, cfg Config) {
 	t.Run("SequenceListing", func(t *testing.T) { testSequenceListing(t, cfg) })
 	// 检索契约写的是「名称 + 注释」，注释这一半必须有真库验证。
 	t.Run("SearchMatchesComments", func(t *testing.T) { testSearchComments(t, cfg) })
+	// 索引有效性：声明了就必须真给（PG 的 indisvalid）。
+	t.Run("IndexValidityHonest", func(t *testing.T) { testIndexValidityHonest(t, cfg) })
 	// 表详情里的表注释（列注释由 DDLAndMetadata 顺带覆盖）。
 	t.Run("DescribeReportsTableComment", func(t *testing.T) { testDescribeReportsTableComment(t, cfg) })
 }

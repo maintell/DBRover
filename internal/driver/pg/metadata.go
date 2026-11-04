@@ -374,7 +374,8 @@ func (c *Connector) loadIndexes(ctx context.Context, h *sql.DB, schema, table st
 		SELECT i.relname, ix.indisunique, ix.indisprimary, am.amname,
 		       pg_get_indexdef(ix.indexrelid),
 		       COALESCE(pg_get_expr(ix.indpred, ix.indrelid), ''),
-		       EXISTS (SELECT 1 FROM pg_constraint con WHERE con.conindid = ix.indexrelid)
+		       EXISTS (SELECT 1 FROM pg_constraint con WHERE con.conindid = ix.indexrelid),
+		       ix.indisvalid
 		  FROM pg_index ix
 		  JOIN pg_class i ON i.oid = ix.indexrelid
 		  JOIN pg_class t ON t.oid = ix.indrelid
@@ -391,14 +392,15 @@ func (c *Connector) loadIndexes(ctx context.Context, h *sql.DB, schema, table st
 		var (
 			name, method, def, pred string
 			unique, primary         bool
-			fromConstraint          bool
+			fromConstraint, valid   bool
 		)
-		if err := rows.Scan(&name, &unique, &primary, &method, &def, &pred, &fromConstraint); err != nil {
+		if err := rows.Scan(&name, &unique, &primary, &method, &def, &pred, &fromConstraint, &valid); err != nil {
 			return err
 		}
+		ok := valid
 		td.Indexes = append(td.Indexes, model.Index{
 			Name: name, Unique: unique, Primary: primary, Method: method, Predicate: pred,
-			Columns: indexColumns(def), Constraint: fromConstraint,
+			Columns: indexColumns(def), Constraint: fromConstraint, Valid: &ok,
 		})
 	}
 	return rows.Err()

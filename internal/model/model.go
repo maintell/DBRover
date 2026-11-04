@@ -248,14 +248,17 @@ type Capabilities struct {
 	Sequences         bool `json:"sequences"`
 	UserTypes         bool `json:"user_types"`
 	Indexes           bool `json:"indexes"`
-	Explain           bool `json:"explain"`
-	SlowQueryStats    bool `json:"slow_query_stats"`
-	SessionMgmt       bool `json:"session_mgmt"`
-	KillSession       bool `json:"kill_session"`
-	LockGraph         bool `json:"lock_graph"`
-	Backup            bool `json:"backup"`
-	BulkLoad          bool `json:"bulk_load"`
-	KeysetPagination  bool `json:"keyset_pagination"`
+	// IndexValidity 表示 DescribeTable 会给出 Index.Valid（目前只有 PostgreSQL）。
+	// 套件据此要求「声明了就真给」，避免字段写完没人查、上层拿到一片 nil。
+	IndexValidity    bool `json:"index_validity"`
+	Explain          bool `json:"explain"`
+	SlowQueryStats   bool `json:"slow_query_stats"`
+	SessionMgmt      bool `json:"session_mgmt"`
+	KillSession      bool `json:"kill_session"`
+	LockGraph        bool `json:"lock_graph"`
+	Backup           bool `json:"backup"`
+	BulkLoad         bool `json:"bulk_load"`
+	KeysetPagination bool `json:"keyset_pagination"`
 	// DDLTransactional 为 true 时 DDL 可真实回滚（PG / SQLite / 多数 MSSQL DDL）。
 	DDLTransactional bool `json:"ddl_transactional"`
 	// AlterColumnType 表示引擎支持原地修改列类型。

@@ -74,6 +74,13 @@ type Index struct {
 	// 单独建的索引。导出脚本据此决定要不要补 CREATE INDEX：约束已经随建表语句
 	// 一起重建，再补一次会撞名。
 	Constraint bool `json:"constraint,omitempty"`
+	// Valid 是「索引可用」的引擎判定，nil 表示这个引擎没有这个概念。
+	//
+	// PostgreSQL 有真实用例：CREATE INDEX CONCURRENTLY 失败或中断会留下
+	// indisvalid=false 的索引，它照样占空间、照样出现在 \d 里，却完全不参与
+	// 查询——唯一索引也不再保证唯一。把它当成「索引在」报出去是误导。
+	// MySQL / SQLite 没有这个状态，恒为 nil（不是 false）。
+	Valid *bool `json:"valid,omitempty"`
 }
 
 // ForeignKey 是外键描述。

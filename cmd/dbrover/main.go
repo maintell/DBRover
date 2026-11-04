@@ -791,6 +791,9 @@ func cmdRestore(args []string) error {
 			fmt.Println("  - " + m)
 		}
 	}
+	for _, warn := range rep.Warnings {
+		fmt.Println("警告：" + warn)
+	}
 	return nil
 }
 

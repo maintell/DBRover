@@ -305,3 +305,50 @@ func testTypeCarriesDeclaredLength(t *testing.T, cfg Config) {
 		t.Errorf("decimal(9,3) 的精度/小数位 = %d/%d，期望 9/3", d.Type.Precision, d.Type.Scale)
 	}
 }
+
+// testIndexValidityHonest 钉住 Index.Valid 的语义：声明了就必须真给，
+// 没声明就必须是 nil。
+//
+// 这个字段存在的理由很具体：PostgreSQL 的 CREATE INDEX CONCURRENTLY 失败或中断
+// 会留下 indisvalid=false 的索引——它在 \d 里照样列出来、照样占空间，却完全不
+// 参与查询，唯一索引也不再保证唯一。而「有几个索引」这种报法看不出区别。
+//
+// 两个方向都要断言：不查就报 nil（能力位是 false 的引擎），查了却报 false 说明
+// 我们读错了列——刚建好的索引不可能是无效的。
+func testIndexValidityHonest(t *testing.T, cfg Config) {
+	ctx := context.Background()
+	c, err := cfg.New(false)
+	if err != nil {
+		t.Fatalf("连接: %v", err)
+	}
+	defer func() { _ = c.Close() }()
+	s, err := c.Acquire(ctx)
+	if err != nil {
+		t.Fatalf("Acquire: %v", err)
+	}
+	defer func() { _ = s.Close() }()
+	if _, err := s.Execute(ctx, "CREATE TABLE idx_valid_probe (id INTEGER PRIMARY KEY, v VARCHAR(20))", nil); err != nil {
+		t.Fatalf("建表: %v", err)
+	}
+	if _, err := s.Execute(ctx, "CREATE INDEX idx_valid_probe_v ON idx_valid_probe (v)", nil); err != nil {
+		t.Fatalf("建索引: %v", err)
+	}
+	detail, err := c.Meta().DescribeTable(ctx, model.ObjectRef{Kind: model.KindTable, Name: "idx_valid_probe"})
+	if err != nil {
+		t.Fatalf("DescribeTable: %v", err)
+	}
+	if len(detail.Indexes) == 0 {
+		t.Fatal("一个索引都没读到，后面的断言等于空跑")
+	}
+	declared := c.Capabilities().IndexValidity
+	for _, ix := range detail.Indexes {
+		switch {
+		case declared && ix.Valid == nil:
+			t.Errorf("声明了 IndexValidity，但索引 %s 没有 Valid", ix.Name)
+		case declared && !*ix.Valid:
+			t.Errorf("刚建好的索引 %s 被报成无效，说明读错了列", ix.Name)
+		case !declared && ix.Valid != nil:
+			t.Errorf("没有 IndexValidity 能力，索引 %s 不该给出 Valid=%v", ix.Name, *ix.Valid)
+		}
+	}
+}

@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -551,5 +552,92 @@ func TestProbeLengthsCountsCharacters(t *testing.T) {
 			defer ex.Close()
 			check(t, ex)
 		})
+	}
+}
+
+// TestMigrateDecimalFidelity 验证大精度小数跨引擎无损（docs/08 验收 12）。
+//
+// 金额列是最典型的「看起来迁完了、其实少了几位」的地方：一旦走 float64 中转，
+// 30 位小数只剩 15-17 位有效数字，而且**不会报错**。所以这里既要求摘要一致
+// （我们的 canonicalValue 没走浮点），又直接读回文本逐字比对（不靠自己的摘要
+// 自证）。
+func TestMigrateDecimalFidelity(t *testing.T) {
+	myDSN := os.Getenv("DBRover_TEST_MYSQL")
+	pgDSN := os.Getenv("DBRover_TEST_PG")
+	if myDSN == "" || pgDSN == "" {
+		t.Skip("需要 DBRover_TEST_MYSQL 与 DBRover_TEST_PG")
+	}
+	ctx := context.Background()
+	myEx := NewExecutor(openReal(t, "mysql", myDSN), model.EnvTest, model.AccessReadWrite, nil)
+	pgEx := NewExecutor(openReal(t, "pg", pgDSN), model.EnvTest, model.AccessReadWrite, nil)
+	defer myEx.Close()
+	defer pgEx.Close()
+
+	// 35 位整数 + 30 位小数正好用满 DECIMAL(65,30)。
+	const big = "12345678901234567890123456789012345.123456789012345678901234567890"
+	const tiny = "0.000000000000000000000000000001"
+	for _, q := range []string{
+		"DROP TABLE IF EXISTS mig_dec",
+		"CREATE TABLE mig_dec (id INT PRIMARY KEY, d DECIMAL(65,30))",
+		"INSERT INTO mig_dec (id,d) VALUES (1,'" + big + "'),(2,'" + tiny + "'),(3,'-1.5'),(4,NULL)",
+	} {
+		if out, err := myEx.Execute(ctx, Request{SQL: q, Approval: true}); err != nil || out.Err != nil {
+			t.Fatalf("准备 MySQL（%s）: %v %+v", q, err, out)
+		}
+	}
+	t.Cleanup(func() {
+		_, _ = myEx.Execute(context.Background(), Request{SQL: "DROP TABLE IF EXISTS mig_dec", Approval: true})
+	})
+	for _, q := range []string{"DROP TABLE IF EXISTS mig_dec"} {
+		_, _ = pgEx.Execute(ctx, Request{SQL: q, Approval: true})
+	}
+	t.Cleanup(func() {
+		_, _ = pgEx.Execute(context.Background(), Request{SQL: "DROP TABLE IF EXISTS mig_dec", Approval: true})
+	})
+
+	decisions := map[string]string{"id": "integer", "d": "numeric(65,30)"}
+	_, ddlText, err := PlanMigrationBetween(ctx, myEx, pgEx, "mig_dec", "", decisions)
+	if err != nil {
+		t.Fatalf("预检: %v", err)
+	}
+	if out, e := pgEx.Execute(ctx, Request{SQL: ddlText, Approval: true}); e != nil || out.Err != nil {
+		t.Fatalf("建目标表: %v %+v", e, out)
+	}
+	rep, err := MigrateTable(ctx, myEx, pgEx, "mig_dec", "", MigrateExecOptions{})
+	if err != nil {
+		t.Fatalf("搬运: %v", err)
+	}
+	if !rep.Verified || rep.SourceDigest != rep.TargetDigest {
+		t.Fatalf("大精度小数摘要不一致：verified=%v %s vs %s", rep.Verified, rep.SourceDigest, rep.TargetDigest)
+	}
+
+	// 不靠自己的摘要自证：直接读回文本逐字比对。
+	sess, err := pgEx.conn.Acquire(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = sess.Close() }()
+	cur, err := sess.Query(ctx, "SELECT id, d::text FROM mig_dec ORDER BY id", nil, driver.QueryOptions{MaxRows: 10})
+	if err != nil {
+		t.Fatalf("读回: %v", err)
+	}
+	defer func() { _ = cur.Close() }()
+	rows, _, err := cur.Next(ctx)
+	if err != nil || len(rows) != 4 {
+		t.Fatalf("读回行数异常: %v %v", err, rows)
+	}
+	got := make([]string, 0, 4)
+	for _, row := range rows {
+		if row[1] == nil {
+			got = append(got, "NULL")
+			continue
+		}
+		got = append(got, fmt.Sprint(row[1]))
+	}
+	want := []string{big, tiny, "-1.500000000000000000000000000000", "NULL"}
+	for i := range want {
+		if strings.TrimSpace(got[i]) != want[i] {
+			t.Errorf("第 %d 行 = %q，期望 %q", i+1, got[i], want[i])
+		}
 	}
 }

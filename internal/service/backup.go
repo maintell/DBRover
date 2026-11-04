@@ -478,9 +478,11 @@ type RestoreObject struct {
 	Name string `json:"name"`
 	Rows int64  `json:"rows"`
 	// Indexes 是恢复后的索引个数（含主键约束背后的索引）。
-	// 只报数量与存在性：索引的有效性（例如 PG 的 indisvalid）还没查。
 	Indexes     int `json:"indexes"`
 	ForeignKeys int `json:"foreign_keys"`
+	// InvalidIndexes 是「建出来了但不可用」的索引名（PG 的 indisvalid=false）。
+	// 有它就必须出声：索引在清单里、却完全不参与查询，唯一索引也不再保证唯一。
+	InvalidIndexes []string `json:"invalid_indexes,omitempty"`
 }
 
 // RestoreReport 是恢复后的演练报告（docs/08 §3.3 的最小版本）。
@@ -491,6 +493,8 @@ type RestoreReport struct {
 	// Mismatches 是「恢复后与备份时的计数对不上」的清单。空表示计数一致；
 	// 非空不代表恢复失败（数据已经写进去了），但必须让人看见。
 	Mismatches []string `json:"mismatches,omitempty"`
+	// Warnings 是「数量对得上、但东西不可用」的提醒（例如无效索引）。
+	Warnings []string `json:"warnings,omitempty"`
 }
 
 // ErrRestoreTarget 表示目标库不满足恢复前提。
@@ -598,11 +602,19 @@ func (e *Executor) Restore(ctx context.Context, r io.Reader, req RestoreRequest)
 			_ = cur.Close()
 		}
 		idx, fks := 0, 0
+		var invalid []string
 		if detail, derr := e.DescribeTable(ctx, model.ObjectRef{Kind: model.KindTable, Name: o.Name}); derr == nil {
 			idx = len(detail.Indexes)
 			fks = len(detail.ForeignKeys)
+			invalid = InvalidIndexNames(detail)
 		}
-		rep.Objects = append(rep.Objects, RestoreObject{Name: o.Name, Rows: n, Indexes: idx, ForeignKeys: fks})
+		rep.Objects = append(rep.Objects, RestoreObject{
+			Name: o.Name, Rows: n, Indexes: idx, ForeignKeys: fks, InvalidIndexes: invalid,
+		})
+		for _, name := range invalid {
+			rep.Warnings = append(rep.Warnings,
+				fmt.Sprintf("%s：索引 %s 不可用（indisvalid=false），应重建", o.Name, name))
+		}
 		rep.Rows += n
 		// 与备份时的计数比对。老容器没有这两个字段（0）时跳过——不能把
 		// 「当时没记」报成「恢复丢了」。
@@ -738,4 +750,25 @@ func readBackupSection(r io.Reader, compressed bool, key []byte) (string, error)
 		return "", fmt.Errorf("%w: 解压失败: %v", ErrBackupFormat, err)
 	}
 	return string(out), nil
+}
+
+// InvalidIndexNames 列出「建出来了但不可用」的索引名。
+//
+// 为什么单列一个函数：这是「数量对得上、东西不可用」这一类问题的唯一入口，
+// 恢复报告与将来的体检都要用它；散在调用点上，早晚会出现一处查 Valid、另一处
+// 只看 len(Indexes) 的情况，而后者会把坏索引报成好索引。
+//
+// 只有 Valid 非 nil 且为 false 才算不可用：nil 表示引擎没有这个概念
+// （MySQL / SQLite），不是「无效」。
+func InvalidIndexNames(detail *model.TableDetail) []string {
+	if detail == nil {
+		return nil
+	}
+	var out []string
+	for _, ix := range detail.Indexes {
+		if ix.Valid != nil && !*ix.Valid {
+			out = append(out, ix.Name)
+		}
+	}
+	return out
 }

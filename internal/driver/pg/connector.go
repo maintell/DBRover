@@ -51,9 +51,12 @@ func (c *Connector) Capabilities() model.Capabilities {
 		// 触发器走 pg_trigger 单独查，已排除 tgisinternal（外键的内部触发器）。
 		Triggers: true,
 		// 序列就是 pg_class 里 relkind='S' 的对象，已接进 Objects。
-		Sequences:        true,
-		UserTypes:        true,
-		Indexes:          true,
+		Sequences: true,
+		UserTypes: true,
+		Indexes:   true,
+		// indisvalid 查得到：无效索引（失败的 CREATE INDEX CONCURRENTLY 会留下）
+		// 照样出现在清单里，只看「有几个索引」发现不了。
+		IndexValidity:    true,
 		Explain:          true, // EXPLAIN
 		SlowQueryStats:   false,
 		SessionMgmt:      false,
