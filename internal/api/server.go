@@ -180,6 +180,7 @@ func (s *Server) routes() []route {
 		{http.MethodPost, "/api/v1/connections/{id}/schema/plan", false, s.handleSchemaPlan},
 		{http.MethodPost, "/api/v1/connections/{id}/bulk/plan", false, s.handleBulkPlan},
 		{http.MethodPost, "/api/v1/compare", false, s.handleCompare},
+		{http.MethodPost, "/api/v1/migrate/plan", false, s.handleMigratePlan},
 		{http.MethodPost, "/api/v1/connections/{id}/fk/precheck", false, s.handleFKPrecheck},
 		{http.MethodPost, "/api/v1/changes/{pid}/apply", false, s.handleChangeApply},
 		{http.MethodPost, "/api/v1/connections/{id}/query", false, s.handleQuery},
@@ -1895,4 +1896,63 @@ func kindOf(e *entry) string {
 		return "keyvalue"
 	}
 	return "relational"
+}
+
+// migratePlanRequest 是迁移预检的请求体。
+type migratePlanRequest struct {
+	Source string `json:"source"`
+	Target string `json:"target"`
+	Table  string `json:"table"`
+	// TargetTable 省略时与 Table 相同。
+	TargetTable string `json:"target_table"`
+	// Decisions 是「人工决定的目标类型」：列名 → 类型。
+	Decisions map[string]string `json:"decisions"`
+}
+
+// handleMigratePlan 给出迁移预检与目标端 DDL（只读，不执行）。
+//
+// 只读：不建表、不搬数据。ready=false 表示还有列需要人工决定类型，此时 plan
+// 仍然返回，界面据此逐列提问。
+func (s *Server) handleMigratePlan(w http.ResponseWriter, r *http.Request) {
+	var req migratePlanRequest
+	if err := decode(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, "REQUEST_INVALID", "internal", err.Error(), "", false)
+		return
+	}
+	if req.Source == "" || req.Target == "" || req.Table == "" {
+		writeError(w, http.StatusBadRequest, "REQUEST_INVALID", "internal",
+			"需要 source、target、table", "", false)
+		return
+	}
+
+	s.mu.RLock()
+	src, sok := s.conns[req.Source]
+	dst, tok := s.conns[req.Target]
+	s.mu.RUnlock()
+	if !sok || !tok {
+		writeError(w, http.StatusNotFound, "CONNECTION_NOT_FOUND", "connection",
+			"源或目标连接不存在", "", false)
+		return
+	}
+	if src.exec == nil || dst.exec == nil {
+		writeError(w, http.StatusBadRequest, "CAPABILITY_UNSUPPORTED", "internal",
+			"迁移预检只支持关系型连接", "", false)
+		return
+	}
+
+	plan, ddlText, err := service.PlanMigrationBetween(r.Context(), src.exec, dst.exec, req.Table, req.TargetTable, req.Decisions)
+	if err != nil && !errors.Is(err, service.ErrMigrateNeedsDecision) {
+		writeError(w, http.StatusBadGateway, "MIGRATE_PLAN_FAILED", "internal", err.Error(), "", true)
+		return
+	}
+	body := map[string]any{
+		"plan":  plan,
+		"ready": err == nil,
+	}
+	if err == nil {
+		body["ddl"] = ddlText
+	} else {
+		body["message"] = err.Error()
+	}
+	writeJSON(w, http.StatusOK, body)
 }

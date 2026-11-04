@@ -766,6 +766,40 @@
         }
       }
     },
+    "/api/v1/migrate/plan": {
+      "post": {
+        "summary": "迁移预检：逐列类型结论 + 目标端 DDL（只读）",
+        "description": "不建表、不搬数据。逐列给出 ok / review / blocked 与理由：收窄（长度/精度）一律 blocked；跨引擎语义漂移一律 review；没有已知映射规则也 review，不假装安全。ready=true 时返回目标端 CREATE TABLE；ready=false 时 plan 仍然返回，调用方应逐列要求人工决定目标类型（decisions）。",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["source", "target", "table"],
+                "properties": {
+                  "source": { "type": "string", "description": "源连接 id" },
+                  "target": { "type": "string", "description": "目标连接 id" },
+                  "table": { "type": "string", "description": "源表名" },
+                  "target_table": { "type": "string", "description": "目标表名，省略时与 table 相同" },
+                  "decisions": {
+                    "type": "object",
+                    "description": "列名 → 目标类型（review/blocked 列必填）",
+                    "additionalProperties": { "type": "string" }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": { "description": "{plan, ready, ddl?} —— ready=false 表示还有列需要人工决定类型" },
+          "400": { "description": "缺少 source/target/table，或连接不是关系型（REQUEST_INVALID / CAPABILITY_UNSUPPORTED）" },
+          "404": { "description": "连接不存在" },
+          "502": { "description": "读取结构失败（MIGRATE_PLAN_FAILED）" }
+        }
+      }
+    },
     "/api/v1/connections/{id}/fk/precheck": {
       "post": {
         "summary": "加外键前的孤儿数据预检（只读）",

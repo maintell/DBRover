@@ -1,6 +1,7 @@
 package service
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"strings"
@@ -265,4 +266,39 @@ func BuildMigrationDDL(dstEngine model.Engine, table string, src *model.TableDet
 		return "", errors.New("迁移：源表没有列")
 	}
 	return "CREATE TABLE " + d.QuoteIdent(table) + " (\n  " + strings.Join(cols, ",\n  ") + "\n)", nil
+}
+
+// PlanMigrationBetween 读两端结构，给出迁移预检与目标端 DDL。
+//
+// dst 为 nil 表示目标表还不存在（要新建）：此时没有目标结构可比，收窄检查
+// 会跳过——调用方要清楚这一点，别把「没检查」当成「检查通过」。
+//
+// 返回的 err 可能是 ErrMigrateNeedsDecision：这时 plan 仍然有效，调用方应当
+// 展示逐列结论并要人给目标类型，而不是把它当成失败。
+func PlanMigrationBetween(ctx context.Context, src, dst *Executor, table, targetTable string, decisions map[string]string) (*MigratePlan, string, error) {
+	if src == nil {
+		return nil, "", errors.New("迁移：缺少源执行器")
+	}
+	srcDetail, err := src.DescribeTable(ctx, model.ObjectRef{Kind: model.KindTable, Name: table})
+	if err != nil {
+		return nil, "", fmt.Errorf("读源表结构: %w", err)
+	}
+	name := targetTable
+	if name == "" {
+		name = table
+	}
+	var dstDetail *model.TableDetail
+	var dstEngine model.Engine
+	if dst != nil {
+		dstEngine = dst.conn.Engine()
+		if d, derr := dst.DescribeTable(ctx, model.ObjectRef{Kind: model.KindTable, Name: name}); derr == nil {
+			dstDetail = d
+		}
+	} else {
+		return nil, "", errors.New("迁移：缺少目标执行器")
+	}
+
+	plan := PlanMigration(srcDetail, dstDetail, src.conn.Engine(), dstEngine)
+	ddlText, derr := BuildMigrationDDL(dstEngine, name, srcDetail, plan, decisions)
+	return plan, ddlText, derr
 }
