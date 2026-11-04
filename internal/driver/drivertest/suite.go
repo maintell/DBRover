@@ -23,6 +23,16 @@ type Config struct {
 	New func(readOnly bool) (driver.Connector, error)
 	// BinaryType 是二进制列的类型名。默认 BLOB；PostgreSQL 需要设为 BYTEA。
 	BinaryType string
+
+	// Trigger 在给定表上建一个触发器并返回它的名字；nil 表示这个引擎的
+	// 测试环境不提供建触发器的手段，此时 TriggerListing 用例跳过。
+	//
+	// 做成钩子而不是写进套件：三条 SQL 的触发器语法完全不同（PG 还要先建
+	// 函数），硬编码只会得到一个覆盖不到任何引擎的用例。
+	Trigger func(ctx context.Context, s driver.Session, table string) (string, error)
+
+	// Sequence 建一个序列并返回名字；nil 时 SequenceListing 跳过。
+	Sequence func(ctx context.Context, s driver.Session) (string, error)
 }
 
 func (c Config) binaryType() string {
@@ -50,6 +60,9 @@ func Run(t *testing.T, cfg Config) {
 	t.Run("DependentsReported", func(t *testing.T) { testDependents(t, cfg) })
 	t.Run("BlockersReported", func(t *testing.T) { testBlockers(t, cfg) })
 	t.Run("DDLRoundTrip", func(t *testing.T) { testDDLRoundTrip(t, cfg) })
+	// 对象类型列表：能力位说支持，就必须真的列得出来（docs/04 §3.2）。
+	t.Run("TriggerListing", func(t *testing.T) { testTriggerListing(t, cfg) })
+	t.Run("SequenceListing", func(t *testing.T) { testSequenceListing(t, cfg) })
 }
 
 // testBlockers 锁住「预执行检查能看到我们自己开着的事务」。

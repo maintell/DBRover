@@ -47,9 +47,8 @@ func (c *Connector) Capabilities() model.Capabilities {
 		Views:             true,
 		MaterializedViews: false,
 		Routines:          false, // 例程管理未实现
-		// 触发器列表未实现（只有 SQLite 走 sqlite_master 做了）。声明 true 会让
-		// Objects(KindTrigger) 返回空，看起来像「这张表没有触发器」——那是假的。
-		Triggers:         false,
+		// 触发器走 information_schema.TRIGGERS 单独查（见 metadata.go triggerRefs）。
+		Triggers:         true,
 		Sequences:        false,
 		UserTypes:        false,
 		Indexes:          true,

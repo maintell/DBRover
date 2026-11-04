@@ -142,6 +142,14 @@ func (c *Connector) Objects(ctx context.Context, catalog, schema string, kinds .
 		schema = c.config().Schema
 	}
 
+	// 触发器不在 pg_class 的对象集里（它在 pg_trigger），单独查一次。
+	var triggers []model.ObjectRef
+	if wantsKind(kinds, model.KindTrigger) {
+		if triggers, err = c.triggerRefs(ctx, schema); err != nil {
+			return nil, err
+		}
+	}
+
 	q := `SELECT c.relname, c.relkind
 	        FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
 	       WHERE n.nspname = $1 AND c.relkind = ANY($2)
@@ -157,10 +165,12 @@ func (c *Connector) Objects(ctx context.Context, catalog, schema string, kinds .
 				relkinds = append(relkinds, "v")
 			case model.KindMatView:
 				relkinds = append(relkinds, "m")
+			case model.KindSequence:
+				relkinds = append(relkinds, "S")
 			}
 		}
 		if len(relkinds) == 0 {
-			return nil, nil
+			return triggers, nil
 		}
 	}
 
@@ -182,8 +192,55 @@ func (c *Connector) Objects(ctx context.Context, catalog, schema string, kinds .
 			k = model.KindView
 		case "m":
 			k = model.KindMatView
+		case "S":
+			k = model.KindSequence
 		}
 		out = append(out, model.ObjectRef{Kind: k, Catalog: catalog, Schema: schema, Name: name})
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return append(out, triggers...), nil
+}
+
+// wantsKind 判断调用方是否点名了某类对象（kinds 为空表示「全都要」）。
+func wantsKind(kinds []model.ObjectKind, want model.ObjectKind) bool {
+	for _, k := range kinds {
+		if k == want {
+			return true
+		}
+	}
+	return false
+}
+
+// triggerRefs 列出某个 schema 的用户触发器。
+//
+// tgisinternal 会把外键约束背后的内部触发器排除掉——不排除的话，每个外键都会
+// 冒出两条同名 trigger，看起来像用户自己建的。
+func (c *Connector) triggerRefs(ctx context.Context, schema string) ([]model.ObjectRef, error) {
+	h, err := c.handle()
+	if err != nil {
+		return nil, err
+	}
+	rows, err := h.QueryContext(ctx,
+		`SELECT t.tgname
+		   FROM pg_trigger t
+		   JOIN pg_class c ON c.oid = t.tgrelid
+		   JOIN pg_namespace n ON n.oid = c.relnamespace
+		  WHERE n.nspname = $1 AND NOT t.tgisinternal
+		  ORDER BY t.tgname`, schema)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+
+	var out []model.ObjectRef
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			return nil, err
+		}
+		out = append(out, model.ObjectRef{Kind: model.KindTrigger, Catalog: c.config().Catalog, Schema: schema, Name: name})
 	}
 	return out, rows.Err()
 }

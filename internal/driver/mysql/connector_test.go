@@ -129,6 +129,13 @@ func factory(t *testing.T, tgt testTarget) drivertest.Config {
 			}
 			return c, nil
 		},
+		// MySQL 的触发器体允许是一条普通语句，不需要 DELIMITER。
+		Trigger: func(ctx context.Context, s driver.Session, table string) (string, error) {
+			const name = "trg_probe"
+			_, err := s.Execute(ctx,
+				"CREATE TRIGGER "+name+" BEFORE INSERT ON "+table+" FOR EACH ROW SET @dbrover_trg = 1", nil)
+			return name, err
+		},
 	}
 }
 

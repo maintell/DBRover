@@ -125,6 +125,24 @@ func factory(t *testing.T, tgt testTarget) drivertest.Config {
 			}
 			return c, nil
 		},
+		// PG 的触发器要先把「触发器函数」建出来，二者是两个对象。
+		Trigger: func(ctx context.Context, s driver.Session, table string) (string, error) {
+			const name, fn = "trg_probe", "trg_probe_fn"
+			if _, err := s.Execute(ctx,
+				"CREATE FUNCTION "+fn+"() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RETURN NEW; END $$", nil); err != nil {
+				return "", err
+			}
+			if _, err := s.Execute(ctx,
+				"CREATE TRIGGER "+name+" BEFORE INSERT ON "+table+" FOR EACH ROW EXECUTE FUNCTION "+fn+"()", nil); err != nil {
+				return "", err
+			}
+			return name, nil
+		},
+		Sequence: func(ctx context.Context, s driver.Session) (string, error) {
+			const name = "seq_probe"
+			_, err := s.Execute(ctx, "CREATE SEQUENCE "+name, nil)
+			return name, err
+		},
 	}
 }
 

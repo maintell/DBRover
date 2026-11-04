@@ -53,6 +53,12 @@ func factory(t *testing.T) drivertest.Config {
 			}
 			return c, nil
 		},
+		Trigger: func(ctx context.Context, s driver.Session, table string) (string, error) {
+			const name = "trg_probe"
+			_, err := s.Execute(ctx,
+				"CREATE TRIGGER "+name+" AFTER INSERT ON "+table+" BEGIN SELECT 1; END", nil)
+			return name, err
+		},
 	}
 }
 

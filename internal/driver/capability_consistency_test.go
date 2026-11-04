@@ -37,15 +37,15 @@ func TestExplainCapabilityMatchesDialect(t *testing.T) {
 
 // TestTriggerCapabilityIsHonest 钉住「触发器列表」这句话的真值。
 //
-// MySQL / PG 曾经声明 Triggers=true，但 Objects(KindTrigger) 里根本没有分支，
-// 结果是返回空列表——用户会把它读成「这张表没有触发器」，而不是「这个工具
-// 还不会查」。能力位只有在真的有实现时才允许是 true；要翻回 true，先实现
-// information_schema.TRIGGERS / pg_trigger 并把本例一起改掉。
+// 这三个引擎现在都真的能列：SQLite 走 sqlite_master、MySQL 走
+// information_schema.TRIGGERS、PG 走 pg_trigger（排除 tgisinternal，否则每个
+// 外键都会冒出两条内部触发器）。声明为 true 是有实现兜着的——drivertest 的
+// TriggerListing 用各引擎自己的钩子建一个真触发器再列出来。
 func TestTriggerCapabilityIsHonest(t *testing.T) {
 	want := map[model.Engine]bool{
-		model.EngineSQLite:   true,  // sqlite_master 里查得到，TestListsTriggers 兜着
-		model.EngineMySQL:    false, // information_schema.TRIGGERS 未接
-		model.EnginePostgres: false, // pg_trigger 未接
+		model.EngineSQLite:   true, // sqlite_master
+		model.EngineMySQL:    true, // information_schema.TRIGGERS
+		model.EnginePostgres: true, // pg_trigger
 	}
 	for _, c := range []driver.Connector{sqlite.New(), mysql.New(), pg.New()} {
 		exp, ok := want[c.Engine()]
@@ -58,13 +58,14 @@ func TestTriggerCapabilityIsHonest(t *testing.T) {
 	}
 }
 
-// TestSequenceCapabilityIsHonest 同理：PG 有序列这个概念，但本工具还没查
-// （Objects(KindSequence) 无分支）。声明 true 会让对象树永远空着。
+// TestSequenceCapabilityIsHonest 同理：PG 的序列就是 pg_class 里 relkind='S'
+// 的对象，已接进 Objects 并由 drivertest 的 SequenceListing 用真序列验证；
+// SQLite / MySQL 本工具还没接，能力位保持 false。
 func TestSequenceCapabilityIsHonest(t *testing.T) {
 	want := map[model.Engine]bool{
-		model.EngineSQLite:   false,
-		model.EngineMySQL:    false,
-		model.EnginePostgres: false, // pg_class 查询未接，先别声称支持
+		model.EngineSQLite:   false, // 没有序列这个概念
+		model.EngineMySQL:    false, // 未接
+		model.EnginePostgres: true,  // pg_class relkind='S'
 	}
 	for _, c := range []driver.Connector{sqlite.New(), mysql.New(), pg.New()} {
 		exp, ok := want[c.Engine()]

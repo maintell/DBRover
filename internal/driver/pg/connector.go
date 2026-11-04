@@ -48,11 +48,10 @@ func (c *Connector) Capabilities() model.Capabilities {
 		Views:             true,
 		MaterializedViews: true,
 		Routines:          false,
-		// 同 MySQL：pg_trigger 还没查，声明 true 会造成「没有触发器」的错觉。
-		Triggers: false,
-		// pg_class 里能查到序列，但 Objects(KindSequence) 还没有分支：
-		// 声明 true 会让对象树永远空着，看起来像「这个库没有序列」。
-		Sequences:        false,
+		// 触发器走 pg_trigger 单独查，已排除 tgisinternal（外键的内部触发器）。
+		Triggers: true,
+		// 序列就是 pg_class 里 relkind='S' 的对象，已接进 Objects。
+		Sequences:        true,
 		UserTypes:        true,
 		Indexes:          true,
 		Explain:          true, // EXPLAIN

@@ -142,6 +142,18 @@ func (c *Connector) Objects(ctx context.Context, catalog, schema string, kinds .
 		db = c.config().Catalog
 	}
 
+	// 触发器不在 information_schema.TABLES 里，得单独查一次（docs/04 §3.2）。
+	var triggers []model.ObjectRef
+	if wantsKind(kinds, model.KindTrigger) {
+		if triggers, err = c.triggerRefs(ctx, db); err != nil {
+			return nil, err
+		}
+	}
+	// 只点名了触发器：不必再查表。
+	if len(kinds) > 0 && !wantsTables(kinds) {
+		return triggers, nil
+	}
+
 	q := `SELECT TABLE_NAME, TABLE_TYPE, COALESCE(TABLE_COMMENT,''),
 	             COALESCE(TABLE_ROWS,0), COALESCE(DATA_LENGTH,0)+COALESCE(INDEX_LENGTH,0)
 	        FROM information_schema.TABLES
@@ -180,6 +192,57 @@ func (c *Connector) Objects(ctx context.Context, catalog, schema string, kinds .
 			kind = model.KindView
 		}
 		out = append(out, model.ObjectRef{Kind: kind, Catalog: db, Schema: db, Name: name})
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return append(out, triggers...), nil
+}
+
+// wantsKind 判断调用方是否点名了某类对象（kinds 为空表示「全都要」）。
+func wantsKind(kinds []model.ObjectKind, want model.ObjectKind) bool {
+	for _, k := range kinds {
+		if k == want {
+			return true
+		}
+	}
+	return false
+}
+
+// wantsTables 表示还想要表 / 视图——这两类在 information_schema.TABLES 里。
+func wantsTables(kinds []model.ObjectKind) bool {
+	for _, k := range kinds {
+		if k == model.KindTable || k == model.KindView {
+			return true
+		}
+	}
+	return false
+}
+
+// triggerRefs 列出某库的全部触发器。
+//
+// 触发器不是「表」，但它是库里的独立对象，有自己的名字与创建语句；对象树里
+// 应当能看见它，否则用户会把「查不到」当成「没有触发器」。
+func (c *Connector) triggerRefs(ctx context.Context, db string) ([]model.ObjectRef, error) {
+	h, err := c.handle()
+	if err != nil {
+		return nil, err
+	}
+	rows, err := h.QueryContext(ctx,
+		`SELECT TRIGGER_NAME FROM information_schema.TRIGGERS
+		  WHERE TRIGGER_SCHEMA = ? ORDER BY TRIGGER_NAME`, db)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+
+	var out []model.ObjectRef
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			return nil, err
+		}
+		out = append(out, model.ObjectRef{Kind: model.KindTrigger, Catalog: db, Schema: db, Name: name})
 	}
 	return out, rows.Err()
 }
