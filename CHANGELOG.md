@@ -131,6 +131,10 @@
 - **用户类型的能力位是假的**（修）：PostgreSQL 一直声明 `UserTypes: true`，但 `Objects(KindType)` 根本没有这个分支——`pg_type` 一次都没查过。能力位说 true 而对象树里永远没有类型节点，会让「为什么看不到我的枚举」变成一个查不出结论的问题（这正是 `docs/04` 自己写的「声明 true 却返回空列表，比不支持更误导」）。现在 PG 改成 `false` 并写明要翻回去的顺序（先实现列表、再加 `drivertest` 用例），新增 `TestUserTypesCapabilityIsHonest` 按引擎列出预期值，翻错即红。**顺带**：这个 bit 目前没有任何消费方（界面与服务都没读它），所以这次改动不影响任何可见行为——但下一个人要接类型设计器时，不会再被一个假 true 带偏。
 - **用户类型真的能列了**（把上一条的「先声明 false」补完）：PostgreSQL 的 `Objects(KindType)` 现在查 `pg_type` 的 `typtype IN ('e','d')`（枚举与域），按 schema 过滤而不是猜名字前缀；`drivertest` 新增 `TypeListing`——用各驱动自己的钩子建一个真枚举再列出来（只断言「不报错」在实现没写时也能过）。能力位随之翻回 `true`，`TestUserTypesCapabilityIsHonest` 的预期值同步更新。**顺手修掉一个会把新结果静默丢掉的分支**：`Objects` 在「只点名了不在 pg_class 里的对象」时会提前返回，原来只带 `triggers`，加了类型之后它会被这个早退吞掉——第一次跑 `TypeListing` 得到空列表，就是这个原因。真机：PG 17 上建 `dbv_type_probe` 枚举 → 列出来 → 删掉，套件 18 项全过。
 
+- **新建枚举类型（用户类型设计器）**：`action` 为 `create_type`，`CREATE TYPE … AS ENUM (…)`、回滚 `DROP TYPE`。值先校验再判能力（空值 / 重复 / 超 63 字节 / 控制字符），顺序照填写顺序进语句——PostgreSQL 的枚举按**声明顺序**比较大小，按字母序重建会改变 `<=` 的语义。`DROP TYPE` 不带 `CASCADE`：还被列用着时必须失败。**对象树同步接上**：`/tables` 在 `UserTypes` 为真时返回类型节点，`?kind=type` 取定义（枚举按 `enumsortorder` 拼回，域连 `NOT NULL`/`DEFAULT`/`CHECK` 一起还原）。界面按能力位摆「新建类型」，值一行一个（标签本身可以含逗号）。**两条新门禁各抓到一处真问题**：`TestSchemaPlanAcceptsType` 一写好就红——请求结构里有 `type`，但处理器是逐字段转交，漏了它，界面点一次才会炸（`TestRequestStructsCoverServiceFields` 查的是结构、查不到转交）；`TestDDLCreateTypeOnRealPG` 的「刚建的类型必须列得出来」把 `Objects` 提前返回分支的问题钉住，变异验证（改回只带 `triggers`）即红。真机 PG 17：带单引号的值建成 → 建表写入 → `state > 'pending'` 命中两行（声明序）→ 定义还原 → 还被列用着时 `DROP TYPE` 失败 → 删表后回滚，类型消失。
+
+- **修掉一条「假绿」的真机用例**：`TestDDLCreateSequenceOnRealPG` 把引擎过滤写成 `if tgt.name != "pg" { t.Skip(...) }` 放在循环里，而 `rowsTargets` 把 MySQL 排在前面——`t.Skip` 会终止整条用例，于是**配了两台库时 PG 那段从来没跑过**，只在「只配 PG」时才真的执行。改成 `continue`，并补一次「两台库都在场」的运行记录：`TestDDLCreateSequenceOnRealPG/pg` 正常执行并通过。这类写法在别处可能还有，判据是「跳过整条用例」而不是「跳过这个引擎」。
+
 ### 安全
 
 - **大整数不再静默丢精度**：`BIGINT` 超过 2^53 时，界面保持字符串、服务端按列类型还原；客户端若把它写成 JSON 数字，直接 `400 NUMBER_PRECISION_LOSS` 并提示改用字符串，而不是把丢了低位的值写进库。此前界面 `coerce()` 用 `Number()` 转换整数列，编辑 `9223372036854775807` 会变成 `...5808`。

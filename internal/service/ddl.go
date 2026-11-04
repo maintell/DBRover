@@ -61,6 +61,8 @@ const (
 	DDLCreateMatView DDLAction = "create_matview"
 	// DDLCreateTrigger 建一个触发器（MySQL / SQLite；PG 要先建函数，v1 不做）。
 	DDLCreateTrigger DDLAction = "create_trigger"
+	// DDLCreateType 建一个用户类型（v1 只做枚举）。
+	DDLCreateType DDLAction = "create_type"
 	// DDLRaw 是「我已经有 DDL，只想让它经过这道门」：语句由用户写，
 	// 工具不做语义解析，只负责分级、审批、审计与竞态保护。
 	DDLRaw DDLAction = "raw"
@@ -161,6 +163,8 @@ type DDLRequest struct {
 	Sequence SequenceSpec `json:"sequence"`
 	// Trigger 用于 create_trigger。目标表由 Table 给。
 	Trigger TriggerSpec `json:"trigger"`
+	// Type 用于 create_type（v1 只做枚举）。
+	Type TypeSpec `json:"type"`
 	// RawSQL 用于 raw：一条手写的 DDL 语句。
 	RawSQL string `json:"sql"`
 }
@@ -190,6 +194,16 @@ type TriggerSpec struct {
 	Timing string `json:"timing"` // BEFORE / AFTER / INSTEAD OF
 	Event  string `json:"event"`  // INSERT / UPDATE / DELETE
 	Body   string `json:"body"`
+}
+
+// TypeSpec 是一个用户类型定义。v1 只做枚举（Values 非空）。
+//
+// 域（CREATE DOMAIN … AS <基类型> CHECK …）要带基类型与约束表达式，是另一种
+// 东西，有确切需求再单独加——用它来装枚举会让「值清单」这个字段名失去意义。
+type TypeSpec struct {
+	Name string `json:"name"`
+	// Values 是枚举标签，顺序即排序顺序（PostgreSQL 按声明顺序比较大小）。
+	Values []string `json:"values"`
 }
 
 // SequenceSpec 是一个序列定义。零值指针表示「不指定，由引擎取默认」。
@@ -462,6 +476,10 @@ func (e *Executor) BuildDDLPlan(ctx context.Context, req DDLRequest) (*ChangePla
 	// 触发器挂在表上，但生成语句不需要读表结构。
 	if req.Action == DDLCreateTrigger {
 		return e.buildCreateTriggerPlan(ctx, req)
+	}
+	// 用户类型同理：它不是改某张表，没有表结构可读。
+	if req.Action == DDLCreateType {
+		return e.buildCreateTypePlan(ctx, req)
 	}
 	// 手写 DDL 也不依赖「我要改的那张表」：它可能建表、也可能改别的东西。
 	if req.Action == DDLRaw {
@@ -1454,6 +1472,95 @@ func (e *Executor) buildCreateSequencePlan(ctx context.Context, req DDLRequest) 
 		AffectedRows: 0,
 	}
 	plan.Notes = append(plan.Notes, "序列不存业务数据，删它会打断依赖它的默认值（如 nextval）")
+	e.finishDDLPlan(plan)
+	return plan, nil
+}
+
+// maxEnumLabelLen 是枚举标签的字节上限：PostgreSQL 把标签存在 pg_enum.enumlabel
+// 里，那是 name 类型，超过 NAMEDATALEN-1 会被拒。我们自己先卡住，错误信息才说得清
+// 「是标签太长」而不是一句引擎侧的 truncation 报错。
+const maxEnumLabelLen = 63
+
+// normalizeEnumValues 校验并规整枚举值清单。
+//
+// 三条规则都来自「枚举标签是标识性数据」这个事实：顺序决定比较大小，重复值引擎
+// 直接拒，空值会让那一项永远选不中。所以在生成语句前先查，不指望引擎报错——
+// 引擎的报错不会告诉用户是第几个值出的问题。
+func normalizeEnumValues(raw []string) ([]string, error) {
+	if len(raw) == 0 {
+		return nil, fmt.Errorf("%w: 枚举至少要有一个值", ErrInvalidDDL)
+	}
+	out := make([]string, 0, len(raw))
+	seen := make(map[string]bool, len(raw))
+	for _, v := range raw {
+		label := strings.TrimSpace(v)
+		if label == "" {
+			return nil, fmt.Errorf("%w: 枚举值不能为空", ErrInvalidDDL)
+		}
+		if len(label) > maxEnumLabelLen {
+			return nil, fmt.Errorf("%w: 枚举值 %q 超过 %d 字节（PostgreSQL 的标签上限）",
+				ErrInvalidDDL, label, maxEnumLabelLen)
+		}
+		if strings.ContainsFunc(label, func(r rune) bool { return r < 0x20 || r == 0x7f }) {
+			return nil, fmt.Errorf("%w: 枚举值不能含控制字符", ErrInvalidDDL)
+		}
+		if seen[label] {
+			return nil, fmt.Errorf("%w: 枚举值 %q 重复", ErrInvalidDDL, label)
+		}
+		seen[label] = true
+		out = append(out, label)
+	}
+	return out, nil
+}
+
+// buildCreateTypePlan 生成建用户类型（枚举）预案。
+//
+// 只做枚举：域要带基类型与约束表达式，是另一种东西（见 TypeSpec 的注释）。
+// 序列那种「没有现有结构可读」的情况这里同样成立，所以不需要表定义哈希。
+func (e *Executor) buildCreateTypePlan(ctx context.Context, req DDLRequest) (*ChangePlan, error) {
+	name := strings.TrimSpace(req.Type.Name)
+	if !constraintNamePattern.MatchString(name) {
+		return nil, fmt.Errorf("%w: 类型名 %q 只能用字母、数字、下划线，且以字母或下划线开头",
+			ErrInvalidDDL, req.Type.Name)
+	}
+	values, verr := normalizeEnumValues(req.Type.Values)
+	if verr != nil {
+		return nil, verr
+	}
+	// 参数校验放在能力判断之前（同建序列）：空值与重复值在哪台引擎上都不成立，
+	// 先说「该引擎没有用户类型」会把人的注意力引偏。
+	if !e.conn.Capabilities().UserTypes {
+		return nil, fmt.Errorf("%w: %s 没有独立的用户类型（MySQL 的 ENUM 是列类型、SQLite 没有这个概念）",
+			ErrInvalidDDL, e.conn.Engine())
+	}
+	// 同名先查：CREATE TYPE 自己会报「already exists」，但那句话不告诉人该怎么办。
+	if objs, oerr := e.conn.Meta().Objects(ctx, req.Table.Catalog, req.Table.Schema, model.KindType); oerr == nil {
+		for _, o := range objs {
+			if strings.EqualFold(o.Name, name) {
+				return nil, fmt.Errorf("%w: 类型 %q 已存在（要加值请用 ALTER TYPE … ADD VALUE）", ErrInvalidDDL, name)
+			}
+		}
+	}
+	quoted := e.dialect.QuoteQualified(schemaOf(req.Table, e.cfgSchema()), name)
+	plan := &ChangePlan{
+		ID: "ddl-" + newID(),
+		Table: model.ObjectRef{
+			Kind: model.KindType, Name: name, Schema: req.Table.Schema, Catalog: req.Table.Catalog,
+		},
+		CreatedAt: time.Now(),
+		ExpiresAt: time.Now().Add(planTTL),
+		Statements: []PlanStatement{{
+			SQL: e.dialect.CreateEnumTypeSQL(quoted, values), ExpectRows: -1,
+		}},
+		Rollback: []PlanStatement{{
+			SQL: e.dialect.DropEnumTypeSQL(quoted), ExpectRows: -1,
+		}},
+		AffectedRows: 0,
+	}
+	plan.Notes = append(plan.Notes,
+		"类型本身不存数据；一旦有列在用它，删这个类型会让那些列读不出来（要连列一起改）")
+	plan.Notes = append(plan.Notes,
+		"枚举值只能往后追加（ALTER TYPE … ADD VALUE），不能删除或重排——已有的数据会读出另一个值")
 	e.finishDDLPlan(plan)
 	return plan, nil
 }

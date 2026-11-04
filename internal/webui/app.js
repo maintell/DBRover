@@ -337,6 +337,8 @@ async function loadIdentity(id) {
     // 序列只有 PG 有（MySQL 用 AUTO_INCREMENT、SQLite 用 AUTOINCREMENT），
     // 没这个能力的连接上不摆这个按钮。
     if ($('btn-new-seq')) $('btn-new-seq').hidden = !caps.sequences;
+    // 用户类型同理：没有这个概念的引擎上不摆按钮。
+    if ($('btn-new-type')) $('btn-new-type').hidden = !caps.user_types;
     const ident = h.identity || {};
     const host = ident.hostname || '?';
     const fp = (ident.fingerprint || '').slice(0, 8);
@@ -481,7 +483,7 @@ async function loadTables() {
         b.onclick = () => browseTable(t.name);
       } else {
         // 触发器与序列都没有数据行，但都有定义：点开看原文。
-        const label = kind === 'trigger' ? '触发器' : '序列';
+        const label = { trigger: '触发器', sequence: '序列', type: '类型' }[kind] || kind;
         b.textContent = t.name + ' · ' + label;
         b.title = '查看' + label + '定义';
         b.onclick = () => showObjectDDL(kind, t.name);
@@ -2838,6 +2840,7 @@ $('btn-agent').onclick = () => showAgent();
 $('btn-new-table').onclick = () => showCreateTable();
 $('btn-new-view').onclick = () => showCreateView();
 $('btn-new-seq').onclick = () => showCreateSequence();
+$('btn-new-type').onclick = () => showCreateType();
 $('btn-forget').onclick = () => {
   forgetToken();
   location.reload();
@@ -3281,6 +3284,40 @@ async function showCreateSequence() {
   await applyPlan(plan.id, undefined, loadTables);
 }
 
+// showCreateType 建一个枚举类型。
+//
+// 值一行一个，不用逗号分隔：枚举标签本身可以含逗号，用逗号拆会把一个值拆成两个。
+// 顺序照填写的顺序走——PostgreSQL 的枚举按声明顺序比较大小，界面不重排。
+async function showCreateType() {
+  if (!state.current) {
+    showNotice('请先建立连接。', 'warn');
+    return;
+  }
+  const ok = await dialog(
+    '新建类型',
+    '<label class="field">类型名</label>' +
+      '<input id="ty-name" style="width:100%" autocomplete="off" spellcheck="false">' +
+      '<label class="field">值（一行一个）</label>' +
+      '<textarea id="ty-values" rows="5" style="width:100%" spellcheck="false"></textarea>' +
+      '<p>顺序就是比较大小用的顺序；建好后只能往后追加，不能删除或重排。</p>',
+    '生成预案');
+  if (!ok) return;
+  const name = ($('ty-name').value || '').trim();
+  const values = ($('ty-values').value || '')
+    .split('\n')
+    .map((s) => s.trim())
+    .filter((s) => s !== '');
+  let plan;
+  try {
+    plan = await postSchemaPlan({ action: 'create_type', type: { name, values } }, false);
+  } catch (e) {
+    showNotice(e.message + (e.hint ? '（' + e.hint + '）' : ''), 'error');
+    return;
+  }
+  if (!(await confirmPlan(plan))) return;
+  // 建完刷新对象树：类型要在左侧看得到，否则用户会以为没建成。
+  await applyPlan(plan.id, undefined, loadTables);
+}
 // planAddTrigger 建一条触发器。
 //
 // 体只收单条语句：MySQL 的多语句体要靠 DELIMITER，那是客户端语法；我们走驱动，

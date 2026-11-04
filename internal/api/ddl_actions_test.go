@@ -49,6 +49,33 @@ func TestSchemaPlanAcceptsCheckAndView(t *testing.T) {
 	}
 }
 
+// TestSchemaPlanAcceptsType 守住 create_type 在 HTTP 上真的可达。
+//
+// SQLite 没有用户类型，所以这条不断言成功，只断言两件不该发生的事：字段被
+// 当成未知字段（400 unknown field），或错误说不清是引擎不支持。这正是
+// add_check / create_view 当初漏字段时的表现。
+func TestSchemaPlanAcceptsType(t *testing.T) {
+	_, ts, dir := newServer(t)
+	connID := createConn(t, ts, dir, "test", "read-write")
+	execSQL(t, ts, connID, "CREATE TABLE t (id INTEGER PRIMARY KEY, v TEXT)")
+
+	code, body := do(t, ts, http.MethodPost, "/api/v1/connections/"+connID+"/schema/plan",
+		map[string]any{
+			"table":  map[string]any{"kind": "table", "name": "t"},
+			"action": "create_type",
+			"type":   map[string]any{"name": "ty_api", "values": []string{"a", "b"}},
+		}, true)
+	if code != http.StatusBadRequest {
+		t.Fatalf("SQLite 上建类型应当 400, 实际 %d %v", code, body)
+	}
+	s := toJSON(body)
+	if strings.Contains(s, "unknown field") {
+		t.Fatalf("请求字段没被识别：%s", s)
+	}
+	if !strings.Contains(s, "ENUM 是列类型") {
+		t.Errorf("错误应说清这个引擎用列类型表达枚举：%s", s)
+	}
+}
 func toJSON(v any) string {
 	b, _ := json.Marshal(v)
 	return string(b)

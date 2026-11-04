@@ -537,6 +537,10 @@ func (c *Connector) DDL(ctx context.Context, ref model.ObjectRef) (string, error
 		return b.String(), nil
 	}
 
+	// 用户类型：枚举从 pg_enum 拼回 CREATE TYPE；域连约束一起还原。
+	if ref.Kind == model.KindType {
+		return c.userTypeDDL(ctx, h, schema, ref.Name)
+	}
 	// 触发器：pg_get_triggerdef 给出 CREATE TRIGGER 的原文（不含尾分号）。
 	if ref.Kind == model.KindTrigger {
 		var def string
@@ -884,6 +888,88 @@ func (c *Connector) typeRefs(ctx context.Context, schema string) ([]model.Object
 		out = append(out, model.ObjectRef{
 			Kind: model.KindType, Catalog: c.config().Catalog, Schema: schema, Name: name,
 		})
+	}
+	return out, rows.Err()
+}
+
+// userTypeDDL 拼回用户类型定义。
+//
+// 枚举能完整还原：值顺序来自 enumsortorder（不是字母序——枚举的比较大小就按
+// 声明顺序，排错了重建出来的是另一个类型），标签按 SQL 字面量转义。
+//
+// 域必须把 NOT NULL / DEFAULT / CHECK 一起带上：只写 CREATE DOMAIN x AS int
+// 会建出一个「看着一样、实际少了一半约束」的东西。这与序列那条注释是同一个理由。
+func (c *Connector) userTypeDDL(ctx context.Context, h *sql.DB, schema, name string) (string, error) {
+	var oid int64
+	var typtype string
+	var notNull bool
+	var def, base sql.NullString
+	err := h.QueryRowContext(ctx,
+		`SELECT t.oid, t.typtype, t.typnotnull, t.typdefault,
+		        CASE WHEN t.typtype = 'd' THEN format_type(t.typbasetype, t.typtypmod) END
+		   FROM pg_type t JOIN pg_namespace n ON n.oid = t.typnamespace
+		  WHERE n.nspname = $1 AND t.typname = $2 AND t.typtype IN ('e','d')`,
+		schema, name).Scan(&oid, &typtype, &notNull, &def, &base)
+	if err == sql.ErrNoRows {
+		return "", fmt.Errorf("pg: 类型不存在: %s", name)
+	}
+	if err != nil {
+		return "", err
+	}
+	qualified := quoteIdent(schema) + "." + quoteIdent(name)
+	if typtype == "e" {
+		labels, lerr := c.enumLabels(ctx, h, oid)
+		if lerr != nil {
+			return "", lerr
+		}
+		return "CREATE TYPE " + qualified + " AS ENUM (" + strings.Join(labels, ", ") + ");", nil
+	}
+	var b strings.Builder
+	b.WriteString("CREATE DOMAIN " + qualified + " AS " + base.String)
+	if def.Valid && def.String != "" {
+		b.WriteString(" DEFAULT " + def.String)
+	}
+	if notNull {
+		b.WriteString(" NOT NULL")
+	}
+	rows, cerr := h.QueryContext(ctx,
+		`SELECT pg_get_constraintdef(oid) FROM pg_constraint WHERE contypid = $1 ORDER BY conname`, oid)
+	if cerr != nil {
+		return "", cerr
+	}
+	defer func() { _ = rows.Close() }()
+	for rows.Next() {
+		var s string
+		if serr := rows.Scan(&s); serr != nil {
+			return "", serr
+		}
+		b.WriteString(" " + s)
+	}
+	if rerr := rows.Err(); rerr != nil {
+		return "", rerr
+	}
+	b.WriteString(";")
+	return b.String(), nil
+}
+
+// enumLabels 按声明顺序取枚举标签，并转义成 SQL 字面量。
+//
+// 用 enumsortorder 而不是 enumlabel 排序：PostgreSQL 里枚举的大小比较按声明顺序，
+// 按字母序拼回去会改变 <= / >= 的语义。
+func (c *Connector) enumLabels(ctx context.Context, h *sql.DB, typeOID int64) ([]string, error) {
+	rows, err := h.QueryContext(ctx,
+		`SELECT enumlabel FROM pg_enum WHERE enumtypid = $1 ORDER BY enumsortorder`, typeOID)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	var out []string
+	for rows.Next() {
+		var label string
+		if err := rows.Scan(&label); err != nil {
+			return nil, err
+		}
+		out = append(out, "'"+strings.ReplaceAll(label, "'", "''")+"'")
 	}
 	return out, rows.Err()
 }

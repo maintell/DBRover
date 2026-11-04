@@ -72,7 +72,9 @@ func TestDDLCreateSequenceRejectsBadInput(t *testing.T) {
 func TestDDLCreateSequenceOnRealPG(t *testing.T) {
 	for _, tgt := range rowsTargets(t) {
 		if tgt.name != "pg" {
-			t.Skip("序列只有 PostgreSQL 支持")
+			// 不能在这里 t.Skip：MySQL 排在前，跳过会终止整条用例，
+			// pg 那一段根本没跑过（这一条此前因此一直是「假绿」）。
+			continue
 		}
 		t.Run(tgt.name, func(t *testing.T) {
 			ctx := context.Background()

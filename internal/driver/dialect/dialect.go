@@ -113,6 +113,15 @@ type Dialect interface {
 	// DropSequenceSQL 渲染删序列语句。
 	DropSequenceSQL(name string) string
 
+	// CreateEnumTypeSQL 渲染建枚举类型语句。values 已由服务层校验过（非空、
+	// 不重复、不带控制字符）；这里只负责把每个值按 SQL 字面量转义。
+	//
+	// 只有 PostgreSQL 有「用户类型」这个独立对象，调用方应先看 Capabilities().UserTypes。
+	CreateEnumTypeSQL(name string, values []string) string
+
+	// DropEnumTypeSQL 渲染删枚举类型语句。
+	DropEnumTypeSQL(name string) string
+
 	// CreateViewSQL 渲染建视图语句。name 应当是已引用好的限定名，
 	// query 是已过校验的 SELECT / WITH 主体（不含分号）。
 	CreateViewSQL(name, query string) string
@@ -371,6 +380,27 @@ func (d impl) CreateSequenceSQL(name string, opts SequenceOptions) string {
 // DropSequenceSQL 见接口注释。
 func (d impl) DropSequenceSQL(name string) string {
 	return "DROP SEQUENCE " + name
+}
+
+// CreateEnumTypeSQL 见接口注释。
+//
+// 值只能写成一串字面量：CREATE TYPE 的标签没有参数化的地方。转义用标准的
+// 「单引号翻倍」——把值里的每个单引号重复一次，PG 与 MySQL 都认；不用反斜杠
+// 转义，那要依赖 standard_conforming_strings 的取值。
+func (d impl) CreateEnumTypeSQL(name string, values []string) string {
+	labels := make([]string, len(values))
+	for i, v := range values {
+		labels[i] = "'" + strings.ReplaceAll(v, "'", "''") + "'"
+	}
+	return "CREATE TYPE " + name + " AS ENUM (" + strings.Join(labels, ", ") + ")"
+}
+
+// DropEnumTypeSQL 见接口注释。
+//
+// 不带 IF EXISTS 也不带 CASCADE：删一个还被列用着的类型必须失败，悄悄带上
+// CASCADE 会把依赖它的列一起删掉。
+func (d impl) DropEnumTypeSQL(name string) string {
+	return "DROP TYPE " + name
 }
 
 // TriggerOptions 是一条触发器的定义。Timing / Event 由调用方校验并大写。

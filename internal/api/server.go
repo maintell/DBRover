@@ -579,14 +579,17 @@ func (s *Server) handleTables(w http.ResponseWriter, r *http.Request) {
 	}
 	// 对象树列什么，由能力声明决定：说了支持触发器/序列却不出现在树上，
 	// 等于把「查得到」这件事藏起来（docs/04 §3.2）。
+	caps := drv.Capabilities()
 	kinds := []model.ObjectKind{model.KindTable, model.KindView}
-	if caps := drv.Capabilities(); caps.Triggers || caps.Sequences {
-		if caps.Triggers {
-			kinds = append(kinds, model.KindTrigger)
-		}
-		if caps.Sequences {
-			kinds = append(kinds, model.KindSequence)
-		}
+	if caps.Triggers {
+		kinds = append(kinds, model.KindTrigger)
+	}
+	if caps.Sequences {
+		kinds = append(kinds, model.KindSequence)
+	}
+	// 用户类型（枚举 / 域）也是对象：声明了却不出现在树上，等于把「查得到」藏起来。
+	if caps.UserTypes {
+		kinds = append(kinds, model.KindType)
 	}
 	objs, err := drv.Meta().Objects(r.Context(), "", "", kinds...)
 	if err != nil {
@@ -905,14 +908,16 @@ func (s *Server) handleTableSchema(w http.ResponseWriter, r *http.Request) {
 		kind = model.KindTrigger
 	case "sequence":
 		kind = model.KindSequence
+	case "type":
+		kind = model.KindType
 	default:
 		writeError(w, http.StatusBadRequest, "REQUEST_INVALID", "internal",
-			"kind 只支持 table / view / trigger / sequence", "", false)
+			"kind 只支持 table / view / trigger / sequence / type", "", false)
 		return
 	}
 	ref := model.ObjectRef{Kind: kind, Name: r.PathValue("name"), Schema: r.URL.Query().Get("schema")}
 
-	if kind == model.KindTrigger || kind == model.KindSequence {
+	if kind == model.KindTrigger || kind == model.KindSequence || kind == model.KindType {
 		ddlText, derr := e.exec.TableDDL(r.Context(), ref)
 		if errors.Is(derr, driver.ErrObjectNotFound) {
 			writeError(w, http.StatusNotFound, "OBJECT_NOT_FOUND", "resource",
@@ -979,6 +984,7 @@ type schemaPlanRequest struct {
 	View     service.ViewSpec     `json:"view"`
 	Sequence service.SequenceSpec `json:"sequence"`
 	Trigger  service.TriggerSpec  `json:"trigger"`
+	Type     service.TypeSpec     `json:"type"`
 	RawSQL   string               `json:"sql"`
 }
 
@@ -999,7 +1005,7 @@ func (s *Server) handleSchemaPlan(w http.ResponseWriter, r *http.Request) {
 		Table: req.Table, Action: req.Action, Column: req.Column,
 		Columns: req.Columns, PrimaryKey: req.PrimaryKey, Index: req.Index,
 		ForeignKey: req.ForeignKey, Check: req.Check, View: req.View,
-		Sequence: req.Sequence, Trigger: req.Trigger, RawSQL: req.RawSQL,
+		Sequence: req.Sequence, Trigger: req.Trigger, Type: req.Type, RawSQL: req.RawSQL,
 	})
 	if errors.Is(err, service.ErrLockWait) {
 		writeError(w, http.StatusConflict, "LOCK_WAIT_BLOCKED", "connection",
