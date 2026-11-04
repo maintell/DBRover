@@ -88,7 +88,11 @@ type TableDiff struct {
 // 这三段头部是部署属性（谁建的、以谁的身份跑），不是结构差异，混进来会让
 // 同一段查询在两边永远显示「不一样」。
 type ViewDiff struct {
-	Name string `json:"name"`
+	// Kind 区分普通视图与物化视图：两者不是同一类对象——物化视图会把结果
+	// 存下来（删了丢的是已物化的数据），读之前还要 REFRESH。混在一张清单里，
+	// 读的人分不清哪条需要刷新。
+	Kind model.ObjectKind `json:"kind,omitempty"`
+	Name string           `json:"name"`
 	// Left / Right 是两侧视图的原始 DDL（取不到时为空）。
 	Left   string        `json:"left,omitempty"`
 	Right  string        `json:"right,omitempty"`
@@ -188,7 +192,9 @@ func Compare(ctx context.Context, left, right driver.Connector) (*CompareResult,
 		}
 	}
 
-	appendViewDiffs(ctx, res, left, right, crossEngine, leftDialect)
+	// 视图与物化视图分开比（见 ViewDiff.Kind 的注释）。
+	appendViewDiffs(ctx, res, left, right, crossEngine, leftDialect, model.KindView)
+	appendViewDiffs(ctx, res, left, right, crossEngine, leftDialect, model.KindMatView)
 	return res, nil
 }
 
@@ -220,9 +226,9 @@ type viewDef struct {
 	body string // 归一化后的查询体；ddl 为空时也为空
 }
 
-// describeViews 取一侧的全部视图，键为小写视图名。
-func describeViews(ctx context.Context, c driver.Connector) (map[string]viewDef, error) {
-	objs, err := c.Meta().Objects(ctx, "", "", model.KindView)
+// describeViews 取一侧的全部视图（或物化视图），键为小写名字。
+func describeViews(ctx context.Context, c driver.Connector, kind model.ObjectKind) (map[string]viewDef, error) {
+	objs, err := c.Meta().Objects(ctx, "", "", kind)
 	if err != nil {
 		return nil, err
 	}
@@ -244,18 +250,30 @@ func describeViews(ctx context.Context, c driver.Connector) (map[string]viewDef,
 // 跨引擎时视图原文是另一套方言写的，直接放到升级脚本里会执行失败，
 // 因此只给原文并记 need_review——这一点与表结构原文的处理保持一致。
 func appendViewDiffs(ctx context.Context, res *CompareResult, left, right driver.Connector,
-	crossEngine bool, leftDialect dialect.Dialect) {
+	crossEngine bool, leftDialect dialect.Dialect, kind model.ObjectKind) {
 
-	lv, lerr := describeViews(ctx, left)
-	rv, rerr := describeViews(ctx, right)
+	label := "视图"
+	// 删一个物化视图丢的是**已物化的结果**（源数据不动），这句话不能套在视图上，
+	// 也不能反过来——两者在预案与提示里的说法都不一样。
+	dataNote := "不丢数据"
+	if kind == model.KindMatView {
+		label = "物化视图"
+		dataNote = "只丢已物化的结果，源数据不动"
+	}
+	lv, lerr := describeViews(ctx, left, kind)
+	rv, rerr := describeViews(ctx, right, kind)
 	if lerr != nil || rerr != nil {
 		which, err := "左侧", lerr
 		if lerr == nil {
 			which, err = "右侧", rerr
 		}
-		res.NeedReview = append(res.NeedReview, which+"视图清单读取失败："+err.Error())
+		res.NeedReview = append(res.NeedReview, which+label+"清单读取失败："+err.Error())
 		return
 	}
+	// 一侧引擎根本没有这类对象（能力位为假）时，差异不是「有人忘了建」，而是
+	// 「这个引擎没有这个概念」：不生成脚本，只记一条需要人工决策。
+	supportsLeft := kind == model.KindView || left.Capabilities().MaterializedViews
+	supportsRight := kind == model.KindView || right.Capabilities().MaterializedViews
 
 	names := map[string]bool{}
 	for n := range lv {
@@ -276,33 +294,43 @@ func appendViewDiffs(ctx context.Context, res *CompareResult, left, right driver
 
 		switch {
 		case lok && !rok:
-			d := ViewDiff{Name: l.ref.Name, Left: l.ddl, Status: CompareOnlyLeft}
+			if !supportsRight {
+				res.NeedReview = append(res.NeedReview,
+					l.ref.Name+"：右侧引擎没有"+label+"，左侧这个对象怎么处理需要人工决定（未生成脚本）")
+				continue
+			}
+			d := ViewDiff{Kind: kind, Name: l.ref.Name, Left: l.ddl, Status: CompareOnlyLeft}
 			res.Views = append(res.Views, d)
-			res.Upgrade = append(res.Upgrade, leftDialect.DropViewSQL(leftDialect.QuoteQualified("", l.ref.Name))+";")
+			res.Upgrade = append(res.Upgrade, viewDropSQL(leftDialect, kind, leftDialect.QuoteQualified("", l.ref.Name))+";")
 			if l.ddl != "" {
 				res.Downgrade = append(res.Downgrade, terminate(l.ddl))
 			} else {
 				res.NeedReview = append(res.NeedReview,
-					l.ref.Name+"：左侧视图取不到定义，回退脚本无法生成")
+					l.ref.Name+"：左侧"+label+"取不到定义，回退脚本无法生成")
 			}
 			res.NeedReview = append(res.NeedReview,
-				l.ref.Name+"：左侧有而右侧没有视图，升级脚本会删掉它（不丢数据，定义在回退脚本里）")
+				l.ref.Name+"：左侧有而右侧没有"+label+"，升级脚本会删掉它（"+dataNote+"，定义在回退脚本里）")
 
 		case !lok && rok:
-			d := ViewDiff{Name: r.ref.Name, Right: r.ddl, Status: CompareOnlyRight}
+			if !supportsLeft {
+				res.NeedReview = append(res.NeedReview,
+					r.ref.Name+"：左侧引擎没有"+label+"，右侧这个对象在升级后无处安放（未生成脚本）")
+				continue
+			}
+			d := ViewDiff{Kind: kind, Name: r.ref.Name, Right: r.ddl, Status: CompareOnlyRight}
 			res.Views = append(res.Views, d)
 			if crossEngine {
 				res.NeedReview = append(res.NeedReview,
-					r.ref.Name+"：右侧有而左侧没有视图，但两侧引擎不同，"+
-						"右侧的 CREATE VIEW 原文不一定能在左侧执行，需人工改写")
+					r.ref.Name+"：右侧有而左侧没有"+label+"，但两侧引擎不同，"+
+						"右侧的定义原文不一定能在左侧执行，需人工改写")
 			} else if r.ddl != "" {
 				res.Upgrade = append(res.Upgrade, terminate(r.ddl))
 			} else {
 				res.NeedReview = append(res.NeedReview,
-					r.ref.Name+"：右侧视图取不到定义，升级脚本无法生成")
+					r.ref.Name+"：右侧"+label+"取不到定义，升级脚本无法生成")
 			}
 			res.Downgrade = append(res.Downgrade,
-				leftDialect.DropViewSQL(leftDialect.QuoteQualified("", r.ref.Name))+";")
+				viewDropSQL(leftDialect, kind, leftDialect.QuoteQualified("", r.ref.Name))+";")
 
 		default:
 			reasons := viewReasons(l, r)
@@ -310,16 +338,30 @@ func appendViewDiffs(ctx context.Context, res *CompareResult, left, right driver
 				continue
 			}
 			res.Views = append(res.Views, ViewDiff{
-				Name: l.ref.Name, Left: l.ddl, Right: r.ddl,
+				Kind: kind, Name: l.ref.Name, Left: l.ddl, Right: r.ddl,
 				Reason: reasons, Status: CompareChanged,
 			})
 			// 改视图要 CREATE OR REPLACE（SQLite 没有这个写法，只能 DROP + CREATE），
 			// 两侧引擎支持程度不一，不在这里假装能生成。
+			hint := "改视图需人工确认后手写 DDL"
+			if kind == model.KindMatView {
+				hint = "物化视图的定义不能就地改，只能 DROP 后重建；重建会重算一遍并覆盖已物化的数据"
+			}
 			res.NeedReview = append(res.NeedReview,
-				l.ref.Name+"：视图定义有差异（"+strings.Join(reasons, "；")+"），"+
-					"改视图需人工确认后手写 DDL")
+				l.ref.Name+"："+label+"定义有差异（"+strings.Join(reasons, "；")+"），"+hint)
 		}
 	}
+}
+
+// viewDropSQL 渲染删对象语句：视图与物化视图不是同一种 DROP。
+//
+// 用错会直接语法错——`DROP MATERIALIZED VIEW` 在 PG 上是另一条路径，
+// 而 `DROP VIEW` 删不动物化视图。
+func viewDropSQL(d dialect.Dialect, kind model.ObjectKind, name string) string {
+	if kind == model.KindMatView {
+		return d.DropMaterializedViewSQL(name)
+	}
+	return d.DropViewSQL(name)
 }
 
 // viewReasons 判断同一视图在两侧是否等价。

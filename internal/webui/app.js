@@ -1165,9 +1165,12 @@ function renderCompare(res) {
   }
 
   if (views.length) {
+    // 物化视图混在同一张清单里：不标出来的话，「升级会删掉它」这条提示会被
+    // 读成「只是一个视图」，而它其实还存着一份结果。
+    const anyMat = views.some((v) => v.kind === 'matview');
     const h = document.createElement('div');
     h.className = 'head';
-    h.textContent = '视图差异';
+    h.textContent = anyMat ? '视图 / 物化视图差异' : '视图差异';
     wrap.appendChild(h);
     const ul = document.createElement('ul');
     const label = {
@@ -1181,7 +1184,8 @@ function renderCompare(res) {
       const state = label[v.status] || v.status;
       // 状态本身已经把「查询体不同」说清楚了，别再重复一遍。
       const reasons = (v.reason || []).filter((r) => r !== state);
-      li.textContent = v.name + '：' + state + (reasons.length ? '：' + reasons.join('；') : '');
+      const kindNote = v.kind === 'matview' ? '（物化视图）' : '';
+      li.textContent = v.name + kindNote + '：' + state + (reasons.length ? '：' + reasons.join('；') : '');
       ul.appendChild(li);
     }
     wrap.appendChild(ul);
