@@ -112,12 +112,12 @@ DBRover 面向同时维护多种数据库的工程师：一个人可能上午在
 
 | 模块 | 状态 |
 |---|---|
-| `internal/model` | 领域模型、能力声明（含 `IndexValidity` / `AlterColumnNullability` / `AlterColumnDefault` / `AddCheck` / `AddTrigger`）、环境严格度、元数据模型 |
-| `internal/driver/dialect` | 5 种 SQL 方言：词法、语句切分（含 dollar-quote、`DELIMITER`、`GO`、例程/触发器体）、指纹、分类、条件分析、标识符引用，以及改列类型/可空/默认值、索引、外键、检查约束、视图/物化视图、序列、触发器的语句渲染 |
+| `internal/model` | 领域模型、能力声明（含 `IndexValidity` / `AlterColumnNullability` / `AlterColumnDefault` / `AddCheck` / `AddTrigger` / `Sequences` / `MaterializedViews` / `UserTypes` / `Routines` / `AddRoutine`）、环境严格度、元数据模型 |
+| `internal/driver/dialect` | 5 种 SQL 方言：词法、语句切分（含 dollar-quote、`DELIMITER`、`GO`、例程/触发器体）、指纹、分类、条件分析、标识符引用，以及改列类型/可空/默认值、索引、外键、检查约束、视图/物化视图、序列、触发器、枚举类型、例程（新建与整段替换）的语句渲染 |
 | `internal/policy` | 风险分级 `R0`–`R4`、摩擦分级 `F0`–`F5` |
-| `internal/driver` | Connector 契约 + `drivertest` 一致性套件（17 项，含表注释、声明长度、索引有效性） |
+| `internal/driver` | Connector 契约（含 `Target()`：目标自报身份）+ `drivertest` 一致性套件（19 项，含表注释、声明长度、索引有效性、触发器/序列/类型/例程列表——例程那条还会把取到的定义回放一遍） |
 | `internal/driver/sqlite` `mysql` `pg` | 三个引擎完整实现，真机验收（SQLite / MySQL 5.7 / PostgreSQL 17） |
-| `internal/service` | 执行门；变更集与预案（乐观并发、回滚、一键撤销）；结构变更（建表/加列/删列/改列类型/可空/默认值/索引/外键/检查约束/视图/物化视图/序列/触发器）+ 收窄预检、孤儿预检、依赖阻断、等锁阻断；批量修改（分批、NDJSON 进度、可中止）；流式导出（CSV / NDJSON / SQL / Markdown / XLSX）；游标与键集分页；结构比对；**备份**（容器 v1、gzip、AES-256-GCM、表级续跑）与**恢复**（同引擎、单事务、报告）；**跨引擎迁移**（预检、建表、键集搬数据、行数+摘要校验、检查点续跑、外键与注释补建） |
+| `internal/service` | 执行门；变更集与预案（乐观并发、回滚、一键撤销）；结构变更（建表/加列/删列/改列类型/可空/默认值/索引/外键/检查约束/视图/物化视图/序列/触发器/枚举类型/例程新建与整段替换）+ 收窄预检、孤儿预检、依赖阻断、等锁阻断；批量修改（分批、NDJSON 进度、可中止）；流式导出（CSV / NDJSON / SQL / Markdown / XLSX）；游标与键集分页；结构比对（含物化视图，一侧引擎没有这个概念时只记 `need_review`）；**备份**（容器 v1、gzip、AES-256-GCM、表级续跑）与**恢复**（同引擎、单事务、报告；目标非空时要写出目标名才允许覆盖）；**跨引擎迁移**（预检、建表、键集搬数据、行数+摘要校验、检查点续跑、外键与注释补建） |
 | `internal/api` | 回环 HTTP：token 鉴权、连接、`exec`/`query`（NDJSON 流）、键集分页、变更与结构预案、批量修改、外键预检、结构比对、导出多格式、备份/恢复/迁移端点、审计查询、`/agent/*`（会话、消息流、审批、工具清单、中止、压缩、导出）、OpenAPI 契约 |
 | `internal/agent` | Provider 抽象（OpenAI 兼容）、14 个工具、权限三模式与环境上限、执行循环（步数/时长/循环/失败上限）、审批门（预案只由服务端保管）、三路上下文召回、长会话压缩、评测集 |
 | `internal/infra/tunnel` | SSH 隧道与跳板链：多跳、密码/私钥/agent 认证、主机密钥 TOFU |
@@ -132,7 +132,7 @@ DBRover 面向同时维护多种数据库的工程师：一个人可能上午在
 >
 > 非关系型引擎（Redis / Mongo / ES）不实现 `Connector`/`Metadata`，另用 `KVConnector` 一族接口，`api` 靠类型断言而不是引擎名选路径，见 [ADR-0007](docs/adr/0007-nosql-connector-model.md)。
 
-**尚未实现**：React 正式前端、桌面壳（Wails，待拍板）、SQL Server / Oracle（镜像拉不下来，见 [ADR-0008](docs/adr/0008-mssql-connector.md)）、MongoDB / Elasticsearch、**例程与用户类型设计器**（例程可走「手写 DDL」，切分器已支持体内分号）、引擎特有项表单、磁盘余量探测、Agent 的向量召回与 `/agent/providers`、测试数据生成。
+**尚未实现**：React 正式前端、桌面壳（Wails，待拍板）、SQL Server / Oracle（镜像拉不下来，见 [ADR-0008](docs/adr/0008-mssql-connector.md)）、MongoDB / Elasticsearch、引擎特有项（`EngineExtra`）表单、磁盘余量探测（只有 SQLite 能诚实实现——MySQL/PG 拿不到所在卷余量）、例程依赖检查、手写 SQL 反解回表单、Agent 的向量召回与 `/agent/providers`、测试数据生成。
 
 
 ## 6. 快速开始

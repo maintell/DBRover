@@ -102,7 +102,7 @@ model → （无）
 | 契约 | OpenAPI 快照比对，破坏性变更需 ADR | 必须无未批准 diff |
 | 前端 | `vitest` + Playwright 冒烟 | 主流程全绿 |
 | 静态 | `gofmt -l`、`go vet`、`golangci-lint`、`tsc --noEmit` | 零输出 |
-| 文档一致性 | `internal/ci`：文档里引用的 `Test*`、`(NNNN-*.md)` ADR 链接、`scripts/*.ps1`、`docs/12` 里标 ✅ 的端点，以及 `docs/13` 的 ADR 清单（份数与编号）逐个核对 | 零悬空（改名/删除/新增后必须同步文档） |
+| 文档一致性 | `internal/ci`：文档里引用的 `Test*`、`(NNNN-*.md)` ADR 链接、`docs/NN §X.Y` 章节、`scripts/*.ps1`、`docs/12` 里标 ✅ 的端点，以及 `docs/13` 的 ADR 清单（份数与编号）逐个核对 | 零悬空（改名/删除/新增后必须同步文档） |
 
 **本地只跑静态检查与单测**；完整矩阵与产物构建交给 CI。
 
