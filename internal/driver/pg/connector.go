@@ -40,6 +40,9 @@ func New() *Connector { return &Connector{} }
 // Engine 返回引擎类型。
 func (c *Connector) Engine() model.Engine { return model.EnginePostgres }
 
+// Target 见接口注释：PostgreSQL 的 catalog 就是库名。
+func (c *Connector) Target() string { return c.config().Catalog }
+
 // Capabilities 声明 PostgreSQL 的能力。
 func (c *Connector) Capabilities() model.Capabilities {
 	return model.Capabilities{

@@ -263,7 +263,7 @@ UI ──POST /changes/{id}/apply────► 校验审批凭证 → 执行 �
 
 按「加一个新引擎要改哪些文件」检验架构：
 
-1. 实现 `driver.Connector`（含 `Capabilities()`）。
+1. 实现 `driver.Connector`（含 `Capabilities()` 与 `Target()`——后者是「确认你连的是哪个库」用的目标标识，见 [ADR-0015](adr/0015-connector-target-and-restore-confirmation.md)）。
 2. 在 `driver/dialect/` 加方言（引用、分页、类型映射、计划解析）。
 3. 在 `driver/drivertest/cases.go` 注册该引擎的期望能力。
 4. 前端无需改动——UI 依据 `Capabilities()` 渲染与降级。

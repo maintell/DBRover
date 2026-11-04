@@ -92,7 +92,8 @@ func usage() {
   dbrover tunnel -via user@hop1:22[,user@hop2:22] -to host:port (-password-stdin | -key <path>)
   dbrover secret (set|clear|status) [-service dbrover/agent] [-account api-key]  # 口令从 stdin 读
   dbrover backup (create|inspect) [-db <file> ...] [-out <文件.dbr>] [-resume] [-compress] [-passphrase-stdin]
-  dbrover restore -file <文件.dbr> -db <file> -env ... -yes [-allow-existing]  # 同引擎恢复
+  dbrover restore -file <文件.dbr> -db <file> -env ... -yes  # 同引擎恢复
+  # 目标已有同名对象时，还要 -confirm-target <目标名>（库名或 SQLite 文件路径）
   dbrover migrate (plan|run) -db <源> -table <表> -to-db <目标> [-set col=type] [-yes]
 
 退出码:
@@ -741,7 +742,7 @@ func cmdRestore(args []string) error {
 	var cf connFlags
 	cf.bind(fs)
 	file := fs.String("file", "", "备份文件（.dbr）")
-	allowExisting := fs.Bool("allow-existing", false, "目标库已有同名对象时覆盖")
+	confirmTarget := fs.String("confirm-target", "", "目标库已有同名对象时，把目标名（库名或 SQLite 文件路径）原样写出来才允许覆盖")
 	yes := fs.Bool("yes", false, "确认要写目标库")
 	passStdin := fs.Bool("passphrase-stdin", false, "从标准输入读解密口令")
 	if err := fs.Parse(args); err != nil {
@@ -774,7 +775,7 @@ func cmdRestore(args []string) error {
 		}
 	}
 	rep, err := ex.Restore(context.Background(), f, service.RestoreRequest{
-		AllowExisting: *allowExisting,
+		ConfirmTarget: *confirmTarget,
 		SourceID:      cf.sourceID(),
 		Passphrase:    pass,
 	})

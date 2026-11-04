@@ -25,6 +25,12 @@ type Connector interface {
     Engine() Engine
     Capabilities() Capabilities
 
+    // Target 是这个连接的目标标识：关系库是 catalog，SQLite 是文件路径。
+    // 用于「确认你连的是哪个库」——恢复覆盖前要求人把目标名写出来，
+    // 由连接器自报才是真的（调用方复述的只是它以为的目标）。
+    // 不暴露 ConnectConfig：那里面带着口令。见 ADR-0015。
+    Target() string
+
     // 生命周期。Open 只建立池与隧道，不保证可用；可用性由 Health 判断。
     Open(ctx context.Context, cfg ConnectConfig) error
     Close() error

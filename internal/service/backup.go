@@ -462,15 +462,28 @@ func (e *Executor) backupPlan(ctx context.Context, req BackupRequest) ([]string,
 
 // RestoreRequest 是一次恢复请求。
 type RestoreRequest struct {
-	// AllowExisting 允许覆盖目标库里已存在的同名对象。默认 false：
-	// 「恢复到已有对象的库」必须由人显式同意（docs/08 §3.1 硬性约束）。
-	AllowExisting bool
+	// ConfirmTarget 是要覆盖时必填的「目标标识」：必须与连接器自报的
+	// Target() 一致（关系库是库名，SQLite 是文件路径）。
+	//
+	// 为什么不用布尔开关：布尔开关挡得住手滑，挡不住「看错目标库」——它不需要
+	// 人回忆任何东西。要求把目标名写出来，选错库的人会发现自己写的与实际指向
+	// 的不是同一个（见 ADR-0015）。
+	ConfirmTarget string
 	// SourceID 是目标库的身份串。与容器头一致时拒绝——「禁止恢复到源库」
 	// 是 docs/08 §3.1 的第 2 条硬性约束。
 	SourceID string
 	// Passphrase 是加密容器的口令；容器加密却没给会返回
 	// ErrBackupNeedPassphrase，口令不对返回 ErrBackupBadPassphrase。
 	Passphrase string
+}
+
+// restoreTargetLabel 给错误信息用的目标名；连接器报不出名字时说明白，
+// 而不是留一个空白引号让人猜。
+func restoreTargetLabel(target string) string {
+	if target == "" {
+		return "（这条连接没有报告目标标识）"
+	}
+	return target
 }
 
 // RestoreObject 是报告里的一个对象。
@@ -487,9 +500,12 @@ type RestoreObject struct {
 
 // RestoreReport 是恢复后的演练报告（docs/08 §3.3 的最小版本）。
 type RestoreReport struct {
-	Objects  []RestoreObject `json:"objects"`
-	Rows     int64           `json:"rows"`
-	Duration time.Duration   `json:"duration_ms"`
+	Objects []RestoreObject `json:"objects"`
+	// Replaced 是覆盖模式下被先删掉、再按备份重建的对象名。非空意味着
+	// 目标库里这些对象原来的数据已经没了——报告必须把它说出来。
+	Replaced []string      `json:"replaced,omitempty"`
+	Rows     int64         `json:"rows"`
+	Duration time.Duration `json:"duration_ms"`
 	// Mismatches 是「恢复后与备份时的计数对不上」的清单。空表示计数一致；
 	// 非空不代表恢复失败（数据已经写进去了），但必须让人看见。
 	Mismatches []string `json:"mismatches,omitempty"`
@@ -505,7 +521,7 @@ var ErrRestoreTarget = errors.New("目标库不满足恢复前提")
 // v1 的三条硬约束（都可以在错误里读到原因，不静默降级）：
 //  1. **同引擎**：跨引擎要类型映射与冲突判定，v1 不做；
 //  2. **目标非空默认拒绝**：容器里任一对象名已在目标库存在，就整批不执行，
-//     除非显式 AllowExisting；
+//     除非调用方把目标名写进 ConfirmTarget 且与连接器自报的 Target() 一致；
 //  3. **单事务**：引擎支持 DDL 事务时全程一个事务，任何一段失败整体回滚。
 //
 // 已知缺口：容器头还没有记录源库身份，所以「禁止恢复到源库同名库」这条目前
@@ -534,15 +550,32 @@ func (e *Executor) Restore(ctx context.Context, r io.Reader, req RestoreRequest)
 	for _, o := range existing {
 		present[o.Name] = true
 	}
+	kindOf := map[string]model.ObjectKind{}
+	for _, o := range existing {
+		kindOf[o.Name] = o.Kind
+	}
+	schemaByName := map[string]string{}
+	for _, o := range existing {
+		schemaByName[o.Name] = o.Schema
+	}
 	var clash []string
 	for _, o := range header.Objects {
 		if present[o.Name] {
 			clash = append(clash, o.Name)
 		}
 	}
-	if len(clash) > 0 && !req.AllowExisting {
-		return nil, fmt.Errorf("%w：目标库里已有同名对象 %s；确认要覆盖请显式允许",
-			ErrRestoreTarget, strings.Join(clash, "、"))
+	if len(clash) > 0 {
+		target := strings.TrimSpace(e.conn.Target())
+		confirmed := strings.TrimSpace(req.ConfirmTarget)
+		switch {
+		case confirmed == "":
+			return nil, fmt.Errorf("%w：目标 %s 已有同名对象 %s；确认要覆盖，请把目标名原样写出来（ConfirmTarget）",
+				ErrRestoreTarget, restoreTargetLabel(target), strings.Join(clash, "、"))
+		case !strings.EqualFold(confirmed, target):
+			// 不用 %q：它会转义 Windows 路径里的反斜杠，人读起来像乱码。
+			return nil, fmt.Errorf("%w：你写的目标名是「%s」，而这条连接实际指向「%s」 —— 先确认有没有连错库",
+				ErrRestoreTarget, confirmed, restoreTargetLabel(target))
+		}
 	}
 
 	sess, err := e.conn.Acquire(ctx)
@@ -552,6 +585,14 @@ func (e *Executor) Restore(ctx context.Context, r io.Reader, req RestoreRequest)
 	defer func() { _ = sess.Close() }()
 
 	inTx := e.conn.Capabilities().DDLTransactional
+	// 覆盖模式要先把冲突对象删掉，而「删」是不可逆的破坏：只有在 DDL 能整体
+	// 回滚的引擎上才做。MySQL 的 DDL 隐式提交，中途失败会留下「旧的被删了、
+	// 新的没建起来」的库——那种事不该由一个开关授权。
+	if len(clash) > 0 && !inTx {
+		return nil, fmt.Errorf("%w：目标 %s 已有同名对象，而 %s 的 DDL 不能回滚，"+
+			"覆盖会变成不可撤销的破坏；v1 不支持，请先清空目标库",
+			ErrRestoreTarget, restoreTargetLabel(strings.TrimSpace(e.conn.Target())), e.conn.Engine())
+	}
 	if inTx {
 		if err := sess.Begin(ctx); err != nil {
 			return nil, err
@@ -560,6 +601,28 @@ func (e *Executor) Restore(ctx context.Context, r io.Reader, req RestoreRequest)
 	rollback := func() {
 		if inTx {
 			_ = sess.Rollback(context.Background())
+		}
+	}
+
+	// 覆盖：先删视图（它们依赖表），再删表。都在同一个事务里，失败整体回滚。
+	var replaced []string
+	if len(clash) > 0 {
+		for _, pass := range []model.ObjectKind{model.KindView, model.KindTable} {
+			for _, name := range clash {
+				if kindOf[name] != pass {
+					continue
+				}
+				quoted := e.dialect.QuoteQualified(schemaByName[name], name)
+				text := "DROP TABLE " + quoted
+				if pass == model.KindView {
+					text = e.dialect.DropViewSQL(quoted)
+				}
+				if _, err := sess.Execute(ctx, text, nil); err != nil {
+					rollback()
+					return nil, fmt.Errorf("覆盖前删除 %s 失败：%w", name, err)
+				}
+				replaced = append(replaced, name)
+			}
 		}
 	}
 
@@ -590,7 +653,7 @@ func (e *Executor) Restore(ctx context.Context, r io.Reader, req RestoreRequest)
 		}
 	}
 
-	rep := &RestoreReport{}
+	rep := &RestoreReport{Replaced: replaced}
 	for _, o := range header.Objects {
 		var n int64
 		cur, err := sess.Query(ctx, "SELECT COUNT(*) FROM "+e.dialect.QuoteIdent(o.Name), nil,

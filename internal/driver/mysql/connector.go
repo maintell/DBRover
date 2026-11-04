@@ -39,6 +39,9 @@ func New() *Connector { return &Connector{} }
 // Engine 返回引擎类型。
 func (c *Connector) Engine() model.Engine { return model.EngineMySQL }
 
+// Target 见接口注释：MySQL 的 catalog 就是库名。
+func (c *Connector) Target() string { return c.config().Catalog }
+
 // Capabilities 声明 MySQL 的能力。
 func (c *Connector) Capabilities() model.Capabilities {
 	return model.Capabilities{

@@ -192,6 +192,14 @@ type Connector interface {
 	Engine() model.Engine
 	Capabilities() model.Capabilities
 
+	// Target 是这个连接的**目标标识**，供「确认你连的是哪个库」这类场景使用：
+	// 关系库返回 catalog（MySQL / PostgreSQL），SQLite 返回数据库文件路径。
+	//
+	// 为什么由连接器自报，而不是让调用方复述：恢复覆盖、跨库写入这类危险动作
+	// 要的是「目标自报」，调用方复述的只是它**以为**的目标——那正好挡不住
+	// 「看错库」。这里刻意不暴露 ConnectConfig：那个结构里带着口令。
+	Target() string
+
 	Open(ctx context.Context, cfg ConnectConfig) error
 	Close() error
 	Health(ctx context.Context) (*HealthInfo, error)

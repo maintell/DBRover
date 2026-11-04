@@ -34,6 +34,9 @@ func New() *Connector { return &Connector{} }
 // Engine 返回引擎类型。
 func (c *Connector) Engine() model.Engine { return model.EngineSQLite }
 
+// Target 见接口注释：SQLite 没有库名，文件路径就是它的身份。
+func (c *Connector) Target() string { return c.path }
+
 // Capabilities 声明 SQLite 的能力。
 //
 // 铁律：只有「实现 + 有对外入口 + 有测试」的能力才能标 true。
