@@ -37,6 +37,8 @@ const API = {
   health: '/api/v1/connections/:id/health',
   tables: '/api/v1/connections/:id/tables',
   search: '/api/v1/connections/:id/search',
+  sessions: '/api/v1/connections/:id/monitor/sessions',
+  killSession: '/api/v1/connections/:id/monitor/sessions/:sid/kill',
   rows: '/api/v1/connections/:id/tables/:name/rows',
   schema: '/api/v1/connections/:id/tables/:name/schema',
   schemaPlan: '/api/v1/connections/:id/schema/plan',
@@ -342,6 +344,8 @@ async function loadIdentity(id) {
     if ($('btn-new-type')) $('btn-new-type').hidden = !caps.user_types;
     // 例程同理（SQLite 没有存储过程）。
     if ($('btn-new-routine')) $('btn-new-routine').hidden = !caps.add_routine;
+    // 会话列表只有网络型引擎有（SQLite 是单写者、没有会话概念）。
+    if ($('btn-sessions')) $('btn-sessions').hidden = !caps.session_mgmt;
     const ident = h.identity || {};
     const host = ident.hostname || '?';
     const fp = (ident.fingerprint || '').slice(0, 8);
@@ -481,6 +485,101 @@ async function loadTables() {
   } catch (e) {
     showNotice('加载表清单失败：' + e.message, 'error');
   }
+}
+
+// fmtDuration 把毫秒变成人看的一小段。会话面板里时长主要用来「一眼看出哪个跑太久」。
+function fmtDuration(ms) {
+  const n = Number(ms) || 0;
+  if (n < 1000) return n + 'ms';
+  if (n < 60000) return (n / 1000).toFixed(1) + 's';
+  return Math.floor(n / 60000) + 'm' + Math.round((n % 60000) / 1000) + 's';
+}
+
+// showSessions 把会话列表画到结果区（FR-MON-02）。
+//
+// 用结果区而不是弹窗：列表可能很长，而且终止之后要能立刻刷新看到结果。
+async function showSessions() {
+  if (!state.current) return;
+  setStatus('读会话…');
+  let out;
+  try {
+    out = await api(path(API.sessions, { id: state.current.id }));
+  } catch (e) {
+    showNotice('读会话失败：' + e.message + (e.hint ? '（' + e.hint + '）' : ''), 'error');
+    setStatus('失败');
+    return;
+  }
+  const items = (out && out.items) || [];
+  const wrap = document.createElement('div');
+  const head = document.createElement('div');
+  head.className = 'head';
+  head.textContent = '会话（' + items.length + '）';
+  wrap.appendChild(head);
+  if (!items.length) {
+    const d = document.createElement('div');
+    d.className = 'notice';
+    d.textContent = '当前没有其它会话。';
+    wrap.appendChild(d);
+    $('results').replaceChildren(wrap);
+    setStatus('会话 · 0');
+    return;
+  }
+  const t = document.createElement('table');
+  const thead = document.createElement('thead');
+  const htr = document.createElement('tr');
+  for (const label of ['用户', '来源', '库', '状态', '时长', '语句', '']) {
+    const th = document.createElement('th');
+    th.textContent = label;
+    htr.appendChild(th);
+  }
+  thead.appendChild(htr);
+  t.appendChild(thead);
+  const tbody = document.createElement('tbody');
+  const caps = state.current.capabilities || {};
+  const canKill = !!caps.kill_session && state.current.access_mode !== 'read-only';
+  for (const it of items) {
+    const tr = document.createElement('tr');
+    const add = (v) => {
+      const td = document.createElement('td');
+      td.textContent = v === null || v === undefined ? '' : String(v);
+      tr.appendChild(td);
+    };
+    add(it.user);
+    add(it.host);
+    add(it.database);
+    add(it.state);
+    add(fmtDuration(it.duration_ms));
+    // 语句可能极长：截断显示，完整内容仍在接口里。
+    add((it.query || '').slice(0, 160));
+    const td = document.createElement('td');
+    if (canKill) {
+      const b = document.createElement('button');
+      b.textContent = '终止';
+      b.onclick = () => killSession(it.id);
+      td.appendChild(b);
+    }
+    tr.appendChild(td);
+    tbody.appendChild(tr);
+  }
+  t.appendChild(tbody);
+  wrap.appendChild(t);
+  $('results').replaceChildren(wrap);
+  setStatus('会话 · ' + items.length);
+}
+
+// killSession 终止一条会话。这是不可逆的写操作，必须先讲清代价再动手。
+async function killSession(id) {
+  const ok = await dialog('终止会话',
+    '<p>结束会话 <b>#' + id + '</b> 后，它正在跑的语句会被立刻掐断，且不可撤销。</p>' +
+    '<p>如果那是别人的会话，先想一下要不要先问一声。</p>', '终止');
+  if (!ok) return;
+  try {
+    await api(path(API.killSession, { id: state.current.id, sid: id }), { method: 'POST' });
+  } catch (e) {
+    showNotice('终止失败：' + e.message + (e.hint ? '（' + e.hint + '）' : ''), 'error');
+    return;
+  }
+  await showSessions();
 }
 
 // renderObjects 渲染对象清单。对象树与搜索结果共用一份——两套渲染必然长歪，
@@ -3002,6 +3101,7 @@ $('btn-new-view').onclick = () => showCreateView();
 $('btn-new-seq').onclick = () => showCreateSequence();
 $('btn-new-type').onclick = () => showCreateType();
 $('btn-new-routine').onclick = () => showCreateRoutine();
+$('btn-sessions').onclick = () => showSessions();
 // 对象搜索：输入停 250ms 再查，避免每敲一个字符打一次库。
 let objSearchTimer = null;
 if ($('obj-search')) {

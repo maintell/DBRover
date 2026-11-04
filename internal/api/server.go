@@ -173,6 +173,8 @@ func (s *Server) routes() []route {
 		{http.MethodGet, "/api/v1/connections/{id}/health", false, s.handleConnHealth},
 		{http.MethodGet, "/api/v1/connections/{id}/tables", false, s.handleTables},
 		{http.MethodGet, "/api/v1/connections/{id}/search", false, s.handleSearch},
+		{http.MethodGet, "/api/v1/connections/{id}/monitor/sessions", false, s.handleSessions},
+		{http.MethodPost, "/api/v1/connections/{id}/monitor/sessions/{sid}/kill", false, s.handleKillSession},
 		{http.MethodGet, "/api/v1/connections/{id}/tables/{name}/rows", false, s.handleTableRows},
 		{http.MethodPost, "/api/v1/connections/{id}/exec", false, s.handleExec},
 		{http.MethodPost, "/api/v1/connections/{id}/cancel", false, s.handleCancel},
@@ -578,6 +580,81 @@ var searchKinds = map[model.ObjectKind]bool{
 	model.KindTrigger:  true,
 	model.KindType:     true,
 	model.KindRoutine:  true,
+}
+
+// monitorProvider 取监控能力；不支持时把「为什么」写清楚（能力位是唯一判据）。
+func (s *Server) monitorProvider(w http.ResponseWriter, r *http.Request) (driver.MonitorProvider, bool) {
+	e, ok := s.lookup(r)
+	if !ok {
+		writeError(w, http.StatusNotFound, "CONNECTION_NOT_FOUND", "connection", "连接不存在", "", false)
+		return nil, false
+	}
+	drv, isRel := e.relational()
+	if !isRel {
+		writeError(w, http.StatusBadRequest, "CAPABILITY_UNSUPPORTED", "internal",
+			"这是一个 key-value 连接，没有会话概念", "", false)
+		return nil, false
+	}
+	if !drv.Capabilities().SessionMgmt {
+		writeError(w, http.StatusBadRequest, "CAPABILITY_UNSUPPORTED", "internal",
+			fmt.Sprintf("%s 没有会话列表（当前只做了 PostgreSQL 与 MySQL）", drv.Engine()), "", false)
+		return nil, false
+	}
+	mp, ok := drv.(driver.MonitorProvider)
+	if !ok {
+		// 能力位说支持、类型又断言不到：这是实现缺陷，不是用户的问题。
+		writeError(w, http.StatusInternalServerError, "CAPABILITY_MISMATCH", "internal",
+			"能力位声明了会话管理，但驱动没有实现 MonitorProvider", "", false)
+		return nil, false
+	}
+	return mp, true
+}
+
+// handleSessions 列出会话（FR-MON-02）。
+func (s *Server) handleSessions(w http.ResponseWriter, r *http.Request) {
+	mp, ok := s.monitorProvider(w, r)
+	if !ok {
+		return
+	}
+	items, err := mp.Sessions(r.Context())
+	if err != nil {
+		writeError(w, http.StatusBadGateway, "DB_METADATA_FAILED", "connection", err.Error(), "", true)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"items": items})
+}
+
+// handleKillSession 结束一条会话。
+//
+// 这是**写操作且不可逆**（对方正在跑的语句会被掐断），所以要求连接可写；
+// 只读连接上不摆这个入口，也不要让它偷偷生效。
+func (s *Server) handleKillSession(w http.ResponseWriter, r *http.Request) {
+	mp, ok := s.monitorProvider(w, r)
+	if !ok {
+		return
+	}
+	e, _ := s.lookup(r)
+	if !e.conn.AccessMode.AllowsWrite() {
+		writeError(w, http.StatusForbidden, "READ_ONLY_CONNECTION", "policy",
+			"只读连接不能终止会话", "改用可写连接，或在数据库侧处理", false)
+		return
+	}
+	if !e.drv.Capabilities().KillSession {
+		writeError(w, http.StatusBadRequest, "CAPABILITY_UNSUPPORTED", "internal",
+			"这个引擎不支持终止会话", "", false)
+		return
+	}
+	sid := r.PathValue("sid")
+	if !driver.ValidSessionID(sid) {
+		writeError(w, http.StatusBadRequest, "REQUEST_INVALID", "internal",
+			"会话 id 必须是数字", "", false)
+		return
+	}
+	if err := mp.KillSession(r.Context(), sid); err != nil {
+		writeError(w, http.StatusBadGateway, "DB_EXEC_FAILED", "connection", err.Error(), "", false)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"killed": sid})
 }
 
 // connectFailure 把驱动的连接失败类别映射成错误码与一句能照着做的建议（FR-CON-03）。

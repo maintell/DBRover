@@ -201,6 +201,31 @@
         }
       }
     },
+    "/api/v1/connections/{id}/monitor/sessions": {
+      "get": {
+        "summary": "会话列表（FR-MON-02）",
+        "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "string" } }],
+        "responses": {
+          "200": { "description": "ok" },
+          "400": { "description": "引擎不支持会话列表" },
+          "404": { "description": "连接不存在" }
+        }
+      }
+    },
+    "/api/v1/connections/{id}/monitor/sessions/{sid}/kill": {
+      "post": {
+        "summary": "终止会话（写操作，只读连接拒绝）",
+        "parameters": [
+          { "name": "id", "in": "path", "required": true, "schema": { "type": "string" } },
+          { "name": "sid", "in": "path", "required": true, "schema": { "type": "string" } }
+        ],
+        "responses": {
+          "200": { "description": "ok" },
+          "400": { "description": "sid 非法或引擎不支持终止" },
+          "403": { "description": "只读连接" }
+        }
+      }
+    },
     "/api/v1/connections/{id}/tables/{name}/rows": {
       "get": {
         "summary": "表数据浏览（键集分页）",

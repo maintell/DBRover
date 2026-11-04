@@ -64,6 +64,56 @@ func classifyConnectError(err error) driver.ConnectErrorKind {
 	return driver.ConnectOther
 }
 
+// Sessions 列出当前会话（FR-MON-02）。
+//
+// information_schema.processlist 只列出「有权限看到」的会话：普通用户只能看到
+// 自己的，PROCESS 权限才能看到全部。这是引擎的权限模型，不是我们的选择——
+// 列表短不代表没有别的会话。
+func (c *Connector) Sessions(ctx context.Context) ([]driver.SessionInfo, error) {
+	h, err := c.handle()
+	if err != nil {
+		return nil, err
+	}
+	rows, err := h.QueryContext(ctx, `
+		SELECT CAST(id AS CHAR), COALESCE(user, ''), COALESCE(host, ''), COALESCE(db, ''),
+		       COALESCE(command, ''), COALESCE(info, ''), time * 1000,
+		       COALESCE(command = 'Sleep', false)
+		  FROM information_schema.processlist
+		 WHERE id <> CONNECTION_ID()
+		 ORDER BY (command = 'Sleep'), id`)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	var out []driver.SessionInfo
+	for rows.Next() {
+		var s driver.SessionInfo
+		if err := rows.Scan(&s.ID, &s.User, &s.Host, &s.Database, &s.State, &s.Query, &s.DurationMS, &s.Idle); err != nil {
+			return nil, err
+		}
+		out = append(out, s)
+	}
+	return out, rows.Err()
+}
+
+// KillSession 结束一条会话。
+//
+// KILL 只接受字面量，不能参数化，所以 id 必须先过形态校验（driver.ValidSessionID）。
+// 校验放在句柄之前：形态不对时连数据库都不用碰。
+func (c *Connector) KillSession(ctx context.Context, id string) error {
+	if !driver.ValidSessionID(id) {
+		return fmt.Errorf("mysql: 会话 id 必须是数字：%q", id)
+	}
+	h, err := c.handle()
+	if err != nil {
+		return err
+	}
+	if _, err := h.ExecContext(ctx, "KILL "+id); err != nil {
+		return err
+	}
+	return nil
+}
+
 // Target 见接口注释：MySQL 的 catalog 就是库名。
 func (c *Connector) Target() string { return c.config().Catalog }
 
@@ -77,14 +127,15 @@ func (c *Connector) Capabilities() model.Capabilities {
 		// 例程（过程 / 函数）走 information_schema.ROUTINES，已接进 Objects。
 		Routines: true,
 		// 触发器走 information_schema.TRIGGERS 单独查（见 metadata.go triggerRefs）。
-		Triggers:         true,
-		Sequences:        false,
-		UserTypes:        false,
-		Indexes:          true,
-		Explain:          true, // EXPLAIN
-		SlowQueryStats:   false,
-		SessionMgmt:      false,
-		KillSession:      false,
+		Triggers:       true,
+		Sequences:      false,
+		UserTypes:      false,
+		Indexes:        true,
+		Explain:        true, // EXPLAIN
+		SlowQueryStats: false,
+		// 会话列表走 information_schema.processlist；终止走 KILL。
+		SessionMgmt:      true,
+		KillSession:      true,
 		LockGraph:        false,
 		Backup:           false,
 		BulkLoad:         false,

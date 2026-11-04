@@ -4,6 +4,7 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/maintell/DBRover/internal/driver"
 	"github.com/maintell/DBRover/internal/model"
@@ -415,6 +416,83 @@ func testRoutineListing(t *testing.T, cfg Config) {
 		t.Fatalf("回放取到的定义失败: %v\n%s", err, ddl)
 	}
 	routineRef(t, c, name, true)
+}
+
+// testSessionsReported 验证会话列表与终止（FR-MON-02）。
+//
+// 做法是造一条「正在跑」的会话（在另一条物理连接上跑一条慢查询），再从会话列表
+// 里找到它、终止它，并断言那条查询真的报错。只断言「列表非空」在实现完全没写时
+// 也能过——列表里本来就有自己这条（虽然被排除了，但别的测试连接还在）。
+func testSessionsReported(t *testing.T, cfg Config) {
+	if cfg.SlowQuery == "" {
+		t.Skip("这个引擎没有会话概念（或没有提供慢查询钩子）")
+	}
+	ctx := context.Background()
+	c := open(t, cfg, false)
+	if !c.Capabilities().SessionMgmt {
+		t.Fatal("没声明 SessionMgmt 却提供了慢查询钩子：两处必须一致")
+	}
+	mp, ok := c.(driver.MonitorProvider)
+	if !ok {
+		t.Fatal("声明了 SessionMgmt 却没有实现 MonitorProvider：能力位与实现必须一致")
+	}
+
+	// 占一条物理连接跑慢查询；它会在引擎侧表现为另一条会话。
+	s, err := c.Acquire(ctx)
+	if err != nil {
+		t.Fatalf("Acquire: %v", err)
+	}
+	done := make(chan error, 1)
+	go func() {
+		_, qerr := s.Execute(context.Background(), cfg.SlowQuery, nil)
+		done <- qerr
+	}()
+
+	var found driver.SessionInfo
+	deadline := time.Now().Add(8 * time.Second)
+	for time.Now().Before(deadline) {
+		sessions, serr := mp.Sessions(ctx)
+		if serr != nil {
+			_ = s.Close()
+			t.Fatalf("Sessions: %v", serr)
+		}
+		for _, it := range sessions {
+			if !it.Idle && strings.Contains(strings.ToUpper(it.Query), strings.ToUpper(cfg.SlowQuery)) {
+				found = it
+			}
+		}
+		if found.ID != "" {
+			break
+		}
+		time.Sleep(150 * time.Millisecond)
+	}
+	if found.ID == "" {
+		_ = s.Close()
+		t.Fatal("没在会话列表里看到正在跑的那条慢查询")
+	}
+
+	if !c.Capabilities().KillSession {
+		_ = s.Close()
+		t.Skip("这个引擎声明了不能终止会话")
+	}
+	if err := mp.KillSession(ctx, found.ID); err != nil {
+		_ = s.Close()
+		t.Fatalf("KillSession(%s): %v", found.ID, err)
+	}
+	select {
+	case qerr := <-done:
+		if qerr == nil {
+			t.Error("会话被终止了，那条查询却正常返回——终止没有生效")
+		}
+	case <-time.After(8 * time.Second):
+		t.Error("终止后那条查询仍在跑")
+	}
+	_ = s.Close()
+
+	// 形态校验：KILL 只能拼语句，非法 id 必须在碰数据库之前就被拒。
+	if err := mp.KillSession(ctx, "1; DROP TABLE x"); err == nil {
+		t.Error("非数字的会话 id 应当被拒")
+	}
 }
 
 // routineRef 在例程列表里找（或确认找不到）某个名字。

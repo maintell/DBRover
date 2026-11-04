@@ -147,6 +147,7 @@ func factory(t *testing.T, tgt testTarget) drivertest.Config {
 			_, err := s.Execute(ctx, "DROP PROCEDURE IF EXISTS "+name, nil)
 			return err
 		},
+		SlowQuery: "SELECT SLEEP(3)",
 		Comment: func(ctx context.Context, s driver.Session, table, text string) error {
 			_, err := s.Execute(ctx, "ALTER TABLE "+table+" COMMENT = '"+text+"'", nil)
 			return err

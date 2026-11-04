@@ -65,6 +65,65 @@ func classifyConnectError(err error) driver.ConnectErrorKind {
 	return driver.ConnectOther
 }
 
+// Sessions 列出当前会话（FR-MON-02）。
+//
+// pg_stat_activity 是**集群级**的：能看到所有库的会话，这正合运维的用法——
+// 出问题时通常不是只看自己这个库。排除自己这条，否则列表第一行永远是自己。
+func (c *Connector) Sessions(ctx context.Context) ([]driver.SessionInfo, error) {
+	h, err := c.handle()
+	if err != nil {
+		return nil, err
+	}
+	rows, err := h.QueryContext(ctx, `
+		SELECT pid::text,
+		       COALESCE(usename, ''),
+		       COALESCE(host(client_addr), ''),
+		       COALESCE(datname, ''),
+		       COALESCE(state, ''),
+		       COALESCE(query, ''),
+		       COALESCE(EXTRACT(EPOCH FROM (now() - COALESCE(query_start, state_change, backend_start))) * 1000, 0)::bigint,
+		       COALESCE(state = 'idle', false)
+		  FROM pg_stat_activity
+		 WHERE pid <> pg_backend_pid()
+		   AND backend_type = 'client backend'
+		 ORDER BY (state = 'idle'), pid`)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	var out []driver.SessionInfo
+	for rows.Next() {
+		var s driver.SessionInfo
+		if err := rows.Scan(&s.ID, &s.User, &s.Host, &s.Database, &s.State, &s.Query, &s.DurationMS, &s.Idle); err != nil {
+			return nil, err
+		}
+		out = append(out, s)
+	}
+	return out, rows.Err()
+}
+
+// KillSession 结束一条会话。
+//
+// id 必须自己校验：数字之外一律拒绝。pg_terminate_backend 接受参数，但 id 是
+// 调用方给的字符串，先卡形态比「让 PG 报个类型错」更早也更清楚。
+func (c *Connector) KillSession(ctx context.Context, id string) error {
+	if !driver.ValidSessionID(id) {
+		return fmt.Errorf("postgres: 会话 id 必须是数字：%q", id)
+	}
+	h, err := c.handle()
+	if err != nil {
+		return err
+	}
+	var ok bool
+	if err := h.QueryRowContext(ctx, "SELECT pg_terminate_backend($1::int)", id).Scan(&ok); err != nil {
+		return err
+	}
+	if !ok {
+		return fmt.Errorf("postgres: 结束会话 %s 未成功（可能已经断开）", id)
+	}
+	return nil
+}
+
 // Target 见接口注释：PostgreSQL 的 catalog 就是库名。
 func (c *Connector) Target() string { return c.config().Catalog }
 
@@ -92,11 +151,12 @@ func (c *Connector) Capabilities() model.Capabilities {
 		AddCheck: true,
 		// indisvalid 查得到：无效索引（失败的 CREATE INDEX CONCURRENTLY 会留下）
 		// 照样出现在清单里，只看「有几个索引」发现不了。
-		IndexValidity:    true,
-		Explain:          true, // EXPLAIN
-		SlowQueryStats:   false,
-		SessionMgmt:      false,
-		KillSession:      false,
+		IndexValidity:  true,
+		Explain:        true, // EXPLAIN
+		SlowQueryStats: false,
+		// 会话列表走 pg_stat_activity；终止走 pg_terminate_backend。
+		SessionMgmt:      true,
+		KillSession:      true,
 		LockGraph:        false,
 		Backup:           false,
 		BulkLoad:         false,

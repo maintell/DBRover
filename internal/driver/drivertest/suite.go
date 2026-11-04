@@ -60,6 +60,10 @@ type Config struct {
 
 	// DropProcedure 删除例程，供 RoutineListing 做「删掉再用取到的定义重建」的验证。
 	DropProcedure func(ctx context.Context, s driver.Session, name string) error
+
+	// SlowQuery 是一条会跑上几秒的查询（"SELECT pg_sleep(3)" / "SELECT SLEEP(3)"），
+	// 供 SessionsReported 造一条「正在跑」的会话。空表示这个引擎没有会话概念。
+	SlowQuery string
 }
 
 func (c Config) binaryType() string {
@@ -96,6 +100,8 @@ func Run(t *testing.T, cfg Config) {
 	t.Run("TypeListing", func(t *testing.T) { testTypeListing(t, cfg) })
 	// 例程：不但要列得出来、取得到定义，定义还得能回放。
 	t.Run("RoutineListing", func(t *testing.T) { testRoutineListing(t, cfg) })
+	// 会话列表与终止：声明了 SessionMgmt 就必须真列出、真能终止。
+	t.Run("SessionsReported", func(t *testing.T) { testSessionsReported(t, cfg) })
 	// 检索契约写的是「名称 + 注释」，注释这一半必须有真库验证。
 	t.Run("SearchMatchesComments", func(t *testing.T) { testSearchComments(t, cfg) })
 	// 索引有效性：声明了就必须真给（PG 的 indisvalid）。
