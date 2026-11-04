@@ -181,6 +181,7 @@ func (s *Server) routes() []route {
 		{http.MethodPost, "/api/v1/connections/{id}/bulk/plan", false, s.handleBulkPlan},
 		{http.MethodPost, "/api/v1/compare", false, s.handleCompare},
 		{http.MethodPost, "/api/v1/migrate/plan", false, s.handleMigratePlan},
+		{http.MethodPost, "/api/v1/migrate/change", false, s.handleMigrateChange},
 		{http.MethodPost, "/api/v1/connections/{id}/fk/precheck", false, s.handleFKPrecheck},
 		{http.MethodPost, "/api/v1/changes/{pid}/apply", false, s.handleChangeApply},
 		{http.MethodPost, "/api/v1/connections/{id}/query", false, s.handleQuery},
@@ -1955,4 +1956,71 @@ func (s *Server) handleMigratePlan(w http.ResponseWriter, r *http.Request) {
 		body["message"] = err.Error()
 	}
 	writeJSON(w, http.StatusOK, body)
+}
+
+// handleMigrateChange 把迁移预检出来的建表语句做成一张结构预案（不执行）。
+//
+// **刻意不接受客户端传来的 DDL**：语句由服务端按 decisions 重新计算。客户端
+// 只能说「这一列用哪种目标类型」，不能说「执行这句话」——否则它就绕过了
+// 类型白名单与预检本身。
+//
+// 生成的预案走已有的 /changes/{id}/apply：审批、审计、竞态保护都复用，
+// 不为迁移另开一条执行路径。
+func (s *Server) handleMigrateChange(w http.ResponseWriter, r *http.Request) {
+	var req migratePlanRequest
+	if err := decode(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, "REQUEST_INVALID", "internal", err.Error(), "", false)
+		return
+	}
+	if req.Source == "" || req.Target == "" || req.Table == "" {
+		writeError(w, http.StatusBadRequest, "REQUEST_INVALID", "internal",
+			"需要 source、target、table", "", false)
+		return
+	}
+
+	s.mu.RLock()
+	src, sok := s.conns[req.Source]
+	dst, tok := s.conns[req.Target]
+	s.mu.RUnlock()
+	if !sok || !tok {
+		writeError(w, http.StatusNotFound, "CONNECTION_NOT_FOUND", "connection",
+			"源或目标连接不存在", "", false)
+		return
+	}
+	if src.exec == nil || dst.exec == nil {
+		writeError(w, http.StatusBadRequest, "CAPABILITY_UNSUPPORTED", "internal",
+			"迁移只支持关系型连接", "", false)
+		return
+	}
+
+	_, ddlText, err := service.PlanMigrationBetween(r.Context(), src.exec, dst.exec, req.Table, req.TargetTable, req.Decisions)
+	if errors.Is(err, service.ErrMigrateNeedsDecision) {
+		writeError(w, http.StatusBadRequest, "MIGRATE_NEEDS_DECISION", "internal",
+			err.Error(), "逐列给出 decisions（列名 → 目标类型）后重试", false)
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusBadGateway, "MIGRATE_PLAN_FAILED", "internal", err.Error(), "", true)
+		return
+	}
+
+	name := req.TargetTable
+	if name == "" {
+		name = req.Table
+	}
+	plan, err := dst.exec.BuildDDLPlan(r.Context(), service.DDLRequest{
+		Table:  model.ObjectRef{Kind: model.KindTable, Name: name},
+		Action: service.DDLRaw,
+		RawSQL: ddlText,
+	})
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "MIGRATE_CHANGE_FAILED", "internal", err.Error(), "", false)
+		return
+	}
+
+	s.mu.Lock()
+	s.purgeExpiredPlansLocked()
+	s.plans[plan.ID] = &storedPlan{plan: plan, exec: dst.exec, exp: plan.ExpiresAt}
+	s.mu.Unlock()
+	writeJSON(w, http.StatusCreated, plan)
 }

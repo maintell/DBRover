@@ -104,9 +104,15 @@ func verdictFor(sc model.Column, dc *model.Column, srcEngine, dstEngine model.En
 		}
 	}
 
-	// 2) 同引擎同类型：直接放行（不猜、不多嘴）。
-	if srcEngine == dstEngine && dc != nil && strings.EqualFold(strings.TrimSpace(sc.Type.Raw), strings.TrimSpace(dc.Type.Raw)) {
+	// 2) 同引擎：源类型在目标端本来就合法，直接放行。
+	//
+	// dc == nil 表示目标表还不存在（要新建）——同引擎时源类型拿来建表是对的，
+	// 不该因为「没有目标结构可比」就要求人逐列决定。
+	if srcEngine == dstEngine && (dc == nil || strings.EqualFold(strings.TrimSpace(sc.Type.Raw), strings.TrimSpace(dc.Type.Raw))) {
 		v.Status = MigrateOK
+		if v.Target == "" {
+			v.Target = strings.TrimSpace(sc.Type.Raw)
+		}
 		return v
 	}
 

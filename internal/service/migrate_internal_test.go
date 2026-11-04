@@ -40,6 +40,14 @@ func TestPlanMigration(t *testing.T) {
 			want: MigrateOK,
 		},
 		{
+			name:   "同引擎、目标表还不存在",
+			src:    col("a", "TEXT", model.TypeString, 0, 0, 0),
+			dst:    nil,
+			srcEng: model.EngineSQLite,
+			dstEng: model.EngineSQLite,
+			want:   MigrateOK,
+		},
+		{
 			name:   "长度收窄阻断",
 			src:    col("a", "varchar(64)", model.TypeString, 64, 0, 0),
 			dst:    ptr(col("a", "varchar(32)", model.TypeString, 32, 0, 0)),

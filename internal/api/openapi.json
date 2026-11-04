@@ -800,6 +800,36 @@
         }
       }
     },
+    "/api/v1/migrate/change": {
+      "post": {
+        "summary": "把迁移预检的建表语句做成结构预案（不执行）",
+        "description": "请求体与 /migrate/plan 相同。**不接受客户端传来的 DDL**：语句由服务端按 decisions 重新计算并过类型白名单。返回的预案走 /changes/{id}/apply 执行，审批、审计与竞态保护完全复用，不为迁移另开执行路径。",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["source", "target", "table"],
+                "properties": {
+                  "source": { "type": "string" },
+                  "target": { "type": "string" },
+                  "table": { "type": "string" },
+                  "target_table": { "type": "string" },
+                  "decisions": { "type": "object", "additionalProperties": { "type": "string" } }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": { "description": "结构预案（含 statements 与回滚）" },
+          "400": { "description": "缺参数；或仍有列需要人工决定（MIGRATE_NEEDS_DECISION）" },
+          "404": { "description": "连接不存在" },
+          "502": { "description": "读取结构失败（MIGRATE_PLAN_FAILED）" }
+        }
+      }
+    },
     "/api/v1/connections/{id}/fk/precheck": {
       "post": {
         "summary": "加外键前的孤儿数据预检（只读）",

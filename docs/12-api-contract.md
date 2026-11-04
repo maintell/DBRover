@@ -90,6 +90,7 @@ Content-Type: application/x-ndjson
 | `POST` | `/api/v1/connections/{id}/fk/precheck` | 加外键前的孤儿数据预检（只读） |
 | `POST` | `/api/v1/compare` | 两个连接的结构比对（只读） |
 | `POST` | `/api/v1/migrate/plan` | 迁移预检（只读）：逐列 `ok`/`review`/`blocked` + 目标端 DDL；`ready=false` 时 `plan` 仍返回，逐列要求人工决定类型 |
+| `POST` | `/api/v1/migrate/change` | 把预检的建表语句做成结构预案（不执行）；**不接受客户端 DDL**，语句由服务端重算；执行走 `/changes/{id}/apply` |
 | `POST` | `/api/v1/changes/{pid}/apply` | 执行上述任一预案；`?stream=1` 用 NDJSON 回报分批进度 |
 | `GET` | `/api/v1/audit` | 审计事件 |
 
