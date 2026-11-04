@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"strings"
 	"time"
 
@@ -55,6 +56,12 @@ type BackupHeader struct {
 type BackupRequest struct {
 	// Tables 为空表示导出当前库的全部表与视图。
 	Tables []string
+	// Resume 表示接着上次未完成的备份继续（只看 BackupToFile）。
+	Resume bool
+
+	// afterSection 是测试用的失败注入点：每写完一张表调用一次，返回错误即中断。
+	// 用它模拟「中途被 kill」，比真的杀进程稳定，且能精确控制断在第几张表。
+	afterSection func(table string) error
 }
 
 // Backup 把库（或指定表）写成一个 DBR 容器。
@@ -62,29 +69,9 @@ type BackupRequest struct {
 // 每张表的内容就是 Export 的 sql 格式脚本（建表 + INSERT），所以容器既可以被
 // inspect 打开看清单，也可以逐段取出直接回放。
 func (e *Executor) Backup(ctx context.Context, req BackupRequest, w io.Writer) (*BackupHeader, error) {
-	started := time.Now()
-	tables := req.Tables
-	if len(tables) == 0 {
-		objs, err := e.conn.Meta().Objects(ctx, "", "", model.KindTable, model.KindView)
-		if err != nil {
-			return nil, fmt.Errorf("列出对象: %w", err)
-		}
-		for _, o := range objs {
-			tables = append(tables, o.Name)
-		}
-	}
-	if len(tables) == 0 {
-		return nil, errors.New("备份：这个库里没有可导出的对象")
-	}
-
-	header := &BackupHeader{
-		FormatVersion: backupFormatVersion,
-		CreatedAt:     started.UTC().Format(time.RFC3339),
-		Engine:        string(e.conn.Engine()),
-		Catalog:       "",
-	}
-	for _, name := range tables {
-		header.Objects = append(header.Objects, BackupObject{Kind: string(model.KindTable), Name: name})
+	tables, header, err := e.backupPlan(ctx, req)
+	if err != nil {
+		return nil, err
 	}
 	hj, err := json.Marshal(header)
 	if err != nil {
@@ -176,4 +163,185 @@ func BackupSummary(h *BackupHeader) string {
 		fmt.Fprintf(&b, "  %s %s\n", o.Kind, o.Name)
 	}
 	return b.String()
+}
+
+// ErrBackupNoCheckpoint 表示要求续跑但找不到检查点。
+//
+// 单独一个错误是为了让 CLI 能给出「需整库重跑」的明确提示——静默从头开始，
+// 用户会以为自己续上了。
+var ErrBackupNoCheckpoint = errors.New("找不到备份检查点")
+
+// backupCheckpoint 是续跑检查点的一行。
+//
+// 粒度是「表」：每写完一张表记一条，续跑时截断到 End 再往下写。
+// 侧车格式用 JSON Lines，坏一行能定位，不需要整体解析成功。
+type backupCheckpoint struct {
+	Table string `json:"table"`
+	End   int64  `json:"end_offset"`
+}
+
+func backupProgressPath(path string) string { return path + ".progress" }
+
+func readBackupProgress(path string) ([]backupCheckpoint, error) {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	var out []backupCheckpoint
+	for _, line := range strings.Split(string(b), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		var cp backupCheckpoint
+		if err := json.Unmarshal([]byte(line), &cp); err != nil {
+			return nil, fmt.Errorf("检查点损坏（%s）：%w", path, err)
+		}
+		out = append(out, cp)
+	}
+	return out, nil
+}
+
+func appendBackupProgress(path string, cp backupCheckpoint) error {
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = f.Close() }()
+	b, err := json.Marshal(cp)
+	if err != nil {
+		return err
+	}
+	if _, err := f.Write(append(b, '\n')); err != nil {
+		return err
+	}
+	return f.Sync()
+}
+
+// BackupToFile 把备份写到文件，支持按表续跑（ADR-0009）。
+//
+// 续跑口径：每写完一张表追加一条检查点到 <path>.progress；Resume 时读它、
+// 把文件截断到最后一条记录的偏移、跳过已完成的表继续写。容器格式不变。
+//
+// 代价写在 ADR 里：单表失败要重导整表；侧车丢了只能整库重跑（会明确报错）。
+func (e *Executor) BackupToFile(ctx context.Context, req BackupRequest, path string) (*BackupHeader, error) {
+	tables, header, err := e.backupPlan(ctx, req)
+	if err != nil {
+		return nil, err
+	}
+
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = f.Close() }()
+
+	done := map[string]bool{}
+	var pos int64
+	if req.Resume {
+		cps, err := readBackupProgress(backupProgressPath(path))
+		if err != nil {
+			if os.IsNotExist(err) {
+				return nil, fmt.Errorf("%w：%s（没有进度文件，需整库重跑）", ErrBackupNoCheckpoint, path)
+			}
+			return nil, err
+		}
+		for _, cp := range cps {
+			done[cp.Table] = true
+			pos = cp.End
+		}
+		if pos == 0 {
+			return nil, fmt.Errorf("%w：%s（进度文件为空，需整库重跑）", ErrBackupNoCheckpoint, path)
+		}
+		if err := f.Truncate(pos); err != nil {
+			return nil, fmt.Errorf("截断到最后一条检查点: %w", err)
+		}
+		if _, err := f.Seek(pos, io.SeekStart); err != nil {
+			return nil, err
+		}
+	} else {
+		if err := f.Truncate(0); err != nil {
+			return nil, err
+		}
+		if _, err := f.Seek(0, io.SeekStart); err != nil {
+			return nil, err
+		}
+		_ = os.Remove(backupProgressPath(path))
+
+		hj, err := json.Marshal(header)
+		if err != nil {
+			return nil, err
+		}
+		if _, err := io.WriteString(f, backupMagic); err != nil {
+			return nil, err
+		}
+		if err := binary.Write(f, binary.LittleEndian, uint16(backupFormatVersion)); err != nil {
+			return nil, err
+		}
+		if err := binary.Write(f, binary.LittleEndian, uint16(0)); err != nil {
+			return nil, err
+		}
+		if err := binary.Write(f, binary.LittleEndian, uint32(len(hj))); err != nil {
+			return nil, err
+		}
+		if _, err := f.Write(hj); err != nil {
+			return nil, err
+		}
+	}
+
+	for _, name := range tables {
+		if done[name] {
+			continue
+		}
+		var sec bytes.Buffer
+		if _, err := e.Export(ctx, ExportRequest{Table: name, Format: ExportSQL}, &sec); err != nil {
+			return nil, fmt.Errorf("导出 %s: %w", name, err)
+		}
+		if err := binary.Write(f, binary.LittleEndian, uint32(sec.Len())); err != nil {
+			return nil, err
+		}
+		if _, err := f.Write(sec.Bytes()); err != nil {
+			return nil, err
+		}
+		end, err := f.Seek(0, io.SeekCurrent)
+		if err != nil {
+			return nil, err
+		}
+		if err := appendBackupProgress(backupProgressPath(path), backupCheckpoint{Table: name, End: end}); err != nil {
+			return nil, fmt.Errorf("写检查点: %w", err)
+		}
+		if req.afterSection != nil {
+			if err := req.afterSection(name); err != nil {
+				return nil, err
+			}
+		}
+	}
+	_ = os.Remove(backupProgressPath(path))
+	return header, nil
+}
+
+// backupPlan 解析要导的表并构造头部（两条写入路径共用）。
+func (e *Executor) backupPlan(ctx context.Context, req BackupRequest) ([]string, *BackupHeader, error) {
+	tables := req.Tables
+	if len(tables) == 0 {
+		objs, err := e.conn.Meta().Objects(ctx, "", "", model.KindTable, model.KindView)
+		if err != nil {
+			return nil, nil, fmt.Errorf("列出对象: %w", err)
+		}
+		for _, o := range objs {
+			tables = append(tables, o.Name)
+		}
+	}
+	if len(tables) == 0 {
+		return nil, nil, errors.New("备份：这个库里没有可导出的对象")
+	}
+	header := &BackupHeader{
+		FormatVersion: backupFormatVersion,
+		CreatedAt:     time.Now().UTC().Format(time.RFC3339),
+		Engine:        string(e.conn.Engine()),
+	}
+	for _, name := range tables {
+		header.Objects = append(header.Objects, BackupObject{Kind: string(model.KindTable), Name: name})
+	}
+	return tables, header, nil
 }

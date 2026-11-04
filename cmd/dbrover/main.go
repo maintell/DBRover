@@ -678,6 +678,7 @@ func cmdBackup(args []string) error {
 		var cf connFlags
 		cf.bind(fs)
 		out := fs.String("out", "", "输出文件（.dbr）")
+		resume := fs.Bool("resume", false, "接着上次未完成的备份继续（需要 <文件>.progress）")
 		if err := fs.Parse(args[1:]); err != nil {
 			return err
 		}
@@ -690,19 +691,16 @@ func cmdBackup(args []string) error {
 		}
 		defer func() { _ = conn.Close() }()
 
-		f, err := os.Create(*out)
-		if err != nil {
-			return err
-		}
 		ex := service.NewExecutor(conn, env, mode, nil)
 		defer ex.Close()
-		h, err := ex.Backup(context.Background(), service.BackupRequest{}, f)
-		closeErr := f.Close()
+		h, err := ex.BackupToFile(context.Background(), service.BackupRequest{Resume: *resume}, *out)
 		if err != nil {
-			return err
-		}
-		if closeErr != nil {
-			return closeErr
+			// 没有检查点时错误本身已经说清「需整库重跑」，再加一句「可续跑」
+			// 只会自相矛盾——那种情况下根本续不了。
+			if errors.Is(err, service.ErrBackupNoCheckpoint) {
+				return err
+			}
+			return fmt.Errorf("%w\n提示：修复后用同样的命令加 -resume 可续跑（检查点：%s.progress）", err, *out)
 		}
 		fmt.Printf("已写入 %s：%d 个对象（%s）\n", *out, len(h.Objects), h.Engine)
 		return nil
