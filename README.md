@@ -40,7 +40,7 @@ DBRover 面向同时维护多种数据库的工程师：一个人可能上午在
 | 数据编辑 | ● | ● | ● | ● | ● | ● | ● | ◐ 单文档 |
 | 结构管理 | ● | ● | ● | ● | ◐ | ○ | ◐ 集合/校验器 | ◐ 映射 |
 | 索引管理 | ● | ● | ● | ● | ● | ○ | ● | ◐ 设置 |
-| 视图/存储过程 | ● | ● | ● | ● | ◐ | ○ | ◐ 视图 | ○ |
+| 视图/存储过程 | ● | ● | ● | ● | ◐ 视图 ●/过程 ○ | ○ | ◐ 视图 | ○ |
 | 执行计划 | ● | ● | ● | ◐ | ● | ○ | ◐ | ◐ |
 | 慢查询分析 | ● | ● | ● | ◐ | ○ | ● | ◐ | ● |
 | 会话管理/Kill | ● | ● | ● | ● | ○ | ● | ● | ◐ |
@@ -108,22 +108,21 @@ DBRover 面向同时维护多种数据库的工程师：一个人可能上午在
 
 ## 5. 当前状态
 
-**阶段：M2 部分完成**。查询、数据编辑、结构变更、导出都已可用；SQL Server 与 NoSQL 引擎未做。
+**阶段：M2 完成，M3 切片一、二完成，备份与迁移已落地**。查询、数据编辑、结构设计、导出、结构比对、备份恢复、跨引擎迁移、Agent 都可用；SQL Server / Oracle 与 NoSQL 引擎未做（卡在镜像与实例）。
 
 | 模块 | 状态 |
 |---|---|
-| `internal/model` | 领域模型、能力声明、环境严格度、元数据模型 |
-| `internal/driver/dialect` | 5 种 SQL 方言：词法、语句切分、指纹、分类、条件分析、标识符引用、改列类型语句渲染 |
+| `internal/model` | 领域模型、能力声明（含 `IndexValidity` / `AlterColumnNullability` / `AlterColumnDefault` / `AddCheck` / `AddTrigger`）、环境严格度、元数据模型 |
+| `internal/driver/dialect` | 5 种 SQL 方言：词法、语句切分（含 dollar-quote、`DELIMITER`、`GO`、例程/触发器体）、指纹、分类、条件分析、标识符引用，以及改列类型/可空/默认值、索引、外键、检查约束、视图/物化视图、序列、触发器的语句渲染 |
 | `internal/policy` | 风险分级 `R0`–`R4`、摩擦分级 `F0`–`F5` |
-| `internal/driver` | Connector 契约 + `drivertest` 一致性套件 |
-| `internal/driver/sqlite` | SQLite 完整实现（元数据 / 查询 / 事务 / 只读强制） |
-| `internal/driver/mysql` | MySQL 完整实现（真实 5.7 实例验收） |
-| `internal/driver/pg` | PostgreSQL 完整实现（真实 17 实例验收，占位符词法级改写） |
-| `internal/service` | 执行门、变更集与变更预案、结构变更（建表/加列/删列/改列类型）、收窄预检、流式导出、游标与键集分页 |
-| `internal/api` | 回环 HTTP 服务：token 鉴权、连接管理、`exec`、流式游标、键集分页、变更预案、结构变更、导出、审计查询、OpenAPI 契约 |
+| `internal/driver` | Connector 契约 + `drivertest` 一致性套件（17 项，含表注释、声明长度、索引有效性） |
+| `internal/driver/sqlite` `mysql` `pg` | 三个引擎完整实现，真机验收（SQLite / MySQL 5.7 / PostgreSQL 17） |
+| `internal/service` | 执行门；变更集与预案（乐观并发、回滚、一键撤销）；结构变更（建表/加列/删列/改列类型/可空/默认值/索引/外键/检查约束/视图/物化视图/序列/触发器）+ 收窄预检、孤儿预检、依赖阻断、等锁阻断；批量修改（分批、NDJSON 进度、可中止）；流式导出（CSV / NDJSON / SQL / Markdown / XLSX）；游标与键集分页；结构比对；**备份**（容器 v1、gzip、AES-256-GCM、表级续跑）与**恢复**（同引擎、单事务、报告）；**跨引擎迁移**（预检、建表、键集搬数据、行数+摘要校验、检查点续跑、外键与注释补建） |
+| `internal/api` | 回环 HTTP：token 鉴权、连接、`exec`/`query`（NDJSON 流）、键集分页、变更与结构预案、批量修改、外键预检、结构比对、导出多格式、备份/恢复/迁移端点、审计查询、`/agent/*`（会话、消息流、审批、工具清单、中止、压缩、导出）、OpenAPI 契约 |
+| `internal/agent` | Provider 抽象（OpenAI 兼容）、14 个工具、权限三模式与环境上限、执行循环（步数/时长/循环/失败上限）、审批门（预案只由服务端保管）、三路上下文召回、长会话压缩、评测集 |
 | `internal/infra/tunnel` | SSH 隧道与跳板链：多跳、密码/私钥/agent 认证、主机密钥 TOFU |
-| `internal/webui` | **临时界面**：免构建的内嵌 Web UI（连接、对象树、SQL、结果网格、字段编辑、筛选排序、结构变更、导出、审批弹窗） |
-| `cmd/dbrover` | CLI：`version` / `health` / `tables` / `exec` / `serve`（`-open` 自动开浏览器、`-audit-anchor` 审计锚点）/ `tunnel` / `secret`（把口令存进系统凭据库） |
+| `internal/webui` | **临时界面**：免构建的内嵌 Web UI（连接、对象树、SQL、结果网格、字段编辑、筛选排序、结构变更与比对、批量修改、导出、审批弹窗、Agent 面板） |
+| `cmd/dbrover` | CLI：`version` / `health` / `tables` / `exec` / `serve`（`-open`、`-audit-anchor`）/ `tunnel` / `secret` / **`backup create|inspect`** / **`restore`** / **`migrate plan|run`**（`-probe` 按实际值判长度） |
 
 > `internal/webui` 是为了「能点着验收」而做的最小实现，**不是最终前端**。最终前端仍是 [ADR-0001](docs/adr/0001-tech-stack.md) 规定的 React + TypeScript + Vite 栈；先做无构建版本是因为本机磁盘紧张，不装 node_modules。
 
@@ -133,7 +132,8 @@ DBRover 面向同时维护多种数据库的工程师：一个人可能上午在
 >
 > 非关系型引擎（Redis / Mongo / ES）不实现 `Connector`/`Metadata`，另用 `KVConnector` 一族接口，`api` 靠类型断言而不是引擎名选路径，见 [ADR-0007](docs/adr/0007-nosql-connector-model.md)。
 
-**尚未实现**：React 前端、SQL Server / Oracle / MongoDB / Elasticsearch 连接器、桌面壳（Wails）、备份迁移、监控面板。
+**尚未实现**：React 正式前端、桌面壳（Wails，待拍板）、SQL Server / Oracle（镜像拉不下来，见 [ADR-0008](docs/adr/0008-mssql-connector.md)）、MongoDB / Elasticsearch、**例程与用户类型设计器**（例程可走「手写 DDL」，切分器已支持体内分号）、引擎特有项表单、磁盘余量探测、Agent 的向量召回与 `/agent/providers`、测试数据生成、样例数据 xlsx 导入。
+
 
 ## 6. 快速开始
 
@@ -154,19 +154,39 @@ bin/dbrover.exe exec -db demo.db -ro -env test -sql "DELETE FROM t"
 # 起服务（浏览器界面 + HTTP API），审计落盘
 bin/dbrover.exe serve -addr 127.0.0.1:7788 -audit ./audit.jsonl
 
-# 迁移一张表（同引擎）：预检 → 建表 → 搬数据 → 校验
+# 备份与恢复（容器格式：头 + 每张表一段 SQL；可选 gzip / AES-256-GCM）
+bin/dbrover.exe backup create -db demo.db -env local -out demo.dbr -compress
+bin/dbrover.exe backup inspect demo.dbr          # 只读头，不连库
+bin/dbrover.exe restore -file demo.dbr -db dst.db -env local -yes
+
+# 迁移一张表（同引擎或跨引擎）：预检 → 建表 → 搬数据 → 校验
 bin/dbrover.exe migrate plan -db demo.db -table t -to-db target.db
 bin/dbrover.exe migrate run  -db demo.db -table t -to-db target.db -yes
-# 打开它打印的 http://127.0.0.1:7788/#t=<token> 即可操作
+# 跨引擎时给目标端：-to-engine postgres -to-host H -to-port 5432 -to-user U -to-db D -to-password-stdin
+# 声明长度收窄会被拦；加 -probe 读源表实际最大长度，放得下才放行
+bin/dbrover.exe migrate plan -engine mysql -host H -user U -db S -table t -to-engine postgres -to-host H2 -to-user U2 -to-db D2 -probe
+
+# 打开 serve 打印的 http://127.0.0.1:7788/#t=<token> 即可操作
 ```
 
 ## 7. 开发与验证
 
 ```powershell
-pwsh -File scripts/check.ps1     # gofmt + vet + build + test + test -race
+pwsh -File scripts/check.ps1     # gofmt + vet + build + test + test -race（不依赖真机）
+
+# 有真机时跑全量（连接器一致性套件、跨引擎迁移、结构变更真机用例都在内）
+$env:DBRover_TEST_MYSQL='root:testpass@HOST:13306'
+$env:DBRover_TEST_PG='postgres:testpass@HOST:15432'
+go test ./... -count=1 -timeout 1800s
+
+# 端到端验收脚本（自己起 serve、跑真实引擎、失败即红）
+pwsh -File scripts/accept/bulk-20k-sqlite.ps1
+pwsh -File scripts/accept/compare-cross.ps1
 ```
 
 要求 Go 1.26+（`modernc.org/sqlite` 的最低版本）。`CGO_ENABLED=0`，全部依赖纯 Go。
+
+真机套件在**空实例**上可直接跑：用例会自己建 `dbrover_test`。验收脚本的跑法与排错顺序见 [`scripts/accept/README.md`](scripts/accept/README.md)。
 
 约定见 [`AGENTS.md`](AGENTS.md)：文档先行、破坏性变更落 ADR、跨平台产物走 CI。
 
