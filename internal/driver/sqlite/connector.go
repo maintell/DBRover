@@ -6,13 +6,14 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
 
-	_ "modernc.org/sqlite"
+	"modernc.org/sqlite"
 
 	"github.com/maintell/DBRover/internal/driver"
 	"github.com/maintell/DBRover/internal/model"
@@ -33,6 +34,29 @@ func New() *Connector { return &Connector{} }
 
 // Engine 返回引擎类型。
 func (c *Connector) Engine() model.Engine { return model.EngineSQLite }
+
+// classifyConnectError 把连接失败归类。
+//
+// SQLite 没有网络，连接失败只可能是本地文件：打不开（SQLITE_CANTOPEN）、
+// 只读（SQLITE_READONLY）、或者根本不是数据库文件（SQLITE_NOTADB）。
+// 这几种在用户那边对应完全不同的动作（查路径 / 改权限 / 换个文件），所以分开。
+func classifyConnectError(err error) driver.ConnectErrorKind {
+	if k := driver.ClassifyNetError(err); k != driver.ConnectOther {
+		return k
+	}
+	var sqErr *sqlite.Error
+	if errors.As(err, &sqErr) {
+		switch sqErr.Code() {
+		case 14, 8, 26: // CANTOPEN / READONLY / NOTADB
+			return driver.ConnectFile
+		}
+	}
+	// 打不开文件时也可能是 os.PathError / fs.ErrNotExist，这些没有 sqlite 错误码。
+	if errors.Is(err, os.ErrNotExist) || errors.Is(err, os.ErrPermission) {
+		return driver.ConnectFile
+	}
+	return driver.ConnectOther
+}
 
 // Target 见接口注释：SQLite 没有库名，文件路径就是它的身份。
 func (c *Connector) Target() string { return c.path }
@@ -89,7 +113,8 @@ func (c *Connector) Open(ctx context.Context, cfg driver.ConnectConfig) error {
 
 	if !memory && ro {
 		if _, err := os.Stat(path); err != nil {
-			return fmt.Errorf("sqlite: 只读连接要求文件已存在: %w", err)
+			return &driver.ConnectError{Kind: driver.ConnectFile,
+				Err: fmt.Errorf("sqlite: 只读连接要求文件已存在: %w", err)}
 		}
 	}
 
@@ -107,7 +132,8 @@ func (c *Connector) Open(ctx context.Context, cfg driver.ConnectConfig) error {
 
 	if err := db.PingContext(ctx); err != nil {
 		_ = db.Close()
-		return fmt.Errorf("sqlite: 连接失败: %w", err)
+		return &driver.ConnectError{Kind: classifyConnectError(err),
+			Err: fmt.Errorf("sqlite: 连接失败: %w", err)}
 	}
 	if ro {
 		if _, err := db.ExecContext(ctx, "PRAGMA query_only = ON"); err != nil {

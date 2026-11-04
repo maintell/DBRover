@@ -474,8 +474,9 @@ func (s *Server) handleCreateConnection(w http.ResponseWriter, r *http.Request) 
 
 	opened, err := s.opener(engine, cfg)
 	if err != nil {
-		writeError(w, http.StatusBadGateway, "DB_CONNECT_FAILED", "connection", err.Error(),
-			"检查文件路径与访问模式", false)
+		// 分类由驱动给：同一句「连接失败」对不同成因毫无区分度（FR-CON-03）。
+		code, hint := connectFailure(err)
+		writeError(w, http.StatusBadGateway, code, "connection", err.Error(), hint, false)
 		return
 	}
 
@@ -577,6 +578,36 @@ var searchKinds = map[model.ObjectKind]bool{
 	model.KindTrigger:  true,
 	model.KindType:     true,
 	model.KindRoutine:  true,
+}
+
+// connectFailure 把驱动的连接失败类别映射成错误码与一句能照着做的建议（FR-CON-03）。
+//
+// 为什么不让用户看驱动原文：同一句连接被拒，对懂网络的人是一句话，对大多数人等于
+// 没说。类别由驱动给（它认识引擎错误码），这里只负责翻成协议里的错误码。
+func connectFailure(err error) (code, hint string) {
+	var ce *driver.ConnectError
+	if !errors.As(err, &ce) {
+		return "DB_CONNECT_FAILED", ""
+	}
+	switch ce.Kind {
+	case driver.ConnectDNS:
+		return "DB_CONNECT_DNS", "域名解析不到：检查主机名拼写，以及当前网络 / VPN 能不能解析它"
+	case driver.ConnectRefused:
+		return "DB_CONNECT_REFUSED", "端口拒绝连接：确认服务在跑、端口对、防火墙或安全组已放通"
+	case driver.ConnectTimeout:
+		return "DB_CONNECT_TIMEOUT", "连接超时：网络不通或被中间设备丢弃；先试着 telnet 该主机的这个端口"
+	case driver.ConnectAuth:
+		return "DB_CONNECT_AUTH", "认证失败：用户名或口令不对；也可能是这个用户不允许从当前机器登录"
+	case driver.ConnectNoDatabase:
+		return "DB_CONNECT_NO_DATABASE", "库不存在：确认库名（PG 与 MySQL 连的都是 database，不是表名）"
+	case driver.ConnectTLS:
+		return "DB_CONNECT_TLS", "TLS 握手失败：证书、CA 或加密模式与实例要求不一致"
+	case driver.ConnectHandshake:
+		return "DB_CONNECT_HANDSHAKE", "TCP 通了但握手被切断：对端可能不是这个引擎，也可能被代理 / 负载均衡掐掉了；确认端口指向的服务与版本"
+	case driver.ConnectFile:
+		return "DB_CONNECT_FILE", "文件打不开：检查路径、所在目录的权限，以及连接是不是只读模式"
+	}
+	return "DB_CONNECT_FAILED", ""
 }
 
 // handleSearch 按名称/注释模糊搜索对象（FR-META-04）。

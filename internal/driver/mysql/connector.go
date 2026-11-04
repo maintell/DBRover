@@ -11,6 +11,7 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"net"
 	"strconv"
@@ -18,7 +19,7 @@ import (
 	"sync"
 	"time"
 
-	_ "github.com/go-sql-driver/mysql"
+	"github.com/go-sql-driver/mysql"
 
 	"github.com/maintell/DBRover/internal/driver"
 	"github.com/maintell/DBRover/internal/model"
@@ -38,6 +39,30 @@ func New() *Connector { return &Connector{} }
 
 // Engine 返回引擎类型。
 func (c *Connector) Engine() model.Engine { return model.EngineMySQL }
+
+// classifyConnectError 把连接失败归类。
+//
+// 网络层交给 driver.ClassifyNetError（与引擎无关）；引擎层看错误号：
+//
+//	1045 口令错 / 1044 该用户无权访问这个库 → 认证
+//	1049 库不存在                          → 库不存在
+//
+// 把这三类混成一句「连接失败」，用户只能靠猜。
+func classifyConnectError(err error) driver.ConnectErrorKind {
+	if k := driver.ClassifyNetError(err); k != driver.ConnectOther {
+		return k
+	}
+	var myErr *mysql.MySQLError
+	if errors.As(err, &myErr) {
+		switch myErr.Number {
+		case 1045, 1044:
+			return driver.ConnectAuth
+		case 1049:
+			return driver.ConnectNoDatabase
+		}
+	}
+	return driver.ConnectOther
+}
 
 // Target 见接口注释：MySQL 的 catalog 就是库名。
 func (c *Connector) Target() string { return c.config().Catalog }
@@ -105,7 +130,8 @@ func (c *Connector) Open(ctx context.Context, cfg driver.ConnectConfig) error {
 	defer cancel()
 	if err := db.PingContext(pingCtx); err != nil {
 		_ = db.Close()
-		return fmt.Errorf("mysql: 连接失败: %w", err)
+		return &driver.ConnectError{Kind: classifyConnectError(err),
+			Err: fmt.Errorf("mysql: 连接失败: %w", err)}
 	}
 
 	// 只读在会话层强制：autocommit 下每条语句即一个事务，写会被引擎拒绝。

@@ -107,7 +107,7 @@ Content-Type: application/x-ndjson
 | `execute` 未独立 | 写操作走 `/exec`；`/exec` 同时兼容一次性只读查询 | 收敛为 `/execute` 只做写、`/query` 只做读 |
 | 列元数据随响应返回 | `/query` 直接返回 `columns`，不走 WS 事件 | 改为 WS 推送 `result.columns` |
 | 游标按连接隔离在进程内 | 进程重启即失效，无跨实例共享 | 服务化时引入共享存储 |
-| 连接只支持 SQLite | 其他引擎返回 `DB_CONNECT_FAILED` | 按 04 文档逐个补齐 |
+| 连接支持 SQLite / MySQL / PostgreSQL（Redis 走 KV 那套接口） | 三引擎真机验收通过；MSSQL / Oracle 未实现（镜像拉不下来，见 ADR-0008） | 拿到能拉镜像的机器后按 `docs/04` 补齐 |
 | 契约已落文件但未接代码生成 | 契约在 `internal/api/openapi.json`，由测试保证与路由表一致 | 接 `oapi-codegen` 生成 server 类型与 TS client |
 
 **契约的可信度靠门禁保证，不靠自觉**：
@@ -404,10 +404,20 @@ POST /connections
 
 | code | category | HTTP | 说明 |
 |---|---|:--:|---|
-| `DB_CONNECT_FAILED` | connection | 502 | 无法建立连接 |
-| `DB_DNS_FAILED` | connection | 502 | 主机解析失败 |
-| `DB_TLS_FAILED` | connection | 502 | TLS 握手失败 |
-| `DB_AUTH_FAILED` | auth | 401 | 认证失败 |
+| `DB_CONNECT_FAILED` | connection | 502 | 无法建立连接（**未分类的兜底**：不给修复建议，编一句错的建议比不给更糟） |
+| `DB_CONNECT_DNS` | connection | 502 | 域名解析不到（建议：查主机名拼写与 DNS/VPN） |
+| `DB_CONNECT_REFUSED` | connection | 502 | 端口拒绝连接 / 拨号失败（服务没起来、端口不对、防火墙或安全组） |
+| `DB_CONNECT_TIMEOUT` | connection | 502 | 连接超时（网络不通或被中间设备丢弃） |
+| `DB_CONNECT_AUTH` | connection | 502 | **数据库侧**认证失败（用户名/口令/来源限制）。与 API 自己的 `AUTH_TOKEN_INVALID`(401) 是两件事 |
+| `DB_CONNECT_NO_DATABASE` | connection | 502 | 库不存在（PG 与 MySQL 连的都是 database） |
+| `DB_CONNECT_TLS` | connection | 502 | TLS 握手失败（证书、CA、加密模式与实例要求不一致） |
+| `DB_CONNECT_HANDSHAKE` | connection | 502 | TCP 通了但握手被切断（对端不是这个引擎，或被代理/负载均衡掐断） |
+| `DB_CONNECT_FILE` | connection | 502 | 本地文件打不开（SQLite 的路径、权限、只读模式） |
+
+> 分类由**驱动**给（它认识引擎错误码），`api` 只把类别翻成上表里的码与建议（FR-CON-03）。
+> 三个已实现的引擎都有用例；其中 Windows 的「端口被拒」实测踩到过：内核给的是
+> `WSAECONNREFUSED`，与 `syscall.ECONNREFUSED` 不是同一个值，`errors.Is` 匹配不到，
+> 所以额外按 `*net.OpError` 的 `Op == "dial"` 兜了一层。
 | `DB_NOT_FOUND` | connection | 404 | 库/实例不存在 |
 | `DB_PERMISSION_DENIED` | permission | 403 | 权限不足 |
 | `SQL_SYNTAX_ERROR` | syntax | 400 | 语法错误（含位置） |

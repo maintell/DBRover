@@ -12,6 +12,7 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"net"
 	"strconv"
@@ -19,6 +20,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgconn"
 	_ "github.com/jackc/pgx/v5/stdlib"
 
 	"github.com/maintell/DBRover/internal/driver"
@@ -39,6 +41,29 @@ func New() *Connector { return &Connector{} }
 
 // Engine 返回引擎类型。
 func (c *Connector) Engine() model.Engine { return model.EnginePostgres }
+
+// classifyConnectError 把连接失败归类。
+//
+// 网络层交给 driver.ClassifyNetError（与引擎无关）；引擎层看 SQLSTATE，
+// 因为把口令错说成「连接失败」几乎等于没说：
+//
+//	28P01 invalid_password / 28000 invalid_authorization → 认证
+//	3D000 invalid_catalog_name                        → 库不存在
+func classifyConnectError(err error) driver.ConnectErrorKind {
+	if k := driver.ClassifyNetError(err); k != driver.ConnectOther {
+		return k
+	}
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) {
+		switch pgErr.Code {
+		case "28P01", "28000":
+			return driver.ConnectAuth
+		case "3D000":
+			return driver.ConnectNoDatabase
+		}
+	}
+	return driver.ConnectOther
+}
 
 // Target 见接口注释：PostgreSQL 的 catalog 就是库名。
 func (c *Connector) Target() string { return c.config().Catalog }
@@ -123,7 +148,8 @@ func (c *Connector) Open(ctx context.Context, cfg driver.ConnectConfig) error {
 	defer cancel()
 	if err := db.PingContext(pingCtx); err != nil {
 		_ = db.Close()
-		return fmt.Errorf("postgres: 连接失败: %w", err)
+		return &driver.ConnectError{Kind: classifyConnectError(err),
+			Err: fmt.Errorf("postgres: 连接失败: %w", err)}
 	}
 
 	if cfg.Schema == "" {
