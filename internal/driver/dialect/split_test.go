@@ -135,6 +135,35 @@ func TestSplit(t *testing.T) {
 			want:   []string{"SELECT 1"},
 		},
 		{
+			name:   "MySQL 存储过程不带 DELIMITER 也按块切",
+			engine: model.EngineMySQL,
+			in:     "CREATE PROCEDURE p()\nBEGIN\n  DECLARE x INT;\n  SET x = 1;\n  IF x = 1 THEN\n    SET x = 2;\n  END IF;\n  INSERT INTO t (id) VALUES (x);\nEND;\nSELECT 1;",
+			want: []string{
+				"CREATE PROCEDURE p()\nBEGIN\n  DECLARE x INT;\n  SET x = 1;\n  IF x = 1 THEN\n    SET x = 2;\n  END IF;\n  INSERT INTO t (id) VALUES (x);\nEND",
+				"SELECT 1",
+			},
+		},
+		{
+			name:   "存储过程里嵌套 BEGIN 不会提前收尾",
+			engine: model.EngineMySQL,
+			in:     "CREATE PROCEDURE p2()\nBEGIN\n  BEGIN\n    SET @a = 1;\n  END;\n  SET @b = 2;\nEND;",
+			want: []string{
+				"CREATE PROCEDURE p2()\nBEGIN\n  BEGIN\n    SET @a = 1;\n  END;\n  SET @b = 2;\nEND",
+			},
+		},
+		{
+			name:   "MySQL 函数体同样按块处理",
+			engine: model.EngineMySQL,
+			in:     "CREATE FUNCTION f() RETURNS INT\nBEGIN\n  RETURN 1;\nEND;",
+			want:   []string{"CREATE FUNCTION f() RETURNS INT\nBEGIN\n  RETURN 1;\nEND"},
+		},
+		{
+			name:   "没有 BEGIN 的 CREATE 照常按分号切",
+			engine: model.EngineMySQL,
+			in:     "CREATE TABLE a (id INT); CREATE TABLE b (id INT);",
+			want:   []string{"CREATE TABLE a (id INT)", "CREATE TABLE b (id INT)"},
+		},
+		{
 			name:   "纯空白无语句",
 			engine: model.EnginePostgres,
 			in:     "   \n\t ",
