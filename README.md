@@ -132,7 +132,7 @@ DBRover 面向同时维护多种数据库的工程师：一个人可能上午在
 >
 > 非关系型引擎（Redis / Mongo / ES）不实现 `Connector`/`Metadata`，另用 `KVConnector` 一族接口，`api` 靠类型断言而不是引擎名选路径，见 [ADR-0007](docs/adr/0007-nosql-connector-model.md)。
 
-**尚未实现**：React 正式前端、桌面壳（Wails，待拍板）、SQL Server / Oracle（镜像拉不下来，见 [ADR-0008](docs/adr/0008-mssql-connector.md)）、MongoDB / Elasticsearch、**例程与用户类型设计器**（例程可走「手写 DDL」，切分器已支持体内分号）、引擎特有项表单、磁盘余量探测、Agent 的向量召回与 `/agent/providers`、测试数据生成、样例数据 xlsx 导入。
+**尚未实现**：React 正式前端、桌面壳（Wails，待拍板）、SQL Server / Oracle（镜像拉不下来，见 [ADR-0008](docs/adr/0008-mssql-connector.md)）、MongoDB / Elasticsearch、**例程与用户类型设计器**（例程可走「手写 DDL」，切分器已支持体内分号）、引擎特有项表单、磁盘余量探测、Agent 的向量召回与 `/agent/providers`、测试数据生成。
 
 
 ## 6. 快速开始
