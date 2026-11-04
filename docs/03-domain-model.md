@@ -30,6 +30,8 @@ MetadataSnapshot ── Catalog[] ── Schema[] ── Object[]
 
 一个可复用的连接配置。**不持有物理连接**，物理连接由 `service/connection` 的池管理。
 
+> **v1 实现口径**：实际结构见 `internal/model/model.go` 的 `Connection`——只有 `id` / `name` / `engine` / `host` / `port` / `catalog` / `schema` / `environment` / `environment_source` / `access_mode` / `display_timezone` / `server_identity`。下表其余字段（`params` / `tunnel` / `credential` / `environment_declared_*` / `pool` / `init_sql` / `color` `tags` / `created_at` `updated_at`）**尚未实现**，属目标模型；连接目前只存在进程内存里，没有持久化的元数据库。
+
 | 字段 | 类型 | 说明 |
 |---|---|---|
 | `id` | string(ULID) | 稳定标识 |
@@ -185,7 +187,9 @@ type Hop struct {
 | `preconditions` | 执行前检查（如表仍存在、无长事务） |
 | `status` | `draft` `approved` `applied` `failed` `rolled_back` `discarded` |
 
-**状态机**
+> **v1 实现口径**：实际结构见 `internal/service/change.go` 的 `ChangePlan`——`id` / `table` / `statements` / `rollback` / `risk` / `friction` / `irreversible` / `created_at` / `expires_at` / `undo` / `ddl` / `rolls_back_as_compensation` / `affected_rows` / `notes`，外加两个只在服务端保管的竞态前置条件（`expect_ddl_hash`、`expect_table_absent`）。**`impact` / `preconditions` / `status` 与下面的状态机尚未实现**：v1 用「预案只在服务端保管 + 10 分钟有效期 + 表定义哈希 + 执行前预检」表达同一件事，没有 draft/approved 这种显式状态字段。
+
+**状态机（目标）**
 
 ```
 draft ──approve──► approved ──apply──► applied
@@ -345,21 +349,22 @@ type Capabilities struct {
     Triggers          bool
     Sequences         bool
     UserTypes         bool
-    Indexes           IndexCapability
-    Explain           ExplainCapability
+    Indexes           bool
+    Explain           bool
     SlowQueryStats    bool
     SessionMgmt       bool
     KillSession       bool
     LockGraph         bool
-    Backup            BackupCapability
+    Backup            bool
     BulkLoad          bool
     KeysetPagination  bool
     DDLTransactional  bool     // PG/SQLite: true; MySQL: false（DDL 隐式提交）
-    ReadOnlyEnforce   ReadOnlyStrategy
 }
 ```
 
 UI 依据它渲染或置灰；`service` 依据它拒绝非法调用并给出可解释错误。**不允许用 `switch engine` 代替 `Capabilities()`。**
+
+> **v1 实现口径**：字段类型统一是 `bool`（没有 `IndexCapability` / `ExplainCapability` / `BackupCapability` 这些复合类型，也没有 `ReadOnlyEnforce`）。只读不是能力位，而是连接级 `AccessMode` 加驱动层强制（SQLite `PRAGMA query_only`、MySQL / PG 的会话只读），所以不需要那个策略枚举。
 
 ---
 

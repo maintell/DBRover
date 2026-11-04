@@ -11,6 +11,8 @@
 | 引擎 | 必填 | 可选 | 易错点 |
 |---|---|---|---|
 | PG | host、port(5432)、database、user、password | `sslmode`、`search_path`、`application_name`、`connect_timeout` | `database` 是必填（不像 MySQL 可留空） |
+
+> **v1 实现口径**：右列「可选参数」**目前没有入口**——创建连接的请求体没有 `params` 字段，`ConnectConfig.Params` 恒为空。驱动层读得到 `cfg.Params`，但上层填不进去；这条是目标，不是现状。
 | MySQL | host、port(3306)、user、password | database、charset、`tls`、`sql_mode`、`time_zone` | `database` 可留空；`localhost` 走 socket 而非 TCP |
 | MSSQL | host、port(1433)、user、password 或 Integrated | database、`encrypt`、`trustServerCertificate`、instance | 命名实例需 `host\instance` 或 SQL Browser；新版默认强制加密 |
 | Oracle | host、port(1521)、**SID 或 Service Name**、user、password | `sysdba` 角色、字符集、`NLS_*` | 选错 SID/Service 会报 `ORA-12505`/`ORA-12514`，错误信息要能区分 |
@@ -97,9 +99,8 @@
 ```
 
 - 每跳一个 `ssh.Client`，通过上一跳的 `Dial` 建立下一跳的 TCP 连接。
-- 隧道端口随机分配（`net.Listen("tcp", "127.0.0.1:0")`），连接关闭即释放。
-- 只监听回环，不监听 `0.0.0.0`。
-- 隧道与 `Connection` 生命周期绑定：连接关闭 → 隧道关闭 → 端口释放。
+- **v1 实现口径**：`internal/infra/tunnel` 只做到 `Dial`——返回一条穿过跳板链的 `net.Conn`，**不含本地端口**（没有 `net.Listen`）。CLI `dbrover tunnel` 拨通后打印「可连通」即关闭。
+- 「随机分配本地端口 + 与 `Connection` 生命周期绑定」是**目标**：连接级隧道还没接进 `service` / `api`，连接表单也没有隧道配置入口。
 
 ### 2.2 认证方式
 
@@ -136,7 +137,7 @@
 | Windows | Credential Manager (DPAPI) | `syscall` 调 `CredWriteW`/`CredReadW`/`CredDeleteW`（`internal/infra/secret`） | ✅ |
 | macOS | Keychain | `security` 命令或 `go-keyring` | ⛔ |
 | Linux | Secret Service（D-Bus） | `go-keyring` | ⛔ |
-| 降级 | 本地文件 `0600` | 仅当上述不可用；UI 强制警告 | ⛔ **有意不做** |
+| 降级 | 本地文件 `0600` | **有意不做**：见下方说明 | ⛔ **有意不做** |
 
 **为什么不实现「降级到本地文件」**：那条路会让调用方以为凭据进了系统库、实际落在磁盘上，而且没人会再去 review 它。非 Windows 平台上 `secret.*` 直接返回 `ErrUnsupported`，功能不可用但不说谎——等有对应平台的验证环境再补。
 
@@ -397,5 +398,5 @@ Statement
 | MSSQL/Oracle 无会话级只读 | 依赖 SQL 分析与建议只读账号；无法给出强保证 |
 | 函数副作用不可静态判定 | 只读连接调用未知函数时仅警告，除非用白名单管理 |
 | 审计不防本地管理员 | 需外部锚点，v1 不做 |
-| Linux 无 Secret Service 时降级 | 用 `0600` 文件，安全性下降，UI 明确警告 |
+| 非 Windows 平台 | **功能不可用**：`secret.*` 直接返回 `ErrUnsupported`，不做文件降级（理由见 §3.1） |
 | 不支持 PuTTY `.ppk` 私钥 | 提示用 `puttygen` 转换 |

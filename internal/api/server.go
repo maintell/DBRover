@@ -15,6 +15,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -1700,6 +1701,11 @@ func IsLoopback(addr string) bool {
 func (s *Server) Serve(ctx context.Context, addr string, allowRemote bool) error {
 	if !allowRemote && !IsLoopback(addr) {
 		return &AddrError{Addr: addr}
+	}
+	if allowRemote {
+		// 说清楚风险：TLS 还没实现，远程模式就是明文 HTTP。文档里也这么写，
+		// 但没人会把文档贴在屏幕上——启动时喊一句更有效。
+		fmt.Fprintf(os.Stderr, "警告：-allow-remote 是明文 HTTP（TLS 未实现），只应在受信网络或反向代理之后使用\n")
 	}
 	srv := &http.Server{
 		Addr:              addr,

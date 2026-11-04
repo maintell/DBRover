@@ -59,7 +59,7 @@
 | **桌面（正式）** | `dbrover-desktop`（Wails 壳 + 内嵌核心） | 内核只监听 `127.0.0.1:<随机>`，壳通过进程内 loopback 访问 | 个人日常 |
 | **服务** | `dbrover serve --addr 127.0.0.1:8080` | 可配置地址；默认仍只绑回环 | 团队/容器/远程开发机 |
 | **桌面（轻量，已可用）** | `dbrover serve -open` | 同上；就绪后自动用默认浏览器打开带 token 的地址 | 没有桌面壳时也能「双击就用」 |
-| **无头** | `dbrover exec --conn <name> --sql <file>` | 不监听 | CI 校验、脚本、Agent 外部调用 |
+| **无头** | `dbrover exec -db <文件> (-sql "…" \| -file <路径>)` | 不监听 | CI 校验、脚本、Agent 外部调用 |
 
 三者共用 `service` 层，因此「CI 里跑的 SQL 检查」与「界面上点的执行」语义一致。
 
@@ -72,13 +72,15 @@
 - 崩溃隔离：UI 崩了核心还能给 Agent 跑长任务；
 - 可以对着 `curl` 排障，降低「只能靠点界面」的调试成本。
 
-代价是序列化开销与一层协议。实测可控：结果集用 WS 流式 + 紧凑二进制分片，不走 JSON。
+代价是序列化开销与一层协议。目标是结果集用 WS 流式 + 紧凑二进制分片；**v1 实际是 HTTP JSON**（`?stream=1` 走 NDJSON），WS 与二进制分片都未实现。
 
 ### 3.2 端口与安全
 
-- 启动时生成随机 token（32 字节），写入进程内共享内存/临时文件（权限 0600），壳与 CLI 读取。
-- 所有请求校验 `X-DBRover-Token` + `Origin` 白名单。
-- 绑定非回环地址时**强制**要求显式 `--allow-remote` 并启用 TLS，否则拒绝启动。
+- 启动时生成随机 token（32 字节），**只在进程内存里**，并打印到 stderr（含 `#t=` 的界面链接）；不落盘、不写临时文件。
+- 所有请求校验 `X-DBRover-Token`。
+- 绑定非回环地址需要显式 `-allow-remote`，否则拒绝启动。
+
+> **v1 实现口径（安全相关，必须说清）**：**TLS 未实现**。`-allow-remote` 打开之后服务就是明文 HTTP，只应放在受信网络或反向代理之后；`Origin` 白名单也还没有实现。这两条是目标，不是现状。
 
 ---
 
@@ -90,7 +92,7 @@
 |---|---|---|---|
 | 语言 | **Go 1.23+** | 免 CGO 交叉编译、并发模型贴合「多连接多流」、单文件分发 | Rust：驱动生态分散、编译慢；JVM/.NET：需要运行时 |
 | HTTP | 标准库 `net/http`（1.22+ 路由）+ 少量中间件 | 依赖最少 | gin/echo：功能冗余 |
-| WebSocket | `coder/websocket` | context 感知、API 干净 | gorilla：维护模式 |
+| WebSocket | **未引入**（v1 用 NDJSON 流；目标是 `coder/websocket`） | context 感知、API 干净 | gorilla：维护模式 |
 | 契约 | 手写 OpenAPI 3.1 为唯一真相 + `oapi-codegen` 生成 Go server 类型与 TS client | 契约先于实现，前端不手写 fetch | 代码优先生成 spec：易漂移 |
 | 元数据存储 | **SQLite / `modernc.org/sqlite`**（纯 Go） | 单文件、可备份、免 CGO | 自重实现的 KV：查询与迁移麻烦 |
 | 迁移 | 内嵌 SQL 迁移（`embed` + 版本表） | 不引重量级框架 | gorm/ent：不需要 ORM |
@@ -178,6 +180,8 @@ internal/
 ## 6. 关键数据流
 
 ### 6.1 一次查询（含流式结果）
+
+> **下面的图是目标形态。v1 实际是同步 HTTP + JSON，没有 WebSocket、没有二进制分片**：`POST /api/v1/connections/{id}/query` 一次返回列元数据与首批行；后续用 `GET /api/v1/results/{cid}/page` 取页（游标 5 分钟 TTL，可续期），`?stream=1` 时改 NDJSON 逐条推。
 
 ```
 UI ──POST /query──────────────────────────────► api

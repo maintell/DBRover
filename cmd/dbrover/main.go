@@ -398,7 +398,7 @@ func cmdServe(args []string) error {
 	fs := flag.NewFlagSet("serve", flag.ExitOnError)
 	addr := fs.String("addr", "127.0.0.1:7788", "监听地址（默认仅回环）")
 	token := fs.String("token", "", "访问令牌（默认随机生成）")
-	allowRemote := fs.Bool("allow-remote", false, "允许监听非回环地址")
+	allowRemote := fs.Bool("allow-remote", false, "允许监听非回环地址（明文 HTTP：TLS 未实现，只应放在受信网络或反代之后）")
 	openUI := fs.Bool("open", false, "启动后自动用默认浏览器打开界面（桌面用法的轻量形态）")
 	auditPath := fs.String("audit", "", "审计日志文件（JSONL 追加写；留空则只保留内存）")
 	anchorPath := fs.String("audit-anchor", "", "审计锚点文件（把链头封存到独立文件，防整段重写；密钥存系统凭据库）")
