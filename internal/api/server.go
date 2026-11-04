@@ -1526,11 +1526,19 @@ func (s *Server) handleExport(w http.ResponseWriter, r *http.Request) {
 		order = &spec
 	}
 
-	ext := "csv"
-	contentType := "text/csv; charset=utf-8"
-	if format == service.ExportNDJSON {
-		ext = "ndjson"
-		contentType = "application/x-ndjson; charset=utf-8"
+	// 扩展名与 Content-Type 跟着格式走。只认 ndjson 一种的话，导出的 SQL 脚本
+	// 会叫 table.csv、xlsx 会报 text/csv——浏览器与 shell 都会按错的类型处理。
+	ext, contentType := "csv", "text/csv; charset=utf-8"
+	switch format {
+	case service.ExportNDJSON:
+		ext, contentType = "ndjson", "application/x-ndjson; charset=utf-8"
+	case service.ExportSQL:
+		ext, contentType = "sql", "application/sql; charset=utf-8"
+	case service.ExportMarkdown:
+		ext, contentType = "md", "text/markdown; charset=utf-8"
+	case service.ExportXLSX:
+		ext = "xlsx"
+		contentType = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 	}
 
 	lw := &lazyWriteWriter{

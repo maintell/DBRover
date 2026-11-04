@@ -652,7 +652,7 @@ function renderToolbar() {
   exportSel.title = '导出格式';
   // SQL 是「建表 + INSERT」的可回放脚本（同引擎）；Markdown 是给人贴进
   // issue 对账的表格。四种都在这里，别让人为了拿一份 SQL 去敲 curl。
-  fill(exportSel, [['csv', 'CSV'], ['ndjson', 'NDJSON'], ['sql', 'SQL'], ['markdown', 'Markdown']], state.exportFormat);
+  fill(exportSel, [['csv', 'CSV'], ['ndjson', 'NDJSON'], ['sql', 'SQL'], ['markdown', 'Markdown'], ['xlsx', 'XLSX']], state.exportFormat);
   exportSel.onchange = () => { state.exportFormat = exportSel.value; };
   const exportBtn = document.createElement('button');
   exportBtn.id = 'btn-export';
@@ -729,7 +729,7 @@ async function exportTable(format) {
     const text = await blob.text();
     // 扩展名跟着格式走：都写成 .csv 会让「导出了 SQL 脚本」这件事看起来像
     // 导出坏了，双击用表格软件打开更是一团糟。
-    const ext = { csv: 'csv', ndjson: 'ndjson', sql: 'sql', markdown: 'md' }[format] || 'txt';
+    const ext = { csv: 'csv', ndjson: 'ndjson', sql: 'sql', markdown: 'md', xlsx: 'xlsx' }[format] || 'txt';
     const name = state.tableName + '.' + ext;
 
     // 先把内容确认下来再交给浏览器保存：万一宿主环境拦了下载，

@@ -38,11 +38,17 @@ const (
 	// 表格是坏语法），NULL 写成 NULL、空串写成 ''——与界面上的渲染一致，
 	// 因为这张表最常见的用途就是把「界面上看到的东西」贴出去对账。
 	ExportMarkdown ExportFormat = "markdown"
+	// ExportXLSX 是真正的 Excel 工作簿（xlsx）：表头 + 单元格类型。
+	//
+	// 与 CSV 的区别不只是「能双击打开」：数字保持数字（不会被 Excel 当文本左对齐），
+	// NULL 与空串在 xlsx 里同样都是空单元格——这点与 CSV 一致，要区分请用 ndjson。
+	ExportXLSX ExportFormat = "xlsx"
 )
 
 // Valid 判断格式是否受支持。
 func (f ExportFormat) Valid() bool {
-	return f == ExportCSV || f == ExportNDJSON || f == ExportSQL || f == ExportMarkdown
+	return f == ExportCSV || f == ExportNDJSON || f == ExportSQL || f == ExportMarkdown ||
+		f == ExportXLSX
 }
 
 // ErrExportFormat 表示不支持的导出格式。
@@ -234,6 +240,39 @@ func (e *Executor) Export(ctx context.Context, req ExportRequest, w io.Writer) (
 			}
 		}
 
+	case ExportXLSX:
+		xw, xerr := newXLSX(bw, req.Table)
+		if xerr != nil {
+			return nil, xerr
+		}
+		// 表头一律按文本写：列名不是数字，交给 Excel 猜只会得到右对齐的表头。
+		if err := xw.Row(names, make([]bool, len(names))); err != nil {
+			return nil, err
+		}
+		num := make([]bool, len(names))
+		for {
+			batch, more, err := cur.Next(ctx)
+			if err != nil {
+				return nil, err
+			}
+			for _, row := range batch {
+				vals := make([]string, len(row))
+				for i, v := range row {
+					vals[i], num[i] = xlsxCell(v)
+				}
+				if err := xw.Row(vals, num); err != nil {
+					return nil, err
+				}
+				out.Rows++
+			}
+			if !more {
+				break
+			}
+		}
+		if err := xw.Close(); err != nil {
+			return nil, err
+		}
+
 	case ExportNDJSON:
 		enc := json.NewEncoder(bw)
 		for {
@@ -404,4 +443,28 @@ func sqlLiteral(engine model.Engine, v any) string {
 	default:
 		return "'" + strings.ReplaceAll(fmt.Sprint(x), "'", "''") + "'"
 	}
+}
+
+// xlsxCell 把一个值转成 (单元格文本, 是否数字)。
+//
+// 数字单独标出来是因为 xlsx 有类型：都写成文本的话，金额与 ID 在 Excel 里会
+// 左对齐、无法求和，用户第一件事就是选中整列改成数字。布尔写成 1/0：Excel 的
+// TRUE/FALSE 是另一种单元格类型，跨软件往返时更容易变形。
+//
+// 时间写成 RFC3339 文本：Excel 的日期是「1900 起的天数」浮点，转换规则里还有
+// 1900 闰年这个历史坑，宁可给人看 ISO 字符串，也不要在导出环节猜。
+func xlsxCell(v any) (string, bool) {
+	switch x := v.(type) {
+	case nil:
+		return "", false
+	case bool:
+		if x {
+			return "1", true
+		}
+		return "0", true
+	case int, int8, int16, int32, int64, uint, uint8, uint16, uint32, uint64,
+		float32, float64:
+		return fmt.Sprint(x), true
+	}
+	return csvCell(v), false
 }

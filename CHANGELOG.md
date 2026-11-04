@@ -122,6 +122,7 @@
 - **再加一道「界面动作名」门禁**：`TestUIActionsExistInService` 从 `service/ddl.go` 的动作常量反推白名单，扫描 `app.js` 里所有 `action: '...'`，对不上就红。这类错在运行时只表现为一句含糊的业务错误（或干脆没反应），而界面代码里就是一行字符串——变异验证：把 `create_view` 改成 `create_viewx`，用例立刻报「界面发起的 action 没有对应常量」。
 - **结构设计器补上「新建序列」**（PG）：`action` 为 `create_sequence`（`sequence:{name,start,increment,min,max,cycle}`），渲染 `CREATE SEQUENCE …`、回滚 `DROP SEQUENCE`。数字参数用**指针**而不是零值——`INCREMENT 0` 是非法值，必须能与「没填」区分开。参数先校验再判引擎能力（步长 0、最小值大于最大值、起始值越界都在我们这一侧拒掉，而不是把一句引擎报错甩给用户）。**只有声明了 `Sequences` 的引擎才摆这个按钮**（PG；MySQL 用 AUTO_INCREMENT、SQLite 用 AUTOINCREMENT），界面上按能力位隐藏。真机 PG 17：`START WITH 100` / `INCREMENT BY 5` 建出来、`nextval` 可用、回滚后报不存在。
 - **能力位键名门禁**：界面用 `capabilities.xxx` 决定摆不摆某个入口；键名写错不会报错，那块 UI 会静静消失（用户以为是引擎不支持）。`TestUICapabilityKeysExist` 从 `model.Capabilities` 的 json 标签反推白名单，扫描 `app.js` 里所有 `capabilities.<ident>`，对不上就红。变异验证：把 `add_check` 改成 `add_checks` 立刻报「那块 UI 会静默消失」。
+- **导出补 XLSX**（`docs/06 §8.2` 的 xlsx 转 ✅）：手写最小 OOXML——一个 zip + 四段 XML，**不引第三方库**（本项目对纯 Go 的要求是硬约束，为一个导出格式拖依赖不值得）。用 `inlineStr` 而不是 `sharedStrings`，少一张索引表也少一处能写错的地方。表头按文本写（列名不是数字，交给 Excel 猜只会得到右对齐的表头），数字保持数字，`& < > " '` 转义，工作表名按 Excel 限制清洗（≤31 字符、去掉 `[]:*?/\`）——不清洗的话文件能写出来但打不开，报错是「文件已损坏」，完全指不到起因。**真机验证**：导出后直接用 Excel（COM）打开，读出 `sheet=t`、`row2=1 | a<b&c"d | 12.5`、`row3=2 | （空） | -3.25`，且数字单元格的 Value2 类型是 `Double` 而不是 `String`。**顺带修一处响应头**：`/export` 的扩展名与 `Content-Type` 原来只区分 ndjson，导出的 SQL 叫 `table.csv`、xlsx 报 `text/csv`；现在按格式给（xlsx → `.xlsx` + 正确的 MIME）。界面的下拉与扩展名也补齐——上一轮新建的 `TestExportFormatsOfferedMatchBackend` 当场就把它抓出来了。
 
 ### 安全
 
