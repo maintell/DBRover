@@ -49,8 +49,10 @@ func (c *Connector) Capabilities() model.Capabilities {
 		MaterializedViews: true,
 		Routines:          false,
 		// 同 MySQL：pg_trigger 还没查，声明 true 会造成「没有触发器」的错觉。
-		Triggers:         false,
-		Sequences:        true,
+		Triggers: false,
+		// pg_class 里能查到序列，但 Objects(KindSequence) 还没有分支：
+		// 声明 true 会让对象树永远空着，看起来像「这个库没有序列」。
+		Sequences:        false,
 		UserTypes:        true,
 		Indexes:          true,
 		Explain:          true, // EXPLAIN

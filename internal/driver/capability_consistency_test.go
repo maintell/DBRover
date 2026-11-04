@@ -57,3 +57,22 @@ func TestTriggerCapabilityIsHonest(t *testing.T) {
 		}
 	}
 }
+
+// TestSequenceCapabilityIsHonest 同理：PG 有序列这个概念，但本工具还没查
+// （Objects(KindSequence) 无分支）。声明 true 会让对象树永远空着。
+func TestSequenceCapabilityIsHonest(t *testing.T) {
+	want := map[model.Engine]bool{
+		model.EngineSQLite:   false,
+		model.EngineMySQL:    false,
+		model.EnginePostgres: false, // pg_class 查询未接，先别声称支持
+	}
+	for _, c := range []driver.Connector{sqlite.New(), mysql.New(), pg.New()} {
+		exp, ok := want[c.Engine()]
+		if !ok {
+			t.Fatalf("新增引擎 %s 没写进这张表：序列能力要有明确预期", c.Engine())
+		}
+		if got := c.Capabilities().Sequences; got != exp {
+			t.Errorf("%s: Capabilities.Sequences = %v，期望 %v", c.Engine(), got, exp)
+		}
+	}
+}

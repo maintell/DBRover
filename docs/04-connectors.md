@@ -170,6 +170,8 @@ if m, ok := conn.(driver.MonitorProvider); ok && conn.Capabilities().SessionMgmt
 | 例程源码 | ● | ● | ● | ●（可能被 wrap） | ◐ | ○ | ◐ JS | ○ |
 | 对象 DDL 还原 | `pg_get_*def` | `SHOW CREATE` | 自拼（无原生） | `DBMS_METADATA` | 自拼 | 自拼 | 自拼 | 自拼 |
 
+> **对象类型覆盖**：视图三引擎都支持；触发器只有 SQLite 做了（`sqlite_master`）；序列与例程都还没有。没做的类型能力位一律为 `false`——声明 `true` 却返回空列表，会被读成「这个库没有该对象」，比「不支持」更误导。
+>
 > **MSSQL 与 SQLite 没有「一键取 DDL」**，必须由驱动自己拼装。这是两个容易低估工作量的实现点，需专门写测试（拼出的 DDL 能被回放到新库并产生等价结构）。
 
 ### 3.3 查询与分页
