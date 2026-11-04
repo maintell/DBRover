@@ -77,7 +77,17 @@ func (d impl) Split(script string) ([]Statement, error) {
 			case bodyDepth > 0 && t.IsKw("CASE"):
 				caseDepth++
 			case bodyDepth > 0 && t.IsKw("END"):
-				if caseDepth > 0 {
+				// END IF / END LOOP / END WHILE / END REPEAT 是块内收尾，
+				// 不是触发器体的结束；把紧跟的关键字一起吃掉，避免它又被
+				// 当成新的块开始。
+				if next := i + 1; next < len(toks) && endsCompoundBlock(toks[next]) {
+					// END CASE 同时要闭掉一次 CASE 计数，否则后面的 END 会被
+					// 误当成 CASE 的收尾，触发器体永远结束不了。
+					if toks[next].IsKw("CASE") && caseDepth > 0 {
+						caseDepth--
+					}
+					i++
+				} else if caseDepth > 0 {
 					caseDepth--
 				} else {
 					bodyDepth = 0
@@ -128,6 +138,11 @@ func (d impl) Split(script string) ([]Statement, error) {
 	flushTo(len(script))
 
 	return out, nil
+}
+
+// endsCompoundBlock 判断紧跟 END 的这个关键字是不是块收尾（END IF 之类）。
+func endsCompoundBlock(t Token) bool {
+	return t.IsKw("IF") || t.IsKw("LOOP") || t.IsKw("WHILE") || t.IsKw("REPEAT") || t.IsKw("CASE")
 }
 
 // startsWithCreateTrigger 判断从 toks[i] 起的语句是不是 CREATE [TEMP] TRIGGER。

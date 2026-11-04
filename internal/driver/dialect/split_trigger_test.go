@@ -42,6 +42,24 @@ func TestSplitTriggerBody(t *testing.T) {
 			want:   []string{"SELECT 1", "SELECT 2"},
 		},
 		{
+			name:   "MySQL 的 IF ... END IF 不结束体",
+			engine: model.EngineMySQL,
+			script: "CREATE TRIGGER t1 BEFORE INSERT ON t FOR EACH ROW BEGIN IF NEW.x > 0 THEN SET NEW.y = 1; END IF; END;\nSELECT 1;",
+			want: []string{
+				"CREATE TRIGGER t1 BEFORE INSERT ON t FOR EACH ROW BEGIN IF NEW.x > 0 THEN SET NEW.y = 1; END IF; END",
+				"SELECT 1",
+			},
+		},
+		{
+			name:   "END CASE 之后体照常结束",
+			engine: model.EngineSQLite,
+			script: "CREATE TRIGGER trg AFTER INSERT ON t BEGIN UPDATE x SET y = CASE WHEN 1=1 THEN 1 ELSE 0 END; END; SELECT 2;",
+			want: []string{
+				"CREATE TRIGGER trg AFTER INSERT ON t BEGIN UPDATE x SET y = CASE WHEN 1=1 THEN 1 ELSE 0 END; END",
+				"SELECT 2",
+			},
+		},
+		{
 			name:   "没有体的触发器照常切",
 			engine: model.EngineMySQL,
 			script: "CREATE TRIGGER t1 BEFORE INSERT ON t FOR EACH ROW SET @x = 1; SELECT 3;",
