@@ -23,6 +23,8 @@ func TestColumnActionsOfferNullableAndDefault(t *testing.T) {
 		{"三件套复用", "async function planColumnChange("},
 		{"加检查约束入口", "async function planAddCheck("},
 		{"按能力位决定摆不摆", "capabilities.add_check"},
+		{"新建视图入口", "async function showCreateView("},
+		{"新建视图的按钮绑定", "$('btn-new-view').onclick"},
 	} {
 		if !strings.Contains(src, want.needle) {
 			t.Errorf("app.js 里缺少「%s」：%q", want.name, want.needle)

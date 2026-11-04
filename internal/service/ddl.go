@@ -53,6 +53,8 @@ const (
 	DDLSetDefault DDLAction = "set_default"
 	// DDLAddCheck 加一条检查约束。加之前先数一遍不满足表达式的行。
 	DDLAddCheck DDLAction = "add_check"
+	// DDLCreateView 建一个视图。视图只存查询定义，不复制数据。
+	DDLCreateView DDLAction = "create_view"
 	// DDLRaw 是「我已经有 DDL，只想让它经过这道门」：语句由用户写，
 	// 工具不做语义解析，只负责分级、审批、审计与竞态保护。
 	DDLRaw DDLAction = "raw"
@@ -147,6 +149,8 @@ type DDLRequest struct {
 	// Check 用于 add_check。名字必须显式给：匿名约束在 PG 里会由引擎起名，
 	// 回滚时就找不回它是哪一条了。
 	Check CheckSpec `json:"check"`
+	// View 用于 create_view。
+	View ViewSpec `json:"view"`
 	// RawSQL 用于 raw：一条手写的 DDL 语句。
 	RawSQL string `json:"sql"`
 }
@@ -158,6 +162,13 @@ type CheckSpec struct {
 	//
 	// 它会被拼进 DDL，所以只允许「不像注入」的字符：见 normalizeCheckExpression。
 	Expression string `json:"expression"`
+}
+
+// ViewSpec 是一个视图定义。
+type ViewSpec struct {
+	Name string `json:"name"`
+	// Query 是 SELECT / WITH 主体（不含 CREATE VIEW 与分号）。
+	Query string `json:"query"`
 }
 
 // constraintNamePattern 限定约束名：字母或下划线开头，其后字母数字下划线。
@@ -402,6 +413,10 @@ func (e *Executor) BuildDDLPlan(ctx context.Context, req DDLRequest) (*ChangePla
 	// 建表没有「现有结构」可读，走单独分支。
 	if req.Action == DDLCreateTable {
 		return e.buildCreateTablePlan(ctx, req)
+	}
+	// 建视图同理：它没有「现有表结构」可读，也不需要表定义哈希。
+	if req.Action == DDLCreateView {
+		return e.buildCreateViewPlan(ctx, req)
 	}
 	// 手写 DDL 也不依赖「我要改的那张表」：它可能建表、也可能改别的东西。
 	if req.Action == DDLRaw {
@@ -1257,6 +1272,83 @@ func (e *Executor) buildRawDDLPlan(ctx context.Context, req DDLRequest) (*Change
 	if err := e.checkBlockers(ctx, plan); err != nil {
 		return nil, err
 	}
+	e.finishDDLPlan(plan)
+	return plan, nil
+}
+
+// normalizeViewQuery 校验视图主体。
+//
+// 视图定义没法参数化，只能拼；所以按「是不是一条查询」卡：
+//   - 必须以 SELECT 或 WITH 开头（`CREATE VIEW v AS DELETE …` 这种在引擎侧报错，
+//     错误信息指不到我们的输入上）；
+//   - 不能有分号：分号会被切分器切成两条语句，第二条的执行结果没人看；
+//   - 不能有控制字符（换行与制表除外），长度上限 4000。
+//
+// 不做的是语法分析：视图能不能建，最终由引擎判定。
+func normalizeViewQuery(q string) (string, error) {
+	q = strings.TrimSpace(q)
+	if q == "" {
+		return "", fmt.Errorf("%w: 视图定义不能为空", ErrInvalidDDL)
+	}
+	if len(q) > 4000 {
+		return "", fmt.Errorf("%w: 视图定义过长（>4000 字符）", ErrInvalidDDL)
+	}
+	if strings.Contains(q, ";") {
+		return "", fmt.Errorf("%w: 视图定义里不能有分号", ErrInvalidDDL)
+	}
+	for _, r := range q {
+		if r < 0x20 && r != 0x0a && r != 0x09 && r != 0x0d {
+			return "", fmt.Errorf("%w: 视图定义里有控制字符", ErrInvalidDDL)
+		}
+	}
+	head := strings.ToLower(q)
+	if !strings.HasPrefix(head, "select") && !strings.HasPrefix(head, "with") {
+		return "", fmt.Errorf("%w: 视图定义必须以 SELECT 或 WITH 开头", ErrInvalidDDL)
+	}
+	return q, nil
+}
+
+// buildCreateViewPlan 生成建视图预案。
+//
+// 同名视图存在时直接拒绝而不是加 OR REPLACE：替换掉一个已有视图，等于悄悄改掉
+// 所有依赖它的查询看到的列，这该由人来决定。
+func (e *Executor) buildCreateViewPlan(ctx context.Context, req DDLRequest) (*ChangePlan, error) {
+	if !e.conn.Capabilities().Views {
+		return nil, fmt.Errorf("%w: 该引擎不支持视图", ErrInvalidDDL)
+	}
+	name := strings.TrimSpace(req.View.Name)
+	if !constraintNamePattern.MatchString(name) {
+		return nil, fmt.Errorf("%w: 视图名 %q 只能用字母、数字、下划线，且以字母或下划线开头",
+			ErrInvalidDDL, req.View.Name)
+	}
+	query, qerr := normalizeViewQuery(req.View.Query)
+	if qerr != nil {
+		return nil, qerr
+	}
+	if objs, oerr := e.conn.Meta().Objects(ctx, req.Table.Catalog, req.Table.Schema, model.KindView); oerr == nil {
+		for _, o := range objs {
+			if strings.EqualFold(o.Name, name) {
+				return nil, fmt.Errorf("%w: 视图 %q 已存在（要改它请先删，或用「手写 DDL」）", ErrInvalidDDL, name)
+			}
+		}
+	}
+	quoted := e.dialect.QuoteQualified(schemaOf(req.Table, e.cfgSchema()), name)
+	plan := &ChangePlan{
+		ID: "ddl-" + newID(),
+		Table: model.ObjectRef{
+			Kind: model.KindView, Name: name, Schema: req.Table.Schema, Catalog: req.Table.Catalog,
+		},
+		CreatedAt: time.Now(),
+		ExpiresAt: time.Now().Add(planTTL),
+		Statements: []PlanStatement{{
+			SQL: e.dialect.CreateViewSQL(quoted, query), ExpectRows: -1,
+		}},
+		Rollback: []PlanStatement{{
+			SQL: e.dialect.DropViewSQL(quoted), ExpectRows: -1,
+		}},
+		AffectedRows: 0,
+	}
+	plan.Notes = append(plan.Notes, "视图只存查询定义，不复制数据；删除视图不影响底层表")
 	e.finishDDLPlan(plan)
 	return plan, nil
 }

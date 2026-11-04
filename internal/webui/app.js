@@ -2813,6 +2813,7 @@ function approvalCard(p) {
 $('btn-compare').onclick = () => showCompare();
 $('btn-agent').onclick = () => showAgent();
 $('btn-new-table').onclick = () => showCreateTable();
+$('btn-new-view').onclick = () => showCreateView();
 $('btn-forget').onclick = () => {
   forgetToken();
   location.reload();
@@ -3167,3 +3168,36 @@ function badge(text) {
   return s;
 }
 
+
+// showCreateView 建一个视图：名字与 SELECT 主体分开填，CREATE VIEW 由服务端补。
+//
+// 走与结构变更同一套「预案 → 确认 → 执行」：视图会出现在对象树里，也可能被
+// 别的查询依赖，不该用一条裸 SQL 直接打进去——那样既没有回滚语句，也没有
+// 「同名已存在」这层提醒。
+async function showCreateView() {
+  if (!state.current) {
+    showNotice('请先建立连接。', 'warn');
+    return;
+  }
+  const ok = await dialog(
+    '新建视图',
+    '<label class="field">视图名</label>' +
+      '<input id="v-name" style="width:100%" autocomplete="off" spellcheck="false">' +
+      '<label class="field">定义（SELECT 或 WITH 开头，不带分号）</label>' +
+      '<textarea id="v-query" rows="6" style="width:100%" spellcheck="false" ' +
+      'placeholder="SELECT id, v FROM t WHERE id > 0"></textarea>',
+    '生成预案');
+  if (!ok) return;
+  const name = $('v-name').value.trim();
+  const query = $('v-query').value.trim();
+  let plan;
+  try {
+    plan = await postSchemaPlan({ action: 'create_view', view: { name, query } }, false);
+  } catch (e) {
+    showNotice(e.message + (e.hint ? '（' + e.hint + '）' : ''), 'error');
+    return;
+  }
+  if (!(await confirmPlan(plan))) return;
+  // 建完刷新对象树：视图要能立刻在左侧看到，否则用户会以为没建成。
+  await applyPlan(plan.id, undefined, loadTables);
+}

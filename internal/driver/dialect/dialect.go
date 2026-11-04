@@ -106,6 +106,10 @@ type Dialect interface {
 	// 刻意不渲染 EXPLAIN ANALYZE：那会真的把语句跑一遍。
 	ExplainSQL(sqlText string) (string, bool)
 
+	// CreateViewSQL 渲染建视图语句。name 应当是已引用好的限定名，
+	// query 是已过校验的 SELECT / WITH 主体（不含分号）。
+	CreateViewSQL(name, query string) string
+
 	// DropViewSQL 渲染删视图语句。name 应当是已引用好的限定名。
 	//
 	// 视图是独立对象，不带 ON <table>。默认带 IF EXISTS：重复执行不该炸。
@@ -300,6 +304,14 @@ func (d impl) ExplainSQL(sqlText string) (string, bool) {
 	default:
 		return "", false
 	}
+}
+
+// CreateViewSQL 见接口注释。
+//
+// 不加 OR REPLACE：SQLite 不支持它，而「悄悄替换掉一个已有视图」也不是这里
+// 该有的默认行为——同名视图存在时由服务层拒绝，让人自己确认。
+func (d impl) CreateViewSQL(name, query string) string {
+	return "CREATE VIEW " + name + " AS " + query
 }
 
 // DropViewSQL 渲染删视图语句。
