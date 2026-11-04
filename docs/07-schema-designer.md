@@ -259,7 +259,7 @@ SELECT COUNT(*) FROM t WHERE c > 2147483647 OR c < -2147483648;
 | 8 | 存在视图依赖时 `DROP TABLE` 被阻断 | 集成 ✅ `TestDDLDropTableBlockedByView`、`TestSchemaPlanDropTableBlockedByDependency`、`drivertest` 的 `DependentsReported`（三引擎）、`scripts/accept/deps-drop.ps1`（MySQL 5.7 + PG 17 真机：外键 + 视图双阻断 → 拆掉后出预案 → 执行 → 表消失） |
 | 9 | 结构比对生成升级与回退脚本，且脚本可执行 | 集成（双库）✅ `TestCompareSchemas` / `TestCompareIndexes` / `TestCompareForeignKeys` / `TestCompareChecks` / `TestCompareViews` / `TestCompareEndpoint`；真机 `scripts/accept/compare-cross.ps1`（MySQL 5.7 ↔ PG 17 同构表零差异、跨引擎单侧视图分类、MySQL 两库视图零误报） |
 | 10 | 对象定义在执行前被他人修改 → 预检失败并阻断 | 集成 ✅ `TestDDLPlanSchemaChangedBlocks`、`TestDDLCreateTableBlocksWhenTableAppeared`、`TestDDLPlanOnRealEngines`（MySQL + PG）；返回 `409 SCHEMA_CHANGED`，前端据此重读结构 |
-| 11 | 无长事务时才允许执行高风险 DDL | 集成 ✅ `checkBlockers`：`lock_wait` 阻断（`ErrLockWait`）、`idle_in_transaction` 只进 `plan.Notes`，`TestSplitBlockers` 覆盖两类分流；**真机验证** `TestHighRiskDDLBlockedByLockWait`（MySQL 5.7：一个事务持行锁、另一事务排队制造真实等锁 → 预案被拒；变异验证：去掉阻断判断即红） |
+| 11 | 无长事务时才允许执行高风险 DDL | 集成 ✅ 主体通过：`checkBlockers` 把 `lock_wait` 判为阻断（`ErrLockWait`）、`idle_in_transaction` 只进 `plan.Notes`，`TestSplitBlockers` 覆盖两类分流；**真机验证** `TestHighRiskDDLBlockedByLockWait`（MySQL 5.7：一个事务持行锁、另一事务排队制造真实等锁 → 预案被拒；变异验证：去掉阻断判断即红）。⚠️ **MDL 探测未做**：MySQL 的 `performance_schema.metadata_locks` 需要 8.0，5.7 拿不到，所以「有未提交的元数据锁」这一种情形目前只能靠长事务间接看 |
 | 12 | 表单视图与 SQL 视图内容一致（双向） | 单测 ⚠️ **只有单向**：表单 → DDL 由 `BuildDDLPlan` 生成；DDL → 表单（反解）未做，需要完整 DDL 解析器（见 §9 已知限制）。没有自动化用例直接比对两种输入产生同一份语句，此前是人工核对 |
 
 ---
