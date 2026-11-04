@@ -185,6 +185,22 @@
         "responses": { "200": { "description": "ok" }, "404": { "description": "不存在" } }
       }
     },
+    "/api/v1/connections/{id}/search": {
+      "get": {
+        "summary": "按名称/注释模糊搜索对象",
+        "parameters": [
+          { "name": "id", "in": "path", "required": true, "schema": { "type": "string" } },
+          { "name": "q", "in": "query", "required": true, "schema": { "type": "string" } },
+          { "name": "kind", "in": "query", "schema": { "type": "string" }, "description": "逗号分隔：table/view/matview/sequence/trigger/type/routine" },
+          { "name": "limit", "in": "query", "schema": { "type": "integer", "default": 50, "maximum": 200 } }
+        ],
+        "responses": {
+          "200": { "description": "ok" },
+          "400": { "description": "q 为空、kind 不认识或 limit 非法" },
+          "404": { "description": "连接不存在" }
+        }
+      }
+    },
     "/api/v1/connections/{id}/tables/{name}/rows": {
       "get": {
         "summary": "表数据浏览（键集分页）",

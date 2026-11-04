@@ -158,6 +158,8 @@
 - **文档正文与实现对齐（12 处，安全相关的排在前）**：一次只读审计（「文档说法 vs 代码行为」双向取证）在 `docs/02/03/06/10/11` 里查出 12 处不一致，全部改对并标注成「目标 vs 现状」。安全相关的三处：**TLS 从未实现**——`docs/02` 写着「非回环绑定强制 TLS」，实际 `-allow-remote` 一直是明文 HTTP，现在启动时明确警告、文档也写清；**SSH 隧道没有本地端口**——`internal/infra/tunnel` 只到 `Dial`，从没 `net.Listen`，也没接进连接流程，CLI 只是拨通后打印「可连通」；**Linux 凭据库「降级到 0600 文件」与代码相反**——`secret_other.go` 明确拒绝降级（同一份文档另一节还写着「有意不做」，自相矛盾）。
 - **文档正文与实现对齐（续）**：其余九处——`Connection` 的 `params`/`tunnel`/`credential`/`pool`/`init_sql` 等字段、`ChangePlan` 的 `impact`/`preconditions`/`status` 与状态机、`Capabilities` 的 `IndexCapability`/`ExplainCapability`/`ReadOnlyEnforce`（实际都是 `bool`）都不存在；`dbrover exec` 没有 `--conn`（是 `-db` 加 `-sql`/`-file`）；导出格式一处写「无 xlsx/Markdown」另一处写已实现；Agent 的「最大 token 200k」未实现；连接可选参数（`sslmode`/`search_path` 等）没有入口；查询数据流的 WebSocket 与二进制分片实际是 HTTP JSON；浮点列其实**参与**原值校验（文档两处都说跳过，实现也没按类型过滤——偏差时表现为冲突而不是误改，方向安全但要接受偶发重试）。每一处都在原处补了「v1 实现口径」注记，而不是删掉设计意图。
 
+- **对象全局搜索有了 HTTP 出口与界面入口**（FR-META-04，P0）：`GET /api/v1/connections/{id}/search?q&kind&limit`。驱动层的 `Meta().Search` 三个引擎早就实现了（PG / MySQL 连表注释与列注释一起搜，SQLite 只搜名字），但**一直没有端点**——需求是 P0，实际等于没做。`kind` 逗号分隔做类型过滤，**拼错直接 400**（静默忽略会让人以为「这个库里真的没有视图」）；`truncated` 表示驱动按 `limit`（默认 50、上限 200）截断过。界面在对象树上方加了搜索框（输入停 250ms 再查），搜索结果与对象树**共用同一个渲染函数**——两套渲染长歪之后，「搜索结果点不开」这种差异只会出现在搜索那条路上；key-value 连接隐藏搜索框。补 OpenAPI 声明时被 `TestSpecMatchesRoutes` 当场拦下（加了路由没加契约），这条既有门禁按预期工作。
+
 ### 安全
 
 - **大整数不再静默丢精度**：`BIGINT` 超过 2^53 时，界面保持字符串、服务端按列类型还原；客户端若把它写成 JSON 数字，直接 `400 NUMBER_PRECISION_LOSS` 并提示改用字符串，而不是把丢了低位的值写进库。此前界面 `coerce()` 用 `Number()` 转换整数列，编辑 `9223372036854775807` 会变成 `...5808`。

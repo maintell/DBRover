@@ -85,6 +85,11 @@ aside {
   min-height: 0;
 }
 
+aside .obj-search {
+  margin: 6px 8px 0;
+  width: calc(100% - 16px);
+}
+
 aside .head {
   padding: 8px 10px;
   border-bottom: 1px solid var(--line);

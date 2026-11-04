@@ -36,6 +36,7 @@ const API = {
   connections: '/api/v1/connections',
   health: '/api/v1/connections/:id/health',
   tables: '/api/v1/connections/:id/tables',
+  search: '/api/v1/connections/:id/search',
   rows: '/api/v1/connections/:id/tables/:name/rows',
   schema: '/api/v1/connections/:id/tables/:name/schema',
   schemaPlan: '/api/v1/connections/:id/schema/plan',
@@ -460,8 +461,10 @@ async function loadTables() {
   // key-value 连接的「对象树」是 keyspace，不是表清单。
   // kind 来自服务端的类型断言结果，界面不记「哪些引擎是 NoSQL」。
   if (state.current.kind === 'keyvalue') {
+    if ($('obj-search')) $('obj-search').hidden = true;
     return loadKeyspace();
   }
+  if ($('obj-search')) $('obj-search').hidden = false;
   $('tables').replaceChildren();
   try {
     const out = await api(path(API.tables, { id: state.current.id }));
@@ -474,26 +477,60 @@ async function loadTables() {
       $('tables').appendChild(d);
       return;
     }
-    for (const t of items) {
-      const b = document.createElement('button');
-      const kind = t.kind || 'table';
-      // 触发器与序列不是「能查数据的表」：点开只会得到一条必然失败的
-      // SELECT。摆出来是为了让人知道它们存在，点击留给后续的定义视图。
-      const browsable = kind === 'table' || kind === 'view';
-      if (browsable) {
-        b.textContent = t.name;
-        b.onclick = () => browseTable(t.name);
-      } else {
-        // 触发器与序列都没有数据行，但都有定义：点开看原文。
-        const label = { trigger: '触发器', sequence: '序列', type: '类型', routine: '例程' }[kind] || kind;
-        b.textContent = t.name + ' · ' + label;
-        b.title = '查看' + label + '定义';
-        b.onclick = () => showObjectDDL(kind, t.name);
-      }
-      $('tables').appendChild(b);
-    }
+    renderObjects(items);
   } catch (e) {
     showNotice('加载表清单失败：' + e.message, 'error');
+  }
+}
+
+// renderObjects 渲染对象清单。对象树与搜索结果共用一份——两套渲染必然长歪，
+// 到时候「搜索结果点不开」这种差异只会出现在搜索那条路上。
+function renderObjects(items) {
+  $('tables').replaceChildren();
+  for (const t of items) {
+    const b = document.createElement('button');
+    const kind = t.kind || 'table';
+    // 触发器与序列不是「能查数据的表」：点开只会得到一条必然失败的 SELECT。
+    // 摆出来是为了让人知道它们存在，点击去看定义。
+    const browsable = kind === 'table' || kind === 'view';
+    if (browsable) {
+      b.textContent = t.name;
+      b.onclick = () => browseTable(t.name);
+    } else {
+      const label = { trigger: '触发器', sequence: '序列', type: '类型', routine: '例程' }[kind] || kind;
+      b.textContent = t.name + ' · ' + label;
+      b.title = '查看' + label + '定义';
+      b.onclick = () => showObjectDDL(kind, t.name);
+    }
+    $('tables').appendChild(b);
+  }
+}
+
+// searchObjects 调 /search 做模糊搜索（名称 + 注释）。清空输入就回到完整清单。
+async function searchObjects() {
+  if (!state.current) return;
+  const box = $('obj-search');
+  const q = (box && box.value || '').trim();
+  if (!q) {
+    await loadTables();
+    return;
+  }
+  try {
+    const out = await api(path(API.search, { id: state.current.id }) +
+      '?q=' + encodeURIComponent(q) + '&limit=100');
+    const items = (out && out.items) || [];
+    // 加号表示驱动按条数截断过：结果可能不是全集，别让人以为「就这些」。
+    $('table-count').textContent = items.length + (out && out.truncated ? '+' : '') + ' 个';
+    if (!items.length) {
+      const d = document.createElement('div');
+      d.className = 'notice';
+      d.textContent = '没有匹配「' + q + '」的对象。';
+      $('tables').replaceChildren(d);
+      return;
+    }
+    renderObjects(items);
+  } catch (e) {
+    showNotice('搜索失败：' + e.message, 'error');
   }
 }
 
@@ -2848,6 +2885,14 @@ $('btn-new-view').onclick = () => showCreateView();
 $('btn-new-seq').onclick = () => showCreateSequence();
 $('btn-new-type').onclick = () => showCreateType();
 $('btn-new-routine').onclick = () => showCreateRoutine();
+// 对象搜索：输入停 250ms 再查，避免每敲一个字符打一次库。
+let objSearchTimer = null;
+if ($('obj-search')) {
+  $('obj-search').oninput = () => {
+    clearTimeout(objSearchTimer);
+    objSearchTimer = setTimeout(searchObjects, 250);
+  };
+}
 $('btn-forget').onclick = () => {
   forgetToken();
   location.reload();

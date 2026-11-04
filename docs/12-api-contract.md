@@ -81,6 +81,7 @@ Content-Type: application/x-ndjson
 | `DELETE` | `/api/v1/connections/{id}` | 关闭并移除连接 |
 | `GET` | `/api/v1/connections/{id}/health` | 版本、只读状态、服务器身份、**能力声明 `capabilities`**（界面据此决定摆不摆「计划」这类入口；不支持就返回 400 `EXPLAIN_UNSUPPORTED`，不等点一次再报错） |
 | `GET` | `/api/v1/connections/{id}/tables` | 对象清单：表与视图，引擎能力支持时还包含触发器与序列（每项带 `kind`，界面据此决定能不能点开看数据） |
+| `GET` | `/api/v1/connections/{id}/search?q&kind&limit` | 按名称/注释模糊搜索对象（FR-META-04）：`q` 必填；PG 与 MySQL 连表注释、列注释一起搜，SQLite 只搜名字（引擎差异在驱动里，不在契约里分支）。`kind` 逗号分隔做类型过滤（table / view / matview / sequence / trigger / type / routine），**拼错直接 400** 而不是静默忽略——静默忽略会让人以为「这个库里真的没有视图」。`truncated` 表示驱动按 `limit`（默认 50，上限 200）截断过 | ✅ |
 | `GET` | `/api/v1/connections/{id}/tables/{name}/rows` | 表数据浏览，**键集分页**（`limit`、`after`、`where`、`order`） |
 | `GET` | `/api/v1/connections/{id}/tables/{name}/schema` | 列、索引、外键、主键与建表原文；表不存在 → 404。`?kind=trigger` / `?kind=sequence` 时只回对象定义（`{object, ddl, capabilities}`）——这两类对象没有列结构 |
 | `GET` | `/api/v1/connections/{id}/export` | 流式导出 CSV / NDJSON / SQL / Markdown。`format=sql`：建表 + `INSERT` 的可回放脚本（**同引擎**回放）；`format=markdown`：GitHub 风格表格，表头必写、`NULL` 与空串 `''` 分开（与界面一致），`|` 与换行转义；`format=xlsx`：真 Excel 工作簿（`application/vnd.openxmlformats-officedocument.spreadsheetml.sheet`，文件名 `<表>.xlsx`），数字保持数字 |

@@ -172,6 +172,7 @@ func (s *Server) routes() []route {
 		{http.MethodDelete, "/api/v1/connections/{id}", false, s.handleDeleteConnection},
 		{http.MethodGet, "/api/v1/connections/{id}/health", false, s.handleConnHealth},
 		{http.MethodGet, "/api/v1/connections/{id}/tables", false, s.handleTables},
+		{http.MethodGet, "/api/v1/connections/{id}/search", false, s.handleSearch},
 		{http.MethodGet, "/api/v1/connections/{id}/tables/{name}/rows", false, s.handleTableRows},
 		{http.MethodPost, "/api/v1/connections/{id}/exec", false, s.handleExec},
 		{http.MethodPost, "/api/v1/connections/{id}/cancel", false, s.handleCancel},
@@ -566,6 +567,89 @@ func (s *Server) handleConnHealth(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// searchKinds 是 kind 过滤允许的对象类型。写成清单而不是自由字符串：拼错一个
+// 类型名如果被静默忽略，用户会以为「这个库里真的没有视图」。
+var searchKinds = map[model.ObjectKind]bool{
+	model.KindTable:    true,
+	model.KindView:     true,
+	model.KindMatView:  true,
+	model.KindSequence: true,
+	model.KindTrigger:  true,
+	model.KindType:     true,
+	model.KindRoutine:  true,
+}
+
+// handleSearch 按名称/注释模糊搜索对象（FR-META-04）。
+//
+// 驱动层的 `Meta().Search` 早就实现了（三引擎都有，PG/MySQL 还搜注释），但一直
+// 没有 HTTP 出口——需求上这条是 P0，实际等于没做。
+//
+// kind 过滤放在这一层：驱动只认「关键字 + 条数」，不该知道上层想过滤哪些类型。
+// 代价是可能少于 limit（驱动先截断再过滤），所以响应里给 truncated 让人知道。
+func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
+	e, ok := s.lookup(r)
+	if !ok {
+		writeError(w, http.StatusNotFound, "CONNECTION_NOT_FOUND", "connection", "连接不存在", "", false)
+		return
+	}
+	drv, isRel := e.relational()
+	if !isRel {
+		writeError(w, http.StatusBadRequest, "CAPABILITY_UNSUPPORTED", "internal",
+			"这是一个 key-value 连接，没有对象清单可搜",
+			"改用 GET /api/v1/connections/{id}/kv/keys?pattern=...", false)
+		return
+	}
+	q := strings.TrimSpace(r.URL.Query().Get("q"))
+	if q == "" {
+		writeError(w, http.StatusBadRequest, "REQUEST_INVALID", "internal",
+			"q 必填（按名称或注释模糊匹配）", "", false)
+		return
+	}
+	limit := 50
+	if raw := r.URL.Query().Get("limit"); raw != "" {
+		n, err := strconv.Atoi(raw)
+		if err != nil || n <= 0 {
+			writeError(w, http.StatusBadRequest, "REQUEST_INVALID", "internal",
+				"limit 必须是正整数", "", false)
+			return
+		}
+		if n > 200 {
+			n = 200
+		}
+		limit = n
+	}
+	kinds := map[model.ObjectKind]bool{}
+	if raw := strings.TrimSpace(r.URL.Query().Get("kind")); raw != "" {
+		for _, part := range strings.Split(raw, ",") {
+			k := model.ObjectKind(strings.TrimSpace(part))
+			if k == "" {
+				continue
+			}
+			if !searchKinds[k] {
+				writeError(w, http.StatusBadRequest, "REQUEST_INVALID", "internal",
+					"kind 只接受 table / view / matview / sequence / trigger / type / routine", "", false)
+				return
+			}
+			kinds[k] = true
+		}
+	}
+	objs, err := drv.Meta().Search(r.Context(), q, limit)
+	if err != nil {
+		writeError(w, http.StatusBadGateway, "DB_METADATA_FAILED", "connection", err.Error(), "", true)
+		return
+	}
+	truncated := len(objs) == limit
+	if len(kinds) > 0 {
+		kept := objs[:0]
+		for _, o := range objs {
+			if kinds[o.Kind] {
+				kept = append(kept, o)
+			}
+		}
+		objs = kept
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"items": objs, "query": q, "truncated": truncated})
+}
 func (s *Server) handleTables(w http.ResponseWriter, r *http.Request) {
 	e, ok := s.lookup(r)
 	if !ok {
