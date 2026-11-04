@@ -1542,6 +1542,18 @@ function renderSchema(out) {
     retype.textContent = '改类型';
     retype.onclick = () => startRetype(tr, c);
     actions.appendChild(retype);
+
+    // 改可空：可空 ⇄ 非空。改非空时服务端先数一遍 NULL，有值就拒绝并报行数。
+    const nn = document.createElement('button');
+    nn.textContent = c.nullable ? '改非空' : '改可空';
+    nn.onclick = () => planColumnChange('set_nullable', { name: c.name, nullable: !c.nullable });
+    actions.appendChild(nn);
+
+    // 改默认值：只收字面量，留空 = 去掉默认值。
+    const df = document.createElement('button');
+    df.textContent = '改默认值';
+    df.onclick = () => startEditDefault(c);
+    actions.appendChild(df);
     tr.appendChild(actions);
     tbody.appendChild(tr);
   }
@@ -1970,21 +1982,48 @@ function startRetype(tr, col) {
   };
 }
 
-async function planRetype(name, newType) {
-  if (!newType) {
-    showNotice('新类型不能为空。', 'warn');
-    return;
-  }
+// planColumnChange 是「列级改动的三件套」：取预案 → 确认 → 执行。
+//
+// 改类型、改可空、改默认值都走它：三处各写一遍，迟早出现「一处忘了展示
+// 预检原因、另一处忘了确认框」。
+async function planColumnChange(action, column) {
   let plan;
   try {
-    plan = await fetchSchemaPlan('alter_column_type', { name, type: newType }, false);
+    plan = await fetchSchemaPlan(action, column, false);
   } catch (e) {
-    // 收窄预检不通过时服务端会带越界样本，原文展示，别换成笼统的话。
+    // 预检拦下时服务端会带原因（越界样本、多少行 NULL），原文展示，别换成笼统的话。
     showNotice(e.message + (e.hint ? '（' + e.hint + '）' : ''), 'error');
     return;
   }
   if (!(await confirmPlan(plan))) return;
   await applyPlan(plan.id, undefined, refreshSchema);
+}
+
+async function planRetype(name, newType) {
+  if (!newType) {
+    showNotice('新类型不能为空。', 'warn');
+    return;
+  }
+  await planColumnChange('alter_column_type', { name, type: newType });
+}
+
+// startEditDefault 用对话框收一个默认值字面量。
+//
+// 不就地改成输入框（改类型那样）是因为默认值常带引号，横着塞进表格会把行撑变形；
+// 对话框还能顺手写清「只影响之后的写入」这条最容易误解的语义。
+async function startEditDefault(col) {
+  const cur = col.default === undefined || col.default === null || col.default === '' ? '无' : String(col.default);
+  const ok = await dialog(
+    '改默认值',
+    '<p>列 <code>' + escapeHTML(col.name) + '</code> 当前默认值：' + escapeHTML(cur) + '</p>' +
+      '<p>只接受字面量：数字、单引号字符串、TRUE / FALSE、CURRENT_TIMESTAMP。留空表示去掉默认值。</p>' +
+      '<p>改完只影响之后的写入，不会回填已有行。</p>' +
+      '<input id="dlg-default" style="width:100%" autocomplete="off" spellcheck="false">',
+    '生成预案');
+  if (!ok) return;
+  const el = $('dlg-default');
+  const v = el ? el.value.trim() : '';
+  await planColumnChange('set_default', { name: col.name, default: v === '' ? null : v });
 }
 
 // ---------- 渲染 ----------

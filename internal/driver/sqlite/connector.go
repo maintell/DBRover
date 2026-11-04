@@ -58,9 +58,11 @@ func (c *Connector) Capabilities() model.Capabilities {
 		BulkLoad:          false,
 		KeysetPagination:  true,
 		DDLTransactional:  true,
-		// SQLite 不能改列类型，只能重建表。
-		AlterColumnType: false,
-		AddForeignKey:   false,
+		// SQLite 不能改列类型、可空性与默认值——都只能重建表。
+		AlterColumnType:        false,
+		AlterColumnNullability: false,
+		AlterColumnDefault:     false,
+		AddForeignKey:          false,
 	}
 }
 

@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
-	"strconv"
 	"strings"
 	"time"
 
@@ -24,6 +23,12 @@ var ErrSchemaChanged = errors.New("表定义已变化，请重新生成结构变
 // ErrInvalidDDL 表示结构变更参数不合法（列名 / 类型 / 默认值）。
 var ErrInvalidDDL = errors.New("结构变更参数不合法")
 
+// ErrNullableBlocked 表示列里还有 NULL，不能改成 NOT NULL。
+//
+// 单独一个错误码，是因为「引擎拒绝」与「我们自己先看见了」不是一回事：
+// 前者给不出「多少行」，用户只能自己写 SQL 去数。
+var ErrNullableBlocked = errors.New("列里还有 NULL，不能改成非空")
+
 // DDLAction 是结构变更动作。
 //
 // v1 只做加列与删列：改列类型需要「收窄预检」（先查越界数据）与跨引擎重写语义，
@@ -39,6 +44,10 @@ const (
 	DDLDropIndex       DDLAction = "drop_index"
 	DDLAddForeignKey   DDLAction = "add_foreign_key"
 	DDLDropTable       DDLAction = "drop_table"
+	// DDLSetNullable 改一列的可空性（SET / DROP NOT NULL）。
+	DDLSetNullable DDLAction = "set_nullable"
+	// DDLSetDefault 改一列的默认值（SET / DROP DEFAULT）。只影响之后的写入。
+	DDLSetDefault DDLAction = "set_default"
 	// DDLRaw 是「我已经有 DDL，只想让它经过这道门」：语句由用户写，
 	// 工具不做语义解析，只负责分级、审批、审计与竞态保护。
 	DDLRaw DDLAction = "raw"
@@ -260,17 +269,18 @@ func (e *Executor) columnDefinitionFromColumn(c model.Column) string {
 	return strings.Join(parts, " ")
 }
 
-// countNonNull 数出某列的非空行数，用于告知「删这一列会丢多少数据」。
-// 查不出来就返回 -1（未知），绝不返回 0 假装「没有数据」。
-func (e *Executor) countNonNull(ctx context.Context, table, column string) int64 {
+// countWhere 数出满足条件的行数；查不出来返回 -1（未知）。
+//
+// 「未知」必须与 0 分开：删列、改非空都靠这个数告诉用户影响面，
+// 拿 0 假装「没有数据」会让最危险的操作看起来最安全。
+func (e *Executor) countWhere(ctx context.Context, table, where string) int64 {
 	sess, err := e.conn.Acquire(ctx)
 	if err != nil {
 		return -1
 	}
 	defer func() { _ = sess.Close() }()
 
-	q := "SELECT COUNT(*) FROM " + table + " WHERE " + e.dialect.QuoteIdent(column) + " IS NOT NULL"
-	cur, err := sess.Query(ctx, q, nil, driver.QueryOptions{})
+	cur, err := sess.Query(ctx, "SELECT COUNT(*) FROM "+table+" WHERE "+where, nil, driver.QueryOptions{})
 	if err != nil {
 		return -1
 	}
@@ -280,19 +290,20 @@ func (e *Executor) countNonNull(ctx context.Context, table, column string) int64
 	if err != nil || len(rows) != 1 || len(rows[0]) == 0 {
 		return -1
 	}
-	switch v := rows[0][0].(type) {
-	case int64:
-		return v
-	case int32:
-		return int64(v)
-	case int:
-		return int64(v)
-	case []byte:
-		if n, err := strconv.ParseInt(string(v), 10, 64); err == nil {
-			return n
-		}
+	if n, ok := toInt64(rows[0][0]); ok {
+		return n
 	}
 	return -1
+}
+
+// countNonNull 数出某列的非空行数，用于告知「删这一列会丢多少数据」。
+func (e *Executor) countNonNull(ctx context.Context, table, column string) int64 {
+	return e.countWhere(ctx, table, e.dialect.QuoteIdent(column)+" IS NOT NULL")
+}
+
+// countNulls 数出某列的空行数，用于「能不能改成 NOT NULL」的预检。
+func (e *Executor) countNulls(ctx context.Context, table, column string) int64 {
+	return e.countWhere(ctx, table, e.dialect.QuoteIdent(column)+" IS NULL")
 }
 
 // BuildDDLPlan 生成一次结构变更的预案。
@@ -335,6 +346,13 @@ func (e *Executor) BuildDDLPlan(ctx context.Context, req DDLRequest) (*ChangePla
 		if cerr != nil {
 			return nil, cerr
 		}
+	case DDLSetNullable, DDLSetDefault:
+		// 这两个动作只动列的一两个属性，不需要（也不该要求）重报类型。
+		name, nerr := normalizeColumnName(req.Column.Name)
+		if nerr != nil {
+			return nil, nerr
+		}
+		spec = ColumnSpec{Name: name, Default: req.Column.Default, Nullable: req.Column.Nullable}
 	}
 
 	table := e.dialect.QuoteQualified(schemaOf(req.Table, e.cfgSchema()), req.Table.Name)
@@ -437,6 +455,88 @@ func (e *Executor) BuildDDLPlan(ctx context.Context, req DDLRequest) (*ChangePla
 		} else {
 			plan.AffectedRows = -1 // 未知就说未知，不写 0
 		}
+
+	case DDLSetNullable:
+		col, ok := findColumn(td, spec.Name)
+		if !ok {
+			return nil, fmt.Errorf("%w: 列 %q 不存在", ErrInvalidDDL, spec.Name)
+		}
+		if !e.conn.Capabilities().AlterColumnNullability {
+			return nil, fmt.Errorf("%w: 该引擎不支持原地改可空性（SQLite 只能重建表）", ErrInvalidDDL)
+		}
+		if col.Nullable == spec.Nullable {
+			state := "可空"
+			if !spec.Nullable {
+				state = "非空"
+			}
+			return nil, fmt.Errorf("%w: 列 %q 已经是%s，这次改动什么都不会改变", ErrInvalidDDL, col.Name, state)
+		}
+		// 改成 NOT NULL 前先数一遍 NULL：引擎也会拒绝，但它的报错里没有「多少行」，
+		// 用户只能自己再写一条 SQL 去数。探测失败（-1）就交给引擎判。
+		if !spec.Nullable {
+			if n := e.countNulls(ctx, table, col.Name); n > 0 {
+				return nil, fmt.Errorf("%w：列 %q 有 %d 行为 NULL，先补上值再改非空", ErrNullableBlocked, col.Name, n)
+			}
+		}
+		def := safeDefaultText(col.Type.Kind, col.Default)
+		rawType := strings.TrimSpace(col.Type.Raw)
+		fwd, okCap := e.dialect.SetNullabilitySQL(table, col.Name, rawType, def, spec.Nullable)
+		if !okCap || len(fwd) == 0 {
+			return nil, fmt.Errorf("%w: 无法为 %s 渲染改可空语句", ErrInvalidDDL, e.dialect.Engine())
+		}
+		back, _ := e.dialect.SetNullabilitySQL(table, col.Name, rawType, def, col.Nullable)
+		for _, s := range fwd {
+			plan.Statements = append(plan.Statements, PlanStatement{SQL: s, ExpectRows: -1})
+		}
+		for _, s := range back {
+			plan.Rollback = append(plan.Rollback, PlanStatement{SQL: s, ExpectRows: -1})
+		}
+		// 改可空不改任何一行的值：不写 0 是因为 PG 的 SET NOT NULL 会全表校验，
+		// 说「0 行」会让人以为瞬间完成。
+		plan.AffectedRows = -1
+		if !spec.Nullable {
+			plan.Notes = append(plan.Notes, "改非空会全表校验一遍：大表上可能锁住写入较久")
+		}
+
+	case DDLSetDefault:
+		col, ok := findColumn(td, spec.Name)
+		if !ok {
+			return nil, fmt.Errorf("%w: 列 %q 不存在", ErrInvalidDDL, spec.Name)
+		}
+		if !e.conn.Capabilities().AlterColumnDefault {
+			return nil, fmt.Errorf("%w: 该引擎不支持原地改默认值（SQLite 只能重建表）", ErrInvalidDDL)
+		}
+		want := ""
+		if spec.Default != nil {
+			want = strings.TrimSpace(*spec.Default)
+		}
+		if want != "" && !defaultPattern.MatchString(want) {
+			return nil, fmt.Errorf("%w: 默认值 %q 不是字面量；表达式一律拒绝（它是一条任意 SQL）",
+				ErrInvalidDDL, want)
+		}
+		cur := safeDefaultText(col.Type.Kind, col.Default)
+		// 当前默认值是表达式时 safeDefaultText 会给出空串；此时回滚只能变成
+		// DROP DEFAULT——那是「改结构却给不出等价回滚」，必须当场说清楚。
+		if col.Default != nil && strings.TrimSpace(*col.Default) != "" && cur == "" {
+			return nil, fmt.Errorf("%w: 列 %q 的当前默认值是表达式（%s），生成不出等价回滚语句",
+				ErrInvalidDDL, col.Name, strings.TrimSpace(*col.Default))
+		}
+		if cur == want {
+			return nil, fmt.Errorf("%w: 列 %q 的默认值本来就是 %q", ErrInvalidDDL, col.Name, want)
+		}
+		fwd, okCap := e.dialect.SetDefaultSQL(table, col.Name, want)
+		if !okCap || len(fwd) == 0 {
+			return nil, fmt.Errorf("%w: 无法为 %s 渲染改默认值语句", ErrInvalidDDL, e.dialect.Engine())
+		}
+		back, _ := e.dialect.SetDefaultSQL(table, col.Name, cur)
+		for _, s := range fwd {
+			plan.Statements = append(plan.Statements, PlanStatement{SQL: s, ExpectRows: -1})
+		}
+		for _, s := range back {
+			plan.Rollback = append(plan.Rollback, PlanStatement{SQL: s, ExpectRows: -1})
+		}
+		plan.AffectedRows = 0
+		plan.Notes = append(plan.Notes, "改默认值只影响之后的写入，不会回填已有行")
 
 	case DDLCreateIndex:
 		if !e.conn.Capabilities().Indexes {

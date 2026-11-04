@@ -289,6 +289,8 @@ SELECT COUNT(*) FROM t WHERE c > 2147483647 OR c < -2147483648;
 | 删列的外键阻断 | §5.1 | 删列前查入向外键；引用该列即阻断并点名引用方（外键依赖是精确的，不标近似）；视图依赖只写进 `notes` 提示自查 | `TestDDLDropColumnBlockedByForeignKey` |
 | 预执行检查：长事务与锁等待 | §2.5 / 验收 11 | `Metadata.Blockers`：MySQL 走 `innodb_trx`（超 60 秒的事务）+ `innodb_lock_waits`；PG 走 `pg_stat_activity`（`idle in transaction` 与 `wait_event_type='Lock'`）；SQLite 恒为空（单写者模型）。**锁等待阻断**（`409 LOCK_WAIT_BLOCKED`），**长事务只写进 `notes`**（最多 3 条）——忙碌的库上永远有人开着事务，用它阻断等于关掉整个设计器 | `drivertest` 的 `BlockersReported`（自己开一个事务再从另一条连接查，断言必须报出来；SQLite 明确 skip）、`TestSchemaPlan*` 系列不回归 |
 | 预执行检查：元数据锁（MDL） | §2.5 / 验收 11 | 未做：MySQL 5.7 没有 `performance_schema.metadata_locks`，做不了就不假装能做 | 待有 MySQL 8 实测环境后再补 |
+| 改可空 | §1.1 / §5.2 | `action` 为 `set_nullable`：PG 直接 `ALTER COLUMN … SET/DROP NOT NULL`；MySQL 走 `MODIFY COLUMN`（必须带完整列定义，否则会顺手丢默认值）；SQLite 声明 `AlterColumnNullability: false`，直接拒绝。**改非空前先数了一遍 NULL**，有值即 `ErrNullableBlocked` 并报「N 行为 NULL」——交给引擎报错拿不到行数。改成与现状相同的状态也拒绝（预案说改了什么其实没改） | `TestDDLSetNullableOnRealEngines`（MySQL + PG：NULL 阻断带行数 → 补值 → 执行 → 回滚变回可空）、`TestDDLSetNullableAndDefaultUnsupportedOnSQLite`；变异验证：去掉 NULL 预检即红 |
+| 改默认值 | §1.1 / §5.2 | `action` 为 `set_default`：`ALTER COLUMN … SET/DROP DEFAULT`；值必须过 `defaultPattern`（数字 / 单引号字符串 / TRUE / FALSE / CURRENT_TIMESTAMP），表达式一律拒——它是一条任意 SQL。**当前默认值本身是表达式时也拒**：那意味着给不出等价回滚。预案注明「只影响之后的写入，不回填已有行」 | `TestDDLSetDefaultOnRealEngines`（MySQL + PG：表达式被拒 → SET DEFAULT → DROP DEFAULT）、`TestDDLSetNullableAndDefaultUnsupportedOnSQLite` |
 | 外键预检（只读） | §5.1 / §5.2 / 验收 5 | `POST /connections/{id}/fk/precheck`：检出子表里父表找不到对应行的数据（任一子列为 NULL 不计），判断父表参与列是否唯一（主键或**列集合完全一致**的唯一索引），orphans>0 即 `blocked` 并给最多 5 条样本 | `TestFKPrecheckCleanData`、`TestFKPrecheckOrphansBlocked`、`TestFKPrecheckCompositeUniqueness`、`TestFKPrecheckEndpoint` |
 | 删列的影响面 | §5.2 | 展示该列**非空行数**（`COUNT(*) WHERE col IS NOT NULL`），并标 `不可逆`；NULL 行不计入 | 浏览器实测（3 行有值 → 显示「影响 3 行」） |
 | 加列可撤销 | §2.6 | 撤销预案 = `DROP COLUMN`，复用撤销通道；删列因数据丢失不生成撤销 | 浏览器实测（加列后撤销，结构与 DDL 复原） |
@@ -297,7 +299,6 @@ SELECT COUNT(*) FROM t WHERE c > 2147483647 OR c < -2147483648;
 
 | 缺口 | 契约位置 | 影响 | 处置 |
 |---|---|---|---|
-| 改默认值 / 改可空 | §1.1 | 改列类型时会把原有的可空性与默认值一起保留，但还不能单独修改它们 | 待实现；改默认值涉及表达式白名单，改可空涉及 NOT NULL 预检 |
 | 检查约束的 DDL | §1.1 / §5.2 | 既没有加检查约束的动作，结构比对也不比它（`TableDetail.Checks` 已由驱动填充，只是没被用起来） | 待实现；加检查约束要先做「存量行是否满足表达式」的预检，否则和孤儿数据是同一类问题 |
 | 视图 / 物化视图 / 例程 / 触发器 / 序列 / 用户类型设计器 | §1.1、§6 | 全部缺失 | 待实现 |
 | 引擎特有项（`EngineExtra`）表单 | §1.3 | 未渲染，仅能看 DDL 原文 | 待实现；依赖各引擎补充元数据 |

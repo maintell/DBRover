@@ -63,7 +63,11 @@ func (c *Connector) Capabilities() model.Capabilities {
 		// MySQL 的 DDL 隐式提交，无法真实回滚。
 		DDLTransactional: false,
 		AlterColumnType:  true,
-		AddForeignKey:    true,
+		// ALTER COLUMN ... SET DEFAULT 与 MODIFY COLUMN ... NOT NULL 都支持
+		// （后者要完整列定义，方言层已经按改类型那条路径生成）。
+		AlterColumnNullability: true,
+		AlterColumnDefault:     true,
+		AddForeignKey:          true,
 	}
 }
 

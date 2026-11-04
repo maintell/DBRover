@@ -248,6 +248,10 @@ type Capabilities struct {
 	Sequences         bool `json:"sequences"`
 	UserTypes         bool `json:"user_types"`
 	Indexes           bool `json:"indexes"`
+	// AlterColumnNullability / AlterColumnDefault 表示引擎支持原地改可空性与
+	// 默认值。SQLite 两者都不支持（只能重建表），据此拒绝而不是生成必然失败的语句。
+	AlterColumnNullability bool `json:"alter_column_nullability"`
+	AlterColumnDefault     bool `json:"alter_column_default"`
 	// IndexValidity 表示 DescribeTable 会给出 Index.Valid（目前只有 PostgreSQL）。
 	// 套件据此要求「声明了就真给」，避免字段写完没人查、上层拿到一片 nil。
 	IndexValidity    bool `json:"index_validity"`

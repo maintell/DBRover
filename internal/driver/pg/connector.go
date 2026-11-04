@@ -54,6 +54,9 @@ func (c *Connector) Capabilities() model.Capabilities {
 		Sequences: true,
 		UserTypes: true,
 		Indexes:   true,
+		// ALTER TABLE ... ALTER COLUMN 能直接改可空性与默认值。
+		AlterColumnNullability: true,
+		AlterColumnDefault:     true,
 		// indisvalid 查得到：无效索引（失败的 CREATE INDEX CONCURRENTLY 会留下）
 		// 照样出现在清单里，只看「有几个索引」发现不了。
 		IndexValidity:    true,

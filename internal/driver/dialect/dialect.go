@@ -66,6 +66,16 @@ type Dialect interface {
 	// 返回空切片表示该引擎不支持改列类型（调用方应先看 Capabilities）。
 	AlterColumnTypeSQL(table, column, typeName, defaultText string, nullable bool) []string
 
+	// SetNullabilitySQL 渲染「把某列改成可空 / 非空」所需的语句（可能不止一条）。
+	//
+	// 第二个返回 false 表示该引擎不支持原地改（SQLite 只能重建表）。MySQL 必须
+	// 重写整个列定义（MODIFY COLUMN），所以要 typeName 与 defaultText——少了它们
+	// 会顺手把原有的默认值丢掉，这是改类型那条路径上真机验证过的坑。
+	SetNullabilitySQL(table, column, typeName, defaultText string, nullable bool) ([]string, bool)
+
+	// SetDefaultSQL 渲染 SET / DROP DEFAULT。defaultText 为空表示 DROP DEFAULT。
+	SetDefaultSQL(table, column, defaultText string) ([]string, bool)
+
 	// CreateIndexSQL 渲染建索引语句。columns 只给列名，引用由方言负责。
 	CreateIndexSQL(table, name string, columns []string, unique bool) string
 
@@ -193,6 +203,36 @@ func (d impl) AlterColumnTypeSQL(table, column, typeName, defaultText string, nu
 		// SQLite / 未支持引擎：改列类型需要重建表，不在本方法里假装能做。
 		return nil
 	}
+}
+
+// SetNullabilitySQL 见接口注释。
+func (d impl) SetNullabilitySQL(table, column, typeName, defaultText string, nullable bool) ([]string, bool) {
+	switch d.engine {
+	case model.EngineSQLite:
+		// SQLite 没有 ALTER COLUMN：改可空只能重建表，不在 v1 范围。
+		return nil, false
+	case model.EngineMySQL, model.EngineMariaDB:
+		// MODIFY COLUMN 必须给完整定义，直接复用改类型那条路径（它已经处理了
+		// 类型引用、默认值与 NOT NULL 的组合）。
+		return d.AlterColumnTypeSQL(table, column, typeName, defaultText, nullable), true
+	}
+	verb := "SET NOT NULL"
+	if nullable {
+		verb = "DROP NOT NULL"
+	}
+	return []string{"ALTER TABLE " + table + " ALTER COLUMN " + d.QuoteIdent(column) + " " + verb}, true
+}
+
+// SetDefaultSQL 见接口注释。
+func (d impl) SetDefaultSQL(table, column, defaultText string) ([]string, bool) {
+	if d.engine == model.EngineSQLite {
+		return nil, false
+	}
+	col := d.QuoteIdent(column)
+	if strings.TrimSpace(defaultText) == "" {
+		return []string{"ALTER TABLE " + table + " ALTER COLUMN " + col + " DROP DEFAULT"}, true
+	}
+	return []string{"ALTER TABLE " + table + " ALTER COLUMN " + col + " SET DEFAULT " + defaultText}, true
 }
 
 // CreateIndexSQL 渲染建索引语句。
