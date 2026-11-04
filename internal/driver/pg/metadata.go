@@ -627,12 +627,19 @@ func (c *Connector) Search(ctx context.Context, pattern string, limit int) ([]mo
 	if limit <= 0 {
 		limit = 50
 	}
+	// 名称、表注释、列注释都算命中（契约里 `meta.search` 写的是「名称 + 注释」）。
+	// 用 COALESCE 是因为没注释时 obj_description 返回 NULL，ILIKE NULL 永远不成立，
+	// 会把「没注释」误当成「不匹配」——那样注释查询就会悄悄退化成只搜名字。
 	rows, err := h.QueryContext(ctx, `
 		SELECT n.nspname, c.relname, c.relkind
 		  FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
 		 WHERE n.nspname NOT LIKE 'pg\_%' AND n.nspname <> 'information_schema'
 		   AND c.relkind IN ('r','p','v','m')
-		   AND c.relname ILIKE $1
+		   AND (c.relname ILIKE $1
+		        OR COALESCE(obj_description(c.oid, 'pg_class'), '') ILIKE $1
+		        OR EXISTS (SELECT 1 FROM pg_attribute a
+		                    WHERE a.attrelid = c.oid AND a.attnum > 0 AND NOT a.attisdropped
+		                      AND COALESCE(col_description(c.oid, a.attnum), '') ILIKE $1))
 		 ORDER BY n.nspname, c.relname
 		 LIMIT $2`, "%"+pattern+"%", limit)
 	if err != nil {

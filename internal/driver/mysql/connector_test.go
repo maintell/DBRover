@@ -136,6 +136,10 @@ func factory(t *testing.T, tgt testTarget) drivertest.Config {
 				"CREATE TRIGGER "+name+" BEFORE INSERT ON "+table+" FOR EACH ROW SET @dbrover_trg = 1", nil)
 			return name, err
 		},
+		Comment: func(ctx context.Context, s driver.Session, table, text string) error {
+			_, err := s.Execute(ctx, "ALTER TABLE "+table+" COMMENT = '"+text+"'", nil)
+			return err
+		},
 	}
 }
 

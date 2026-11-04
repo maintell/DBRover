@@ -349,7 +349,7 @@ func (r *Runtime) toolDDL() Tool {
 func (r *Runtime) toolSearch() Tool {
 	return Tool{
 		Name:        "meta.search",
-		Description: "按名称模糊搜索对象，跨库。",
+		Description: "按名称或注释模糊搜索对象，跨库。找表时用业务词（如「未支付」「对账」）往往比猜表名有效。",
 		Parameters: json.RawMessage(`{"type":"object","properties":{
 			"pattern":{"type":"string"},
 			"limit":{"type":"integer","minimum":1,"maximum":200}},

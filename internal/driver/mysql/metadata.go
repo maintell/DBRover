@@ -504,14 +504,26 @@ func (c *Connector) Search(ctx context.Context, pattern string, limit int) ([]mo
 	if limit <= 0 {
 		limit = 50
 	}
-	db := c.config().Catalog
+	// 名称与注释都算命中：契约里 `meta.search` 写的就是「名称 + 注释」。
+	// 注释命中排在名称命中之后（pri），别让一个写得很长的说明把真名搜索挤下去。
 	rows, err := h.QueryContext(ctx, `
-		SELECT TABLE_SCHEMA, TABLE_NAME, TABLE_TYPE
-		  FROM information_schema.TABLES
-		 WHERE TABLE_SCHEMA NOT IN ('information_schema','performance_schema','mysql','sys')
-		   AND TABLE_NAME LIKE ?
-		 ORDER BY TABLE_SCHEMA, TABLE_NAME
-		 LIMIT ?`, "%"+pattern+"%", limit)
+		SELECT TABLE_SCHEMA, TABLE_NAME, TABLE_TYPE FROM (
+		  SELECT TABLE_SCHEMA, TABLE_NAME, TABLE_TYPE, 0 AS pri
+		    FROM information_schema.TABLES
+		   WHERE TABLE_SCHEMA NOT IN ('information_schema','performance_schema','mysql','sys')
+		     AND TABLE_NAME LIKE ?
+		  UNION
+		  SELECT t.TABLE_SCHEMA, t.TABLE_NAME, t.TABLE_TYPE, 1 AS pri
+		    FROM information_schema.TABLES t
+		   WHERE t.TABLE_SCHEMA NOT IN ('information_schema','performance_schema','mysql','sys')
+		     AND (COALESCE(t.TABLE_COMMENT,'') LIKE ?
+		          OR EXISTS (SELECT 1 FROM information_schema.COLUMNS c
+		                      WHERE c.TABLE_SCHEMA = t.TABLE_SCHEMA
+		                        AND c.TABLE_NAME = t.TABLE_NAME
+		                        AND COALESCE(c.COLUMN_COMMENT,'') LIKE ?))
+		) x
+		ORDER BY pri, TABLE_SCHEMA, TABLE_NAME
+		LIMIT ?`, "%"+pattern+"%", "%"+pattern+"%", "%"+pattern+"%", limit)
 	if err != nil {
 		return nil, err
 	}
@@ -527,9 +539,7 @@ func (c *Connector) Search(ctx context.Context, pattern string, limit int) ([]mo
 		if typ == "VIEW" {
 			kind = model.KindView
 		}
-		if schema != db && db != "" {
-			// 搜索范围跨库，仍返回，交由上层按目录分组。
-		}
+		// 搜索范围跨库：不同库的同名表都要返回，由上层按目录分组。
 		out = append(out, model.ObjectRef{Kind: kind, Catalog: schema, Schema: schema, Name: name})
 	}
 	return out, rows.Err()

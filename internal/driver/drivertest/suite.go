@@ -41,6 +41,10 @@ type Config struct {
 	// DropSequence 删除一个序列，供 SequenceListing 做「删掉再用取到的定义
 	// 重建」的回放验证。给成钩子是因为各引擎的 DROP 语法不同，套件不猜。
 	DropSequence func(ctx context.Context, s driver.Session, name string) error
+
+	// Comment 给表写一段注释。nil 表示这个引擎没有注释（SQLite），此时
+	// SearchMatchesComments 跳过。
+	Comment func(ctx context.Context, s driver.Session, table, text string) error
 }
 
 func (c Config) binaryType() string {
@@ -71,6 +75,8 @@ func Run(t *testing.T, cfg Config) {
 	// 对象类型列表：能力位说支持，就必须真的列得出来（docs/04 §3.2）。
 	t.Run("TriggerListing", func(t *testing.T) { testTriggerListing(t, cfg) })
 	t.Run("SequenceListing", func(t *testing.T) { testSequenceListing(t, cfg) })
+	// 检索契约写的是「名称 + 注释」，注释这一半必须有真库验证。
+	t.Run("SearchMatchesComments", func(t *testing.T) { testSearchComments(t, cfg) })
 }
 
 // testBlockers 锁住「预执行检查能看到我们自己开着的事务」。

@@ -170,3 +170,59 @@ func testSequenceListing(t *testing.T, cfg Config) {
 		t.Fatalf("回放后的定义与原定义不一致（参数丢了）：\n原：%s\n后：%s", ddl, ddl2)
 	}
 }
+
+// testSearchComments 验证 `meta.search` 的「注释」那一半真的有效。
+//
+// 只搜名字的话，用户按业务含义（「订单未支付」）找表永远找不到——注释就是
+// 给这类问题准备的。
+func testSearchComments(t *testing.T, cfg Config) {
+	if cfg.Comment == nil {
+		t.Skip("这个引擎没有表注释")
+	}
+	ctx := context.Background()
+	c, err := cfg.New(false)
+	if err != nil {
+		t.Fatalf("连接: %v", err)
+	}
+	defer func() { _ = c.Close() }()
+
+	s, err := c.Acquire(ctx)
+	if err != nil {
+		t.Fatalf("Acquire: %v", err)
+	}
+	defer func() { _ = s.Close() }()
+	const table = "comment_probe"
+	if _, err := s.Execute(ctx, "CREATE TABLE "+table+" (id INTEGER PRIMARY KEY)", nil); err != nil {
+		t.Fatalf("建表: %v", err)
+	}
+	const token = "dbrover-comment-token-9f2c"
+	if err := cfg.Comment(ctx, s, table, token); err != nil {
+		t.Fatalf("写注释: %v", err)
+	}
+
+	// 用注释里的词搜：必须能找到这张表。
+	objs, err := c.Meta().Search(ctx, "comment-token-9f2c", 20)
+	if err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+	found := false
+	for _, o := range objs {
+		if o.Name == table {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("按注释搜索没找到 %s，返回 %+v", table, objs)
+	}
+
+	// 反向：搜一个不存在于任何注释的词，不该把这张表带出来。
+	objs, err = c.Meta().Search(ctx, "no-such-token-a71b", 20)
+	if err != nil {
+		t.Fatalf("Search(负向): %v", err)
+	}
+	for _, o := range objs {
+		if o.Name == table {
+			t.Fatalf("无关的词不该命中 %s", table)
+		}
+	}
+}
