@@ -161,20 +161,25 @@ func startsWithRoutineBlock(toks []Token, i int) bool {
 	if i >= len(toks) || !toks[i].IsKw("CREATE") {
 		return false
 	}
-	j := i + 1
-	for j < len(toks) {
+	// 关键字前可能夹着修饰语：OR REPLACE / TEMP / 以及 MySQL `SHOW CREATE` 一定
+	// 带的 `DEFINER=`user`@`host``。这些形态不固定（DEFINER 的值会被切成好几个
+	// Token），所以不逐个枚举，而是在一个有界窗口里找第一个对象关键字。
+	//
+	// 遇到括号或分号就判定「不是带体的例程定义」并立刻退出：CREATE TABLE 的列
+	// 清单、CREATE INDEX 的列名都会先出现括号，不会误判。
+	//
+	// 这条修的是一个真机 bug：`CREATE DEFINER=… PROCEDURE p() BEGIN …; END` 以前
+	// 认不出来，体内分号被切成两条语句，回滚语句执行时报 1064。
+	for j, n := i+1, 0; j < len(toks) && n < 16; j, n = j+1, n+1 {
 		t := toks[j]
-		switch {
-		case t.IsKw("OR"), t.IsKw("REPLACE"), t.IsKw("TEMP"), t.IsKw("TEMPORARY"):
-			j++
-			continue
+		if t.IsKw("TRIGGER") || t.IsKw("PROCEDURE") || t.IsKw("FUNCTION") || t.IsKw("EVENT") {
+			return true
 		}
-		break
+		if t.Text == "(" || t.Text == ";" {
+			return false
+		}
 	}
-	if j >= len(toks) {
-		return false
-	}
-	return toks[j].IsKw("TRIGGER") || toks[j].IsKw("PROCEDURE") || toks[j].IsKw("FUNCTION") || toks[j].IsKw("EVENT")
+	return false
 }
 
 func makeStatement(script string, from, to, index int) (Statement, bool) {

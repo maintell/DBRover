@@ -65,6 +65,8 @@ const (
 	DDLCreateType DDLAction = "create_type"
 	// DDLCreateRoutine 建一个例程（存储过程 / 函数）。
 	DDLCreateRoutine DDLAction = "create_routine"
+	// DDLReplaceRoutine 整段替换一个已存在的例程。
+	DDLReplaceRoutine DDLAction = "replace_routine"
 	// DDLRaw 是「我已经有 DDL，只想让它经过这道门」：语句由用户写，
 	// 工具不做语义解析，只负责分级、审批、审计与竞态保护。
 	DDLRaw DDLAction = "raw"
@@ -507,6 +509,9 @@ func (e *Executor) BuildDDLPlan(ctx context.Context, req DDLRequest) (*ChangePla
 	// 例程也不挂在某张表上。
 	if req.Action == DDLCreateRoutine {
 		return e.buildCreateRoutinePlan(ctx, req)
+	}
+	if req.Action == DDLReplaceRoutine {
+		return e.buildReplaceRoutinePlan(ctx, req)
 	}
 	// 手写 DDL 也不依赖「我要改的那张表」：它可能建表、也可能改别的东西。
 	if req.Action == DDLRaw {
@@ -1640,7 +1645,29 @@ func normalizeRoutineParams(in []RoutineParam) ([]dialect.RoutineParam, error) {
 // 参数校验一律排在能力判断之前：空体、缺返回类型在哪台引擎上都不成立。
 // 两条引擎特有的拒绝也在这里，并把「该怎么办」写进错误信息——
 // 让用户对着「不支持」三个字猜替代方案是最糟的体验。
-func (e *Executor) buildCreateRoutinePlan(ctx context.Context, req DDLRequest) (*ChangePlan, error) {
+// routineShape 是校验后的例程定义：create 与 replace 共用同一份校验。
+//
+// 两套校验一定会长歪——一边加规则另一边没加，就会出现「新建被拒、替换却放行」
+// 这种自相矛盾的行为。
+type routineShape struct {
+	name     string
+	kind     string
+	params   []dialect.RoutineParam
+	returns  string
+	language string
+	body     string
+	quoted   string
+}
+
+// options 把校验结果转成方言选项。
+func (s *routineShape) options() dialect.RoutineOptions {
+	return dialect.RoutineOptions{
+		Name: s.quoted, Kind: s.kind, Params: s.params,
+		Returns: s.returns, Language: s.language, Body: s.body,
+	}
+}
+
+func (e *Executor) normalizeRoutine(req DDLRequest) (*routineShape, error) {
 	spec := req.Routine
 	name := strings.TrimSpace(spec.Name)
 	if !constraintNamePattern.MatchString(name) {
@@ -1701,26 +1728,38 @@ func (e *Executor) buildCreateRoutinePlan(ctx context.Context, req DDLRequest) (
 	if !routineLanguagePattern.MatchString(lang) {
 		return nil, fmt.Errorf("%w: LANGUAGE %q 只能用字母、数字、下划线", ErrInvalidDDL, spec.Language)
 	}
+	return &routineShape{
+		name: name, kind: kind, params: params,
+		returns: returns, language: lang, body: body,
+		quoted: e.dialect.QuoteQualified(schemaOf(req.Table, e.cfgSchema()), name),
+	}, nil
+}
+
+// buildCreateRoutinePlan 生成建例程预案。
+//
+// 参数校验见 normalizeRoutine（与替换共用）；这里只管「不能重名」与渲染。
+func (e *Executor) buildCreateRoutinePlan(ctx context.Context, req DDLRequest) (*ChangePlan, error) {
+	sh, err := e.normalizeRoutine(req)
+	if err != nil {
+		return nil, err
+	}
 	// 同名先查：CREATE 自己会报 already exists，但那句话不告诉人该怎么办。
 	if objs, oerr := e.conn.Meta().Objects(ctx, req.Table.Catalog, req.Table.Schema, model.KindRoutine); oerr == nil {
 		for _, o := range objs {
-			if strings.EqualFold(o.Name, name) {
-				return nil, fmt.Errorf("%w: 例程 %q 已存在（要替换请先删旧的那个，本工具不做静默替换）", ErrInvalidDDL, name)
+			if strings.EqualFold(o.Name, sh.name) {
+				return nil, fmt.Errorf("%w: 例程 %q 已存在（要整段替换请勾上那个选项，或先删旧的那个）", ErrInvalidDDL, sh.name)
 			}
 		}
 	}
-	quoted := e.dialect.QuoteQualified(schemaOf(req.Table, e.cfgSchema()), name)
-	opts := dialect.RoutineOptions{
-		Name: quoted, Kind: kind, Params: params, Returns: returns, Language: lang, Body: body,
-	}
+	opts := sh.options()
 	sqlText, ok := e.dialect.CreateRoutineSQL(opts)
 	if !ok {
-		return nil, fmt.Errorf("%w: %s 不支持用表单建例程", ErrInvalidDDL, engine)
+		return nil, fmt.Errorf("%w: %s 不支持用表单建例程", ErrInvalidDDL, e.conn.Engine())
 	}
 	plan := &ChangePlan{
 		ID: "ddl-" + newID(),
 		Table: model.ObjectRef{
-			Kind: model.KindRoutine, Name: name, Schema: req.Table.Schema, Catalog: req.Table.Catalog,
+			Kind: model.KindRoutine, Name: sh.name, Schema: req.Table.Schema, Catalog: req.Table.Catalog,
 		},
 		CreatedAt:    time.Now(),
 		ExpiresAt:    time.Now().Add(planTTL),
@@ -1734,6 +1773,121 @@ func (e *Executor) buildCreateRoutinePlan(ctx context.Context, req DDLRequest) (
 		"回滚是删掉这个例程，不动任何数据；但调用它的程序会立刻找不到它")
 	e.finishDDLPlan(plan)
 	return plan, nil
+}
+
+// buildReplaceRoutinePlan 生成「整段替换」例程预案。
+//
+// 与新建共用 normalizeRoutine 的校验，差别只有三处：必须已存在、种类必须与现状
+// 一致、回滚用**旧定义**重建而不是删掉。第三点是这条功能的价值所在——替换是
+// 覆盖，删掉就回不去了。
+func (e *Executor) buildReplaceRoutinePlan(ctx context.Context, req DDLRequest) (*ChangePlan, error) {
+	sh, err := e.normalizeRoutine(req)
+	if err != nil {
+		return nil, err
+	}
+	ref := model.ObjectRef{
+		Kind: model.KindRoutine, Name: sh.name, Schema: req.Table.Schema, Catalog: req.Table.Catalog,
+	}
+	// 必须已存在。列不出来（权限不足等）时跳过这条检查，让引擎去判——
+	// 不能因为「查不到清单」就把一次合法的替换挡在外面。
+	listed := false
+	exists := false
+	if objs, oerr := e.conn.Meta().Objects(ctx, req.Table.Catalog, req.Table.Schema, model.KindRoutine); oerr == nil {
+		listed = true
+		for _, o := range objs {
+			if strings.EqualFold(o.Name, sh.name) {
+				exists = true
+			}
+		}
+	}
+	if listed && !exists {
+		return nil, fmt.Errorf("%w: 例程 %q 不存在（新建请用 create_routine）", ErrInvalidDDL, sh.name)
+	}
+
+	// 种类核对：拿旧定义自己看一眼，比让引擎报「xxx 不是函数」清楚得多。
+	oldDDL := ""
+	if ddlText, derr := e.conn.Meta().DDL(ctx, ref); derr == nil {
+		oldDDL = strings.TrimSpace(ddlText)
+		if k := routineKindOf(oldDDL); k != "" && k != sh.kind {
+			return nil, fmt.Errorf("%w: 例程 %q 现在是%s，不能按%s替换（要改种类只能先删再建）",
+				ErrInvalidDDL, sh.name, routineKindLabel(k), routineKindLabel(sh.kind))
+		}
+	}
+
+	opts := sh.options()
+	stmts, ok := e.dialect.ReplaceRoutineSQL(opts)
+	if !ok {
+		return nil, fmt.Errorf("%w: %s 不支持整段替换例程", ErrInvalidDDL, e.conn.Engine())
+	}
+	plan := &ChangePlan{
+		ID:           "ddl-" + newID(),
+		Table:        ref,
+		CreatedAt:    time.Now(),
+		ExpiresAt:    time.Now().Add(planTTL),
+		Statements:   routineStatements(stmts),
+		AffectedRows: 0,
+	}
+	if oldDDL != "" {
+		// 回滚 = 用旧定义重建。MySQL 的旧定义没有 OR REPLACE，必须先删新的，
+		// 否则 CREATE 会撞上同名；PG 的 pg_get_functiondef 给的就是 OR REPLACE。
+		rollback := []string{}
+		if e.conn.Engine() == model.EngineMySQL {
+			rollback = append(rollback, e.dialect.DropRoutineSQL(opts))
+		}
+		rollback = append(rollback, oldDDL)
+		plan.Rollback = routineStatements(rollback)
+		plan.Notes = append(plan.Notes,
+			"回滚用**旧定义**重建这个例程；若旧定义里的 DEFINER 不是你，重建可能因权限失败")
+	} else {
+		plan.Rollback = routineStatements([]string{e.dialect.DropRoutineSQL(opts)})
+		plan.Notes = append(plan.Notes,
+			"取不到旧定义，回滚只能把它删掉——原来的逻辑不会回来")
+	}
+	plan.Notes = append(plan.Notes,
+		"整段替换：体原样覆盖，不做行级 diff；替换完成后所有调用方立刻看到新行为")
+	if e.conn.Engine() == model.EngineMySQL {
+		plan.Notes = append(plan.Notes,
+			"MySQL 没有 CREATE OR REPLACE，这里是 DROP + CREATE 两条语句：DDL 隐式提交，"+
+				"CREATE 失败时会留下「例程没了」的中间态，可用回滚语句按旧定义重建")
+	}
+	e.finishDDLPlan(plan)
+	return plan, nil
+}
+
+// routineStatements 把语句文本包成预案语句。DDL 不用行数校验，统一 -1。
+func routineStatements(sqls []string) []PlanStatement {
+	out := make([]PlanStatement, len(sqls))
+	for i, s := range sqls {
+		out[i] = PlanStatement{SQL: s, ExpectRows: -1}
+	}
+	return out
+}
+
+// routineKindOf 从定义原文里认出 PROCEDURE 还是 FUNCTION。
+//
+// 只看第一对括号之前的那一段：体里出现这两个词太正常了（比如一条 SELECT 里的
+// 列名），整段搜会把过程认成函数。
+func routineKindOf(ddlText string) string {
+	head := ddlText
+	if i := strings.Index(head, "("); i >= 0 {
+		head = head[:i]
+	}
+	up := strings.ToUpper(head)
+	switch {
+	case strings.Contains(up, "PROCEDURE"):
+		return "procedure"
+	case strings.Contains(up, "FUNCTION"):
+		return "function"
+	}
+	return ""
+}
+
+// routineKindLabel 把种类翻成人话，用在错误信息里。
+func routineKindLabel(kind string) string {
+	if kind == "function" {
+		return "函数"
+	}
+	return "存储过程"
 }
 
 // buildCreateMatViewPlan 生成建物化视图预案。

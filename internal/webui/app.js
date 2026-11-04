@@ -3335,6 +3335,7 @@ async function showCreateRoutine() {
     '新建例程',
     '<label class="field">名字</label>' +
       '<input id="rt-name" style="width:100%" autocomplete="off" spellcheck="false">' +
+      '<label class="inline"><input type="checkbox" id="rt-replace"> 整段替换同名例程（不做行级 diff）</label>' +
       '<div class="toolbar">' +
       '<label class="field">种类</label>' +
       '<select id="rt-kind"><option value="procedure">存储过程</option>' +
@@ -3359,10 +3360,12 @@ async function showCreateRoutine() {
       if (i < 0) return { name: line, type: '' };
       return { name: line.slice(0, i), type: line.slice(i + 1).trim() };
     });
+  // 默认是「新建」：替换会把已有实现整段盖掉，必须显式勾选。
+  const replace = !!($('rt-replace') && $('rt-replace').checked);
   let plan;
   try {
     plan = await postSchemaPlan({
-      action: 'create_routine',
+      action: replace ? 'replace_routine' : 'create_routine',
       routine: {
         name: ($('rt-name').value || '').trim(),
         kind: $('rt-kind').value,

@@ -130,6 +130,10 @@ type Dialect interface {
 	// 所以必须带签名；MySQL 只认名字。
 	DropRoutineSQL(opts RoutineOptions) string
 
+	// ReplaceRoutineSQL 渲染整段替换语句；PG 一条 CREATE OR REPLACE，
+	// MySQL 必须 DROP + CREATE 两条。第二个返回 false 表示引擎不支持。
+	ReplaceRoutineSQL(opts RoutineOptions) ([]string, bool)
+
 	// CreateViewSQL 渲染建视图语句。name 应当是已引用好的限定名，
 	// query 是已过校验的 SELECT / WITH 主体（不含分号）。
 	CreateViewSQL(name, query string) string
@@ -423,6 +427,9 @@ type RoutineOptions struct {
 	// Language 只在 PostgreSQL 上有意义（默认 plpgsql）；MySQL 没有这个概念。
 	Language string
 	Body     string
+	// OrReplace 表示按「整段替换」生成：PG 用 CREATE OR REPLACE，MySQL 没有
+	// 这个写法，靠 ReplaceRoutineSQL 拆成 DROP + CREATE。
+	OrReplace bool
 }
 
 // routineSignature 渲染参数列表。withNames 为 false 时只留类型——PostgreSQL 的
@@ -461,6 +468,9 @@ func (d impl) CreateRoutineSQL(opts RoutineOptions) (string, bool) {
 				" RETURNS " + opts.Returns
 		}
 		// 固定标签：服务层已确保体里不含 $dbrover$，否则体内一旦出现同名标签就会提前收尾。
+		if opts.OrReplace {
+			head = "CREATE OR REPLACE " + strings.TrimPrefix(head, "CREATE ")
+		}
 		return head + " LANGUAGE " + lang + " AS $dbrover$\n" + opts.Body + "\n$dbrover$", true
 	case model.EngineMySQL, model.EngineMariaDB:
 		head := "CREATE PROCEDURE " + opts.Name + d.routineSignature(opts.Params, true)
@@ -471,6 +481,35 @@ func (d impl) CreateRoutineSQL(opts RoutineOptions) (string, bool) {
 		return head + " " + opts.Body, true
 	default:
 		return "", false
+	}
+}
+
+// ReplaceRoutineSQL 渲染「整段替换」语句，第二个返回 false 表示这个引擎不支持。
+//
+// 两种引擎的差别不是语法糖：PostgreSQL 有 CREATE OR REPLACE，一条语句就把旧的换掉；
+// MySQL 没有这个写法，必须先 DROP 再 CREATE。顺序与条数都归方言决定——上层不该知道
+// 「MySQL 要两条、PG 要一条」这件事（ADR-0005）。
+//
+// 注意 MySQL 的这两条不在一个事务里：DDL 隐式提交，DROP 成功而 CREATE 失败会留下
+// 「例程没了」的中间态。预案里会写明，回滚靠旧定义重建。
+func (d impl) ReplaceRoutineSQL(opts RoutineOptions) ([]string, bool) {
+	switch d.engine {
+	case model.EnginePostgres:
+		repl := opts
+		repl.OrReplace = true
+		s, ok := d.CreateRoutineSQL(repl)
+		if !ok {
+			return nil, false
+		}
+		return []string{s}, true
+	case model.EngineMySQL, model.EngineMariaDB:
+		s, ok := d.CreateRoutineSQL(opts)
+		if !ok {
+			return nil, false
+		}
+		return []string{d.DropRoutineSQL(opts), s}, true
+	default:
+		return nil, false
 	}
 }
 

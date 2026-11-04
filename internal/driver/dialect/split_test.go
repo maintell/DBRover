@@ -111,6 +111,21 @@ func TestSplit(t *testing.T) {
 			want:   []string{"CREATE PROCEDURE p()\nBEGIN\n  SELECT 1;\n  SELECT 2;\nEND", "SELECT 3"},
 		},
 		{
+			// MySQL 的 SHOW CREATE 一定带 DEFINER，回滚或用「手写 DDL」转发取到的定义都会
+			// 走这条路。曾经因为认不出这个前缀，体内分号被切开，执行时报 1064。
+			name:   "MySQL 带 DEFINER 的存储过程",
+			engine: model.EngineMySQL,
+			in:     "CREATE DEFINER=`root`@`%` PROCEDURE `p`()\nBEGIN\n  INSERT INTO t (v) VALUES ('a');\nEND",
+			want:   []string{"CREATE DEFINER=`root`@`%` PROCEDURE `p`()\nBEGIN\n  INSERT INTO t (v) VALUES ('a');\nEND"},
+		},
+		{
+			// 反向：建表的列清单里有括号，不能被当成例程块。
+			name:   "建表不被当成例程块",
+			engine: model.EngineMySQL,
+			in:     "CREATE TABLE t (id INT);\nCREATE TABLE u (id INT);",
+			want:   []string{"CREATE TABLE t (id INT)", "CREATE TABLE u (id INT)"},
+		},
+		{
 			name:   "MSSQL GO 分隔符",
 			engine: model.EngineMSSQL,
 			in:     "SELECT 1\nGO\nSELECT 2\nGO\n",

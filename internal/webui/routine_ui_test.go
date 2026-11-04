@@ -32,8 +32,12 @@ func TestUICreateRoutineIsWired(t *testing.T) {
 	if !strings.Contains(src, "$('btn-new-routine').onclick = () => showCreateRoutine();") {
 		t.Error("btn-new-routine 没有绑定点击")
 	}
-	if !strings.Contains(src, "action: 'create_routine'") {
-		t.Error("对话框没有发 create_routine")
+	// 新建是默认，替换必须显式勾选：`replace ? 'replace_routine' : 'create_routine'`。
+	if !strings.Contains(src, "action: replace ? 'replace_routine' : 'create_routine'") {
+		t.Error("对话框没有区分新建与整段替换")
+	}
+	if !strings.Contains(src, `id="rt-replace"`) {
+		t.Error("没有「整段替换」勾选框")
 	}
 	// 请求体字段必须与服务层的 routine{name,kind,params,returns,body} 对齐。
 	for _, field := range []string{"name:", "kind:", "params,", "returns:", "body:"} {

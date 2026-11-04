@@ -139,6 +139,10 @@
 
 - **新建例程**（`create_routine`）：`kind` 为 `procedure` / `function`，参数只支持**输入参数**（`OUT`/`INOUT` 会让 PG 的 `DROP` 签名变复杂——`DROP` 只认输入类型，把 OUT 拼进去就删不掉，先关这条口子），`language` 只在 PG 上有意义（默认 `plpgsql`）。渲染：PG 是 `CREATE … LANGUAGE … AS $dbrover$ 体 $dbrover$`，MySQL 是 `CREATE … 体`；**不加 `OR REPLACE`**，同名由服务层拒绝。回滚 `DROP PROCEDURE|FUNCTION`，**PG 必须带参数类型签名**——只给名字删不掉，是个静默失败的高发点（变异验证：去掉签名即红）。体不能为空 / 不能以分号结尾 / 不能含定界符 / ≤2 万字符；MySQL 的多语句体必须 `BEGIN … END` 包起来（分号只有在该块里才不会被切成两条）。**两条引擎特有拒绝**：MySQL 上建**函数**要求 `DETERMINISTIC / READS SQL DATA / NO SQL`，否则开 binlog 的实例直接报 1418，v1 不替用户决定语义、明确拒绝并指路手写 DDL；SQLite 没有例程。新增能力位 `add_routine`（MySQL 表示能建过程、PG 过程与函数都行、SQLite `false`）。真机：MySQL 5.7 建过程 → `CALL` → 回滚后 `CALL` 失败、函数被拒并说明 1418；PG 17 建过程 → `CALL` → 回滚，再建 `it_fn(a integer) RETURNS integer LANGUAGE sql` → `SELECT it_fn(21)` 返回 42。
 
+- **例程整段替换**（`replace_routine`）：入参与新建相同，但必须**已存在**、且**种类与现状一致**——先读旧定义、只认第一对括号前的 `PROCEDURE`/`FUNCTION`（整段搜会把体里出现的这两个词也算进去），不一致就拒绝并说明「要改种类只能先删再建」。语句条数归方言：PG 一条 `CREATE OR REPLACE`，MySQL 没有这个写法，是 `DROP` + `CREATE` 两条。**回滚用旧定义重建**（MySQL 先删新的再重建旧的），不是删掉——替换是覆盖，删掉就回不去了；旧定义取不到时退化成 `DROP` 并在预案里说明「原来的逻辑不会回来」。界面里新建仍是默认，替换必须勾选「整段替换同名例程」。真机：MySQL 5.7 过程 `INSERT 'old'` → 替换成 `'new'` → 观测到 `new` → 回滚 → 又插回 `old`；PG 17 函数 `a*2` → 替换成 `a*3`，`it_fn(10)` 从 20 变 30 → 回滚 → 回到 20。变异验证：把回滚改成「只删掉」即红。
+
+- **切分器认 `CREATE DEFINER=… PROCEDURE`**（真机 bug）：MySQL 的 `SHOW CREATE` 一定带 `DEFINER=`user`@`host``，而切分器只跳过 `OR REPLACE` / `TEMP` 这些修饰语，于是这条语句被当成普通语句、体内分号被切开，整条发过去直接报 1064——**任何「取到定义再回放」的路径都会踩到**（这次是做替换的回滚时暴露的）。修法不再逐个枚举修饰语（`DEFINER` 的值会被切成好几个 Token），改成在有界窗口里找第一个对象关键字，遇到括号或分号就判定「不是带体的例程定义」。补两条回归用例：带 `DEFINER` 的过程算一条语句；`CREATE TABLE t (...)` 仍然按分号切开。
+
 ### 安全
 
 - **大整数不再静默丢精度**：`BIGINT` 超过 2^53 时，界面保持字符串、服务端按列类型还原；客户端若把它写成 JSON 数字，直接 `400 NUMBER_PRECISION_LOSS` 并提示改用字符串，而不是把丢了低位的值写进库。此前界面 `coerce()` 用 `Number()` 转换整数列，编辑 `9223372036854775807` 会变成 `...5808`。
