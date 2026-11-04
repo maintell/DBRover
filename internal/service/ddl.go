@@ -57,6 +57,8 @@ const (
 	DDLCreateView DDLAction = "create_view"
 	// DDLCreateSequence 建一个序列（目前只有 PostgreSQL 支持）。
 	DDLCreateSequence DDLAction = "create_sequence"
+	// DDLCreateMatView 建一个物化视图（只有 PostgreSQL 有这个概念）。
+	DDLCreateMatView DDLAction = "create_matview"
 	// DDLRaw 是「我已经有 DDL，只想让它经过这道门」：语句由用户写，
 	// 工具不做语义解析，只负责分级、审批、审计与竞态保护。
 	DDLRaw DDLAction = "raw"
@@ -437,6 +439,10 @@ func (e *Executor) BuildDDLPlan(ctx context.Context, req DDLRequest) (*ChangePla
 	// 建序列也一样：它不是改某张表。
 	if req.Action == DDLCreateSequence {
 		return e.buildCreateSequencePlan(ctx, req)
+	}
+	// 物化视图同样不依赖某张表的现有结构。
+	if req.Action == DDLCreateMatView {
+		return e.buildCreateMatViewPlan(ctx, req)
 	}
 	// 手写 DDL 也不依赖「我要改的那张表」：它可能建表、也可能改别的东西。
 	if req.Action == DDLRaw {
@@ -1429,6 +1435,54 @@ func (e *Executor) buildCreateSequencePlan(ctx context.Context, req DDLRequest) 
 		AffectedRows: 0,
 	}
 	plan.Notes = append(plan.Notes, "序列不存业务数据，删它会打断依赖它的默认值（如 nextval）")
+	e.finishDDLPlan(plan)
+	return plan, nil
+}
+
+// buildCreateMatViewPlan 生成建物化视图预案。
+//
+// 与普通视图共用视图体校验（normalizeViewQuery）；区别在于它会把结果存下来：
+// 读得快、但会过期。这条必须写进预案说明——用户看到「视图」两个字，默认以为
+// 它是实时的。
+func (e *Executor) buildCreateMatViewPlan(ctx context.Context, req DDLRequest) (*ChangePlan, error) {
+	name := strings.TrimSpace(req.View.Name)
+	if !constraintNamePattern.MatchString(name) {
+		return nil, fmt.Errorf("%w: 物化视图名 %q 只能用字母、数字、下划线，且以字母或下划线开头",
+			ErrInvalidDDL, req.View.Name)
+	}
+	query, qerr := normalizeViewQuery(req.View.Query)
+	if qerr != nil {
+		return nil, qerr
+	}
+	if !e.conn.Capabilities().MaterializedViews {
+		return nil, fmt.Errorf("%w: %s 没有物化视图（MySQL 只能靠定时写汇总表，SQLite 没有这个概念）",
+			ErrInvalidDDL, e.conn.Engine())
+	}
+	if objs, oerr := e.conn.Meta().Objects(ctx, req.Table.Catalog, req.Table.Schema, model.KindMatView); oerr == nil {
+		for _, o := range objs {
+			if strings.EqualFold(o.Name, name) {
+				return nil, fmt.Errorf("%w: 物化视图 %q 已存在（要重建请先删）", ErrInvalidDDL, name)
+			}
+		}
+	}
+	quoted := e.dialect.QuoteQualified(schemaOf(req.Table, e.cfgSchema()), name)
+	plan := &ChangePlan{
+		ID: "ddl-" + newID(),
+		Table: model.ObjectRef{
+			Kind: model.KindMatView, Name: name, Schema: req.Table.Schema, Catalog: req.Table.Catalog,
+		},
+		CreatedAt: time.Now(),
+		ExpiresAt: time.Now().Add(planTTL),
+		Statements: []PlanStatement{{
+			SQL: e.dialect.CreateMaterializedViewSQL(quoted, query), ExpectRows: -1,
+		}},
+		Rollback: []PlanStatement{{
+			SQL: e.dialect.DropMaterializedViewSQL(quoted), ExpectRows: -1,
+		}},
+		AffectedRows: 0,
+	}
+	plan.Notes = append(plan.Notes,
+		"物化视图会**把结果存下来**：查询快，但数据是建它那一刻的，之后要 REFRESH MATERIALIZED VIEW 才更新")
 	e.finishDDLPlan(plan)
 	return plan, nil
 }

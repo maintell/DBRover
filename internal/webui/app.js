@@ -3183,10 +3183,16 @@ async function showCreateView() {
     showNotice('请先建立连接。', 'warn');
     return;
   }
+  // 物化视图只有 PG 有；没有这个能力的连接上不显示那个勾选框。
+  const canMat = !!(state.current.capabilities && state.current.capabilities.materialized_views);
   const ok = await dialog(
     '新建视图',
     '<label class="field">视图名</label>' +
       '<input id="v-name" style="width:100%" autocomplete="off" spellcheck="false">' +
+      (canMat
+        ? '<label class="inline"><input type="checkbox" id="v-mat"> 物化视图（把结果存下来）</label>' +
+          '<p>物化视图读得快，但数据是建它那一刻的，之后要 REFRESH MATERIALIZED VIEW 才更新。</p>'
+        : '') +
       '<label class="field">定义（SELECT 或 WITH 开头，不带分号）</label>' +
       '<textarea id="v-query" rows="6" style="width:100%" spellcheck="false" ' +
       'placeholder="SELECT id, v FROM t WHERE id > 0"></textarea>',
@@ -3194,9 +3200,10 @@ async function showCreateView() {
   if (!ok) return;
   const name = $('v-name').value.trim();
   const query = $('v-query').value.trim();
+  const mat = canMat && $('v-mat') && $('v-mat').checked;
   let plan;
   try {
-    plan = await postSchemaPlan({ action: 'create_view', view: { name, query } }, false);
+    plan = await postSchemaPlan({ action: mat ? 'create_matview' : 'create_view', view: { name, query } }, false);
   } catch (e) {
     showNotice(e.message + (e.hint ? '（' + e.hint + '）' : ''), 'error');
     return;

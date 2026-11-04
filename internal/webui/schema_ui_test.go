@@ -27,6 +27,8 @@ func TestColumnActionsOfferNullableAndDefault(t *testing.T) {
 		{"新建视图的按钮绑定", "$('btn-new-view').onclick"},
 		{"新建序列入口", "async function showCreateSequence("},
 		{"新建序列按能力位隐藏", "btn-new-seq"},
+		{"物化视图入口按能力位", "capabilities.materialized_views"},
+		{"物化视图会提示过期", "REFRESH MATERIALIZED VIEW"},
 	} {
 		if !strings.Contains(src, want.needle) {
 			t.Errorf("app.js 里缺少「%s」：%q", want.name, want.needle)

@@ -117,6 +117,15 @@ type Dialect interface {
 	// query 是已过校验的 SELECT / WITH 主体（不含分号）。
 	CreateViewSQL(name, query string) string
 
+	// CreateMaterializedViewSQL 渲染建物化视图语句（只有 PostgreSQL 有这个概念）。
+	//
+	// 与普通视图的区别不是语法糖：物化视图会把结果**存下来**，读得快但会过期，
+	// 要 REFRESH 才更新——这句话得在界面上说清，否则用户会以为它跟视图一样实时。
+	CreateMaterializedViewSQL(name, query string) string
+
+	// DropMaterializedViewSQL 渲染删物化视图语句。
+	DropMaterializedViewSQL(name string) string
+
 	// DropViewSQL 渲染删视图语句。name 应当是已引用好的限定名。
 	//
 	// 视图是独立对象，不带 ON <table>。默认带 IF EXISTS：重复执行不该炸。
@@ -355,6 +364,16 @@ func (d impl) CreateSequenceSQL(name string, opts SequenceOptions) string {
 // DropSequenceSQL 见接口注释。
 func (d impl) DropSequenceSQL(name string) string {
 	return "DROP SEQUENCE " + name
+}
+
+// CreateMaterializedViewSQL 见接口注释。
+func (d impl) CreateMaterializedViewSQL(name, query string) string {
+	return "CREATE MATERIALIZED VIEW " + name + " AS " + query
+}
+
+// DropMaterializedViewSQL 见接口注释。
+func (d impl) DropMaterializedViewSQL(name string) string {
+	return "DROP MATERIALIZED VIEW " + name
 }
 
 // CreateViewSQL 见接口注释。
