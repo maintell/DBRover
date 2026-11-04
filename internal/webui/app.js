@@ -1598,6 +1598,25 @@ function renderSchema(out) {
     // 整个结构视图当场白掉——真机点一次才发现，源码门禁看不出来。
   }
 
+  // 触发器：只有能用一条语句建的引擎才摆（MySQL / SQLite）。PG 要先建函数，
+  // v1 不做，服务端会拒绝并说明；这里就不摆一个点了必然失败的表单。
+  if (state.current && state.current.capabilities && state.current.capabilities.add_trigger) {
+    const trHead = document.createElement('div');
+    trHead.className = 'head';
+    trHead.textContent = '触发器';
+    wrap.appendChild(trHead);
+
+    const trForm = document.createElement('div');
+    trForm.className = 'toolbar';
+    trForm.innerHTML =
+      '<input id="tr-name" class="narrow" placeholder="触发器名" autocomplete="off" spellcheck="false">' +
+      '<select id="tr-timing"><option>BEFORE</option><option>AFTER</option></select>' +
+      '<select id="tr-event"><option>INSERT</option><option>UPDATE</option><option>DELETE</option></select>' +
+      '<input id="tr-body" class="narrow" placeholder="体（单条语句，如 SET NEW.v = UPPER(NEW.v)）" autocomplete="off" spellcheck="false">' +
+      '<button id="tr-add" class="primary">建触发器</button>';
+    wrap.appendChild(trForm);
+  }
+
   const idxs = out.indexes || [];
   if (!idxs.length) {
     const none = document.createElement('div');
@@ -1748,6 +1767,7 @@ function renderSchema(out) {
   $('ix-add').onclick = () => planCreateIndex();
   if ($('fk-add')) $('fk-add').onclick = () => planAddForeignKey();
   if ($('ck-add')) $('ck-add').onclick = () => planAddCheck();
+  if ($('tr-add')) $('tr-add').onclick = () => planAddTrigger();
   setStatus(state.tableName + ' · ' + cols.length + ' 列' +
     (pk.length ? '（主键 ' + pk.join(', ') + '）' : '（无主键）'));
 }
@@ -3259,4 +3279,34 @@ async function showCreateSequence() {
   }
   if (!(await confirmPlan(plan))) return;
   await applyPlan(plan.id, undefined, loadTables);
+}
+
+// planAddTrigger 建一条触发器。
+//
+// 体只收单条语句：MySQL 的多语句体要靠 DELIMITER，那是客户端语法；我们走驱动，
+// 硬塞进去会被切分器切成两条。想写复杂逻辑请用手写 DDL。
+async function planAddTrigger() {
+  const name = $('tr-name').value.trim();
+  const body = $('tr-body').value.trim();
+  if (!name || !body) {
+    showNotice('触发器名与体都要填。', 'warn');
+    return;
+  }
+  let plan;
+  try {
+    plan = await postSchemaPlan({
+      action: 'create_trigger',
+      trigger: {
+        name,
+        timing: $('tr-timing').value,
+        event: $('tr-event').value,
+        body,
+      },
+    }, false);
+  } catch (e) {
+    showNotice(e.message + (e.hint ? '（' + e.hint + '）' : ''), 'error');
+    return;
+  }
+  if (!(await confirmPlan(plan))) return;
+  await applyPlan(plan.id, undefined, refreshSchema);
 }

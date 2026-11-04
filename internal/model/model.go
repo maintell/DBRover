@@ -258,6 +258,11 @@ type Capabilities struct {
 	// 建表时写 CHECK、加不上。这两种情况都必须声明 false，否则我们就是在
 	// 「看起来建好了、约束不存在」的假成功上报平安。
 	AddCheck bool `json:"add_check"`
+	// AddTrigger 表示能用一条语句建触发器。
+	//
+	// PostgreSQL 要先 CREATE FUNCTION，再 CREATE TRIGGER——两步且函数体是
+	// dollar-quoted 文本，v1 没做，所以 PG 为 false；MySQL / SQLite 都是单条语句。
+	AddTrigger bool `json:"add_trigger"`
 	// IndexValidity 表示 DescribeTable 会给出 Index.Valid（目前只有 PostgreSQL）。
 	// 套件据此要求「声明了就真给」，避免字段写完没人查、上层拿到一片 nil。
 	IndexValidity    bool `json:"index_validity"`

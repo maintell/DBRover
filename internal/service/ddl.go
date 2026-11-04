@@ -59,6 +59,8 @@ const (
 	DDLCreateSequence DDLAction = "create_sequence"
 	// DDLCreateMatView 建一个物化视图（只有 PostgreSQL 有这个概念）。
 	DDLCreateMatView DDLAction = "create_matview"
+	// DDLCreateTrigger 建一个触发器（MySQL / SQLite；PG 要先建函数，v1 不做）。
+	DDLCreateTrigger DDLAction = "create_trigger"
 	// DDLRaw 是「我已经有 DDL，只想让它经过这道门」：语句由用户写，
 	// 工具不做语义解析，只负责分级、审批、审计与竞态保护。
 	DDLRaw DDLAction = "raw"
@@ -157,6 +159,8 @@ type DDLRequest struct {
 	View ViewSpec `json:"view"`
 	// Sequence 用于 create_sequence。
 	Sequence SequenceSpec `json:"sequence"`
+	// Trigger 用于 create_trigger。目标表由 Table 给。
+	Trigger TriggerSpec `json:"trigger"`
 	// RawSQL 用于 raw：一条手写的 DDL 语句。
 	RawSQL string `json:"sql"`
 }
@@ -175,6 +179,17 @@ type ViewSpec struct {
 	Name string `json:"name"`
 	// Query 是 SELECT / WITH 主体（不含 CREATE VIEW 与分号）。
 	Query string `json:"query"`
+}
+
+// TriggerSpec 是一条触发器定义。
+//
+// Body 只支持**单条**语句（不含结尾分号）：多语句体在 MySQL 里要用 DELIMITER
+// 才能在客户端跑，而我们走的是驱动——真要做就得先解决语句切分，v1 不碰。
+type TriggerSpec struct {
+	Name   string `json:"name"`
+	Timing string `json:"timing"` // BEFORE / AFTER / INSTEAD OF
+	Event  string `json:"event"`  // INSERT / UPDATE / DELETE
+	Body   string `json:"body"`
 }
 
 // SequenceSpec 是一个序列定义。零值指针表示「不指定，由引擎取默认」。
@@ -443,6 +458,10 @@ func (e *Executor) BuildDDLPlan(ctx context.Context, req DDLRequest) (*ChangePla
 	// 物化视图同样不依赖某张表的现有结构。
 	if req.Action == DDLCreateMatView {
 		return e.buildCreateMatViewPlan(ctx, req)
+	}
+	// 触发器挂在表上，但生成语句不需要读表结构。
+	if req.Action == DDLCreateTrigger {
+		return e.buildCreateTriggerPlan(ctx, req)
 	}
 	// 手写 DDL 也不依赖「我要改的那张表」：它可能建表、也可能改别的东西。
 	if req.Action == DDLRaw {
@@ -1485,4 +1504,84 @@ func (e *Executor) buildCreateMatViewPlan(ctx context.Context, req DDLRequest) (
 		"物化视图会**把结果存下来**：查询快，但数据是建它那一刻的，之后要 REFRESH MATERIALIZED VIEW 才更新")
 	e.finishDDLPlan(plan)
 	return plan, nil
+}
+
+// triggerTimings / triggerEvents 是触发器支持的时机与事件。
+//
+// 白名单而不是原样透传：这两段会拼进 DDL，且各引擎的关键字集合并不一样
+// （SQLite 有 INSTEAD OF、MySQL 没有），与其让引擎报语法错，不如在入口就列出来。
+var triggerTimings = map[string]bool{"BEFORE": true, "AFTER": true, "INSTEAD OF": true}
+var triggerEvents = map[string]bool{"INSERT": true, "UPDATE": true, "DELETE": true}
+
+// buildCreateTriggerPlan 生成建触发器预案。
+func (e *Executor) buildCreateTriggerPlan(ctx context.Context, req DDLRequest) (*ChangePlan, error) {
+	spec := req.Trigger
+	name := strings.TrimSpace(spec.Name)
+	if !constraintNamePattern.MatchString(name) {
+		return nil, fmt.Errorf("%w: 触发器名 %q 只能用字母、数字、下划线，且以字母或下划线开头",
+			ErrInvalidDDL, spec.Name)
+	}
+	timing := strings.ToUpper(strings.Join(strings.Fields(spec.Timing), " "))
+	if !triggerTimings[timing] {
+		return nil, fmt.Errorf("%w: 时机只能是 BEFORE / AFTER / INSTEAD OF，收到 %q", ErrInvalidDDL, spec.Timing)
+	}
+	event := strings.ToUpper(strings.TrimSpace(spec.Event))
+	if !triggerEvents[event] {
+		return nil, fmt.Errorf("%w: 事件只能是 INSERT / UPDATE / DELETE，收到 %q", ErrInvalidDDL, spec.Event)
+	}
+	body := strings.TrimSpace(spec.Body)
+	if body == "" {
+		return nil, fmt.Errorf("%w: 触发器体不能为空", ErrInvalidDDL)
+	}
+	if strings.Contains(body, ";") {
+		return nil, fmt.Errorf("%w: 触发器体只支持单条语句（不能有分号）", ErrInvalidDDL)
+	}
+	if len(body) > 2000 {
+		return nil, fmt.Errorf("%w: 触发器体过长（>2000 字符）", ErrInvalidDDL)
+	}
+	tableName := strings.TrimSpace(req.Table.Name)
+	if tableName == "" {
+		return nil, fmt.Errorf("%w: 触发器要挂在一张表上", ErrInvalidDDL)
+	}
+	if !e.conn.Capabilities().AddTrigger {
+		return nil, fmt.Errorf("%w: %s 不能一条语句建触发器——PostgreSQL 要先 CREATE FUNCTION 再 CREATE TRIGGER，v1 不做；请用手写 DDL",
+			ErrInvalidDDL, e.conn.Engine())
+	}
+	for _, o := range e.listTriggers(ctx, req) {
+		if strings.EqualFold(o.Name, name) {
+			return nil, fmt.Errorf("%w: 触发器 %q 已存在", ErrInvalidDDL, name)
+		}
+	}
+
+	quotedTable := e.dialect.QuoteQualified(schemaOf(req.Table, e.cfgSchema()), tableName)
+	stmt, ok := e.dialect.CreateTriggerSQL(dialect.TriggerOptions{
+		Name: name, Table: quotedTable, Timing: timing, Event: event, Body: body,
+	})
+	if !ok {
+		return nil, fmt.Errorf("%w: 无法为 %s 渲染建触发器语句", ErrInvalidDDL, e.dialect.Engine())
+	}
+	quotedName := e.dialect.QuoteIdent(name)
+	plan := &ChangePlan{
+		ID: "ddl-" + newID(),
+		Table: model.ObjectRef{
+			Kind: model.KindTrigger, Name: name, Schema: req.Table.Schema, Catalog: req.Table.Catalog,
+		},
+		CreatedAt:    time.Now(),
+		ExpiresAt:    time.Now().Add(planTTL),
+		Statements:   []PlanStatement{{SQL: stmt, ExpectRows: -1}},
+		Rollback:     []PlanStatement{{SQL: e.dialect.DropTriggerSQL(quotedName), ExpectRows: -1}},
+		AffectedRows: 0,
+	}
+	plan.Notes = append(plan.Notes, "触发器体只支持单条语句；它会在每次写入时执行，出问题很难查——上线前先在测试库验一遍")
+	e.finishDDLPlan(plan)
+	return plan, nil
+}
+
+// listTriggers 列出已有触发器；查不出来就当没有（引擎会用自己的报错拦重名）。
+func (e *Executor) listTriggers(ctx context.Context, req DDLRequest) []model.ObjectRef {
+	objs, err := e.conn.Meta().Objects(ctx, req.Table.Catalog, req.Table.Schema, model.KindTrigger)
+	if err != nil {
+		return nil
+	}
+	return objs
 }

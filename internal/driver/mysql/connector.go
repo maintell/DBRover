@@ -67,7 +67,9 @@ func (c *Connector) Capabilities() model.Capabilities {
 		// （后者要完整列定义，方言层已经按改类型那条路径生成）。
 		AlterColumnNullability: true,
 		AlterColumnDefault:     true,
-		AddForeignKey:          true,
+		// 触发器一条语句就能建（体跟在 FOR EACH ROW 后面）。
+		AddTrigger:    true,
+		AddForeignKey: true,
 	}
 }
 

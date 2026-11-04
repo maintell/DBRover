@@ -62,7 +62,9 @@ func (c *Connector) Capabilities() model.Capabilities {
 		AlterColumnType:        false,
 		AlterColumnNullability: false,
 		AlterColumnDefault:     false,
-		AddForeignKey:          false,
+		// SQLite 的触发器件是 BEGIN … END，一条语句，切分器已经认它。
+		AddTrigger:    true,
+		AddForeignKey: false,
 	}
 }
 

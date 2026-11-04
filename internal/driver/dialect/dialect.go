@@ -117,6 +117,13 @@ type Dialect interface {
 	// query 是已过校验的 SELECT / WITH 主体（不含分号）。
 	CreateViewSQL(name, query string) string
 
+	// CreateTriggerSQL 渲染建触发器语句；第二个返回 false 表示这个引擎需要
+	// 「先建函数再建触发器」两步（PostgreSQL），v1 不做。
+	CreateTriggerSQL(opts TriggerOptions) (string, bool)
+
+	// DropTriggerSQL 渲染删触发器语句。
+	DropTriggerSQL(name string) string
+
 	// CreateMaterializedViewSQL 渲染建物化视图语句（只有 PostgreSQL 有这个概念）。
 	//
 	// 与普通视图的区别不是语法糖：物化视图会把结果**存下来**，读得快但会过期，
@@ -364,6 +371,42 @@ func (d impl) CreateSequenceSQL(name string, opts SequenceOptions) string {
 // DropSequenceSQL 见接口注释。
 func (d impl) DropSequenceSQL(name string) string {
 	return "DROP SEQUENCE " + name
+}
+
+// TriggerOptions 是一条触发器的定义。Timing / Event 由调用方校验并大写。
+type TriggerOptions struct {
+	Name   string
+	Table  string
+	Timing string // BEFORE / AFTER / INSTEAD OF
+	Event  string // INSERT / UPDATE / DELETE
+	Body   string // 单条语句，不含结尾分号
+}
+
+// CreateTriggerSQL 见接口注释。
+//
+// MySQL 与 SQLite 的差别只在体的包装：MySQL 直接跟在 FOR EACH ROW 后面写一条
+// 语句；SQLite 必须用 BEGIN … END 包起来，里面的分号由切分器负责不切错。
+//
+// PostgreSQL 的触发器必须先有函数（CREATE FUNCTION … RETURNS trigger），那是
+// 两条语句且函数体是 dollar-quoted 文本——v1 不做，返回 false 让调用方明确拒绝，
+// 而不是生成一条必然失败的 CREATE TRIGGER。
+func (d impl) CreateTriggerSQL(opts TriggerOptions) (string, bool) {
+	if d.engine == model.EnginePostgres {
+		return "", false
+	}
+	head := "CREATE TRIGGER " + d.QuoteIdent(opts.Name) + " " + opts.Timing + " " + opts.Event +
+		" ON " + opts.Table
+	if d.engine == model.EngineSQLite {
+		return head + " BEGIN " + opts.Body + "; END", true
+	}
+	return head + " FOR EACH ROW " + opts.Body, true
+}
+
+// DropTriggerSQL 见接口注释。
+//
+// MySQL 与 SQLite 都接受 DROP TRIGGER <名>；PostgreSQL 也接受（同 schema 下）。
+func (d impl) DropTriggerSQL(name string) string {
+	return "DROP TRIGGER " + name
 }
 
 // CreateMaterializedViewSQL 见接口注释。

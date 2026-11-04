@@ -29,6 +29,8 @@ func TestColumnActionsOfferNullableAndDefault(t *testing.T) {
 		{"新建序列按能力位隐藏", "btn-new-seq"},
 		{"物化视图入口按能力位", "capabilities.materialized_views"},
 		{"物化视图会提示过期", "REFRESH MATERIALIZED VIEW"},
+		{"触发器入口按能力位", "capabilities.add_trigger"},
+		{"触发器体只收单条语句", "async function planAddTrigger("},
 	} {
 		if !strings.Contains(src, want.needle) {
 			t.Errorf("app.js 里缺少「%s」：%q", want.name, want.needle)
