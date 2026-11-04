@@ -2245,6 +2245,41 @@ function currentStatement() {
   return { sql: sql, cursor: hasSel ? null : byteOffset(sql, el.selectionStart) };
 }
 
+// SLOW_QUERY_SECONDS 是「这条语句值得让人知道它在跑」的阈值，
+// PROMPT_SECONDS 是「问一句要不要继续等」的阈值（docs/05 §6 的两个口径）。
+const SLOW_QUERY_SECONDS = 3;
+const PROMPT_SECONDS = 30;
+
+// startQueryTimer 在状态栏滚动显示已运行时长，超过 30 秒时问一次「继续等还是取消」。
+//
+// 为什么不到 3 秒不显示秒数：绝大多数语句几十毫秒就回来了，让读数闪一下只是噪音；
+// 一旦超过 3 秒，用户最想知道的就是「跑了多久、还能不能停」。
+//
+// 返回的函数停止计时并返回总秒数，供调用方在收尾时显示。
+function startQueryTimer(onPrompt) {
+  const started = Date.now();
+  let asked = false;
+  const id = setInterval(() => {
+    const s = (Date.now() - started) / 1000;
+    if (s < SLOW_QUERY_SECONDS) return;
+    setStatus('执行中… ' + s.toFixed(1) + 's（可取消）');
+    if (s >= PROMPT_SECONDS && !asked) {
+      asked = true;
+      onPrompt();
+    }
+  }, 200);
+  return () => {
+    clearInterval(id);
+    return (Date.now() - started) / 1000;
+  };
+}
+
+// cancelRunning 是「停下来」的唯一入口：按钮、超时提示都走它，
+// 免得两处各写一遍取消逻辑（一处改了另一处不知道）。
+async function cancelRunning() {
+  $('btn-cancel').click();
+}
+
 async function runSQL(approvalToken) {
   if (!state.current) { showNotice('请先建立连接。', 'warn'); return; }
   const cur = currentStatement();
@@ -2255,6 +2290,21 @@ async function runSQL(approvalToken) {
   $('btn-run').disabled = true;
   // 只有真在跑的时候才有取消按钮：常驻会让人以为随时能中断。
   $('btn-cancel').hidden = false;
+  // 超过 3 秒开始报时；到 30 秒问一次继续等还是取消（docs/05 §6）。
+  //
+  // stillRunning 是给弹窗用的：这条语句可能在用户还在看弹窗时就跑完了，那时
+  // 再发取消只会得到一个「已经跑完了」。收尾时也靠它把弹窗收掉——问一个已经
+  // 不成立的问题，比不问更糟。
+  let stillRunning = true;
+  const PROMPT_TITLE = '查询已运行 30 秒';
+  const stopTimer = startQueryTimer(async () => {
+    const keep = await dialog(
+      PROMPT_TITLE,
+      '<p>这条语句已经跑了 30 秒。继续等待，还是取消？</p>' +
+        '<p>继续等待不会打断它；取消会在引擎侧终止这条语句。</p>',
+      '继续等待');
+    if (!keep && stillRunning) await cancelRunning();
+  });
   try {
     const body = { sql, max_rows: 200 };
     if (cur.cursor !== null) body.cursor = cur.cursor;
@@ -2302,6 +2352,13 @@ async function runSQL(approvalToken) {
       setStatus('失败');
     }
   } finally {
+    stillRunning = false;
+    stopTimer();
+    // 语句已经结束，弹窗里的问题不再成立：按「继续等待」把它收掉。
+    // 只在确实是我们那个弹窗时才动，别把别人的确认框关掉。
+    if (!$('dialog').hidden && $('dlg-title').textContent === PROMPT_TITLE) {
+      $('dlg-ok').click();
+    }
     $('btn-run').disabled = false;
     $('btn-cancel').hidden = true;
   }
