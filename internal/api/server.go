@@ -204,6 +204,7 @@ func (s *Server) routes() []route {
 		{http.MethodPost, "/api/v1/agent/conversations", false, s.handleAgentConversationCreate},
 		{http.MethodGet, "/api/v1/agent/conversations/{id}", false, s.handleAgentConversation},
 		{http.MethodPost, "/api/v1/agent/conversations/{id}/abort", false, s.handleAgentAbort},
+		{http.MethodPost, "/api/v1/agent/conversations/{id}/compact", false, s.handleAgentCompact},
 		{http.MethodPost, "/api/v1/agent/conversations/{id}/messages", false, s.handleAgentMessage},
 		{http.MethodPost, "/api/v1/agent/conversations/{id}/approvals/{pid}", false, s.handleAgentApproval},
 		{http.MethodGet, "/api/v1/agent/conversations/{id}/export", false, s.handleAgentExport},

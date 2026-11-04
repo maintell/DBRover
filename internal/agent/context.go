@@ -221,6 +221,12 @@ func compactHistoryByTokens(msgs []Message, budgetTokens int) ([]Message, int) {
 //
 // 压缩是**有损**的，所以必须在消息里留一句话说明被压过——否则模型会以为
 // 自己看过全部内容，然后基于不完整的信息下结论。
+// compactedMarker 是「这条已经被压过」的标记，同时是幂等判据。
+//
+// 做成常量而不是散在格式串里：判断「压过没有」和「写标记」必须是同一个字符串，
+// 两边各写一份，改一处就会让重复压缩悄悄回来。
+const compactedMarker = "\n…（已压缩："
+
 func compactWith(msgs []Message, size func(string) int, budget int) ([]Message, int) {
 	total := 0
 	for _, m := range msgs {
@@ -241,13 +247,19 @@ func compactWith(msgs []Message, size func(string) int, budget int) ([]Message, 
 		if out[i].Role != "tool" {
 			continue
 		}
+		// 已经压过的不再压：截出来的 stub 仍然比 compactedStubRunes 长（后面还跟着
+		// 一句说明），不加这个判断就会每按一次再截一刀、把上一次的说明也切掉，
+		// 体积每次只减一点点而内容越来越残。连点两下必须是幂等的。
+		if strings.Contains(out[i].Content, compactedMarker) {
+			continue
+		}
 		before := size(out[i].Content)
 		if before <= compactedStubRunes {
 			continue
 		}
 		stub := truncateRunes(out[i].Content, compactedStubRunes)
-		out[i].Content = stub + fmt.Sprintf("\n…（已压缩：省略 %d 字符。需要细节请重新调用该工具）",
-			before-size(stub))
+		out[i].Content = stub + fmt.Sprintf("%s省略 %d 字符。需要细节请重新调用该工具）",
+			compactedMarker, before-size(stub))
 		total -= before - size(out[i].Content)
 		compacted++
 	}

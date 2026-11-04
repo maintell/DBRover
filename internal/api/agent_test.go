@@ -596,3 +596,38 @@ func TestAgentAbort(t *testing.T) {
 		t.Errorf("中止后 running 应为 false：%d %v", code, body)
 	}
 }
+
+// TestAgentCompactEndpoint 验证「手动压缩」有出口，且不会假装压过。
+//
+// 空会话压缩必须 skipped=true 并说明原因——如果它回一个「已压缩 0 条」的漂亮
+// 数字，界面会以为腾出了空间。
+func TestAgentCompactEndpoint(t *testing.T) {
+	s, ts, dir := newServer(t)
+	fake := &fakeModel{script: []string{textReply("嗯")}}
+	model := httptest.NewServer(fake.handler(t))
+	defer model.Close()
+	s.SetAgentConfig(api.AgentConfig{BaseURL: model.URL, Model: "fake"})
+
+	connID := createConn(t, ts, dir, "test", "read-write")
+	_, body := do(t, ts, http.MethodPost, "/api/v1/agent/conversations",
+		map[string]any{"connection_id": connID, "mode": "read-only"}, true)
+	convID, _ := body["id"].(string)
+
+	code, body := do(t, ts, http.MethodPost, "/api/v1/agent/conversations/"+convID+"/compact", nil, true)
+	if code != http.StatusOK {
+		t.Fatalf("压缩 = %d %v", code, body)
+	}
+	if body["skipped"] != true {
+		t.Errorf("空历史应 skipped=true：%v", body)
+	}
+	if note, _ := body["note"].(string); note == "" {
+		t.Errorf("跳过时要说明原因：%v", body)
+	}
+	if body["before"] != body["after"] {
+		t.Errorf("跳过时不该改体积：%v", body)
+	}
+
+	if code, _ := do(t, ts, http.MethodPost, "/api/v1/agent/conversations/不存在/compact", nil, true); code != http.StatusNotFound {
+		t.Errorf("未知会话应 404，实际 %d", code)
+	}
+}

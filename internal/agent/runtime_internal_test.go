@@ -176,3 +176,44 @@ func TestToolSchemasAreValidJSON(t *testing.T) {
 		}
 	}
 }
+
+// TestCompactNowOnlyWhenOverBudget 钉住手动压缩的两条口径。
+//
+// 「压了多少」这种事最容易自证：只断言 After < Before，把压缩实现整个删掉
+// 也可能因为别的原因变短。所以这里同时断言历史里真的留下了「已压缩」的说明
+// （模型不能以为自己看过全文），以及已经低于预算时再点一次必须什么都不做——
+// 压缩有损，用户随手点两下不该反复丢细节。
+func TestCompactNowOnlyWhenOverBudget(t *testing.T) {
+	conn := openInnerConn(t, `CREATE TABLE t (id INTEGER PRIMARY KEY)`)
+	rt := newInnerRuntime(t, conn, ModeReadOnly)
+	rt.contextBudget = 400
+	rt.history = []Message{
+		{Role: "user", Content: "问一句"},
+		{Role: "tool", Name: "query.execute", Content: strings.Repeat("x", 800)},
+	}
+
+	res := rt.CompactNow()
+	if res.Skipped || res.Compacted != 1 {
+		t.Fatalf("超预算时应压缩 1 条：%+v", res)
+	}
+	if res.After >= res.Before {
+		t.Errorf("压缩后体积没变小：%d → %d", res.Before, res.After)
+	}
+	found := false
+	for _, m := range rt.history {
+		if strings.Contains(m.Content, "已压缩") {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("压缩后必须留下「已压缩」的说明，否则模型会以为看过全文")
+	}
+
+	res2 := rt.CompactNow()
+	if !res2.Skipped {
+		t.Fatalf("已经低于预算时再点一次应什么都不做：%+v", res2)
+	}
+	if res2.Before != res2.After {
+		t.Errorf("跳过时不该改体积：%d → %d", res2.Before, res2.After)
+	}
+}

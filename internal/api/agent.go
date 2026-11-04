@@ -504,3 +504,21 @@ func (s *Server) handleAgentAbort(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"aborted": true,
 		"note": "取消已发出：这一轮会在下一个边界收尾，已执行的步骤仍然保留"})
 }
+
+// handleAgentCompact 由**人**主动压缩一次会话历史。
+//
+// 没有任何东西被删掉：历史里的工具结果被换成「已压缩」指代，对话与结论原样保留。
+// 低于预算时返回 skipped=true 并说明原因——压缩有损，不能因为用户点了就压。
+func (s *Server) handleAgentCompact(w http.ResponseWriter, r *http.Request) {
+	c, okConv := s.agentConvByID(r.PathValue("id"))
+	if !okConv {
+		writeError(w, http.StatusNotFound, "CONVERSATION_NOT_FOUND", "internal", "会话不存在或已过期", "重新新建会话", false)
+		return
+	}
+	// 这里有意的取舍：压缩与整轮 Ask 共用 c.mu（不另设锁）——正在跑的一轮
+	// 中途把历史换掉，模型会拿到前后不一致的上下文。宁可让用户等这一轮结束。
+	c.mu.Lock()
+	res := c.rt.CompactNow()
+	c.mu.Unlock()
+	writeJSON(w, http.StatusOK, res)
+}

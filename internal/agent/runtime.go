@@ -561,3 +561,61 @@ func (r *Runtime) systemPrompt() string {
 	b.WriteString("6. 回答用中文，说清结论与依据；不确定就说不确定，不要猜。\n")
 	return b.String()
 }
+
+// CompactResult 是手动压缩的结果。
+type CompactResult struct {
+	Mode      string `json:"mode"`   // chars | tokens
+	Budget    int    `json:"budget"` // 本次用的预算（与自动压缩同一口径）
+	Before    int    `json:"before"`
+	After     int    `json:"after"`
+	Compacted int    `json:"compacted_messages"` // 被压成指代的工具结果条数
+	Skipped   bool   `json:"skipped"`
+	Note      string `json:"note,omitempty"`
+}
+
+// CompactNow 让**人**主动压缩一次历史。
+//
+// 与自动压缩共用同一套口径（compactWith），区别只在触发方式和人能看到的回报：
+// 自动压缩发生在「跑到一半发现超了」，用户只看到结果变短；手动压缩得回答
+// 「压了多少、还剩多少、为什么没压」。
+//
+// 低于预算时什么都不做并说明——压缩是有损的，用户随手点一下就把工具结果换成
+// 指代，等于替他做了个丢细节的决定。真要清空，请重开会话。
+func (r *Runtime) CompactNow() CompactResult {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	out := CompactResult{Mode: "chars", Budget: r.contextBudget}
+	measure := func(s string) int { return len(s) }
+	if r.contextTokens > 0 {
+		out.Mode = "tokens"
+		out.Budget = int(float64(r.contextTokens) * compactRatio)
+		measure = estimateTokens
+	}
+	if out.Budget <= 0 {
+		out.Budget = defaultContextBudget
+	}
+	out.Before = historySize(r.history, measure)
+	kept, compacted := compactWith(r.history, measure, out.Budget)
+	if compacted == 0 {
+		out.After = out.Before
+		out.Skipped = true
+		out.Note = fmt.Sprintf("历史 %d 未超过预算 %d（%s），未压缩", out.Before, out.Budget, out.Mode)
+		return out
+	}
+	r.history = kept
+	out.After = historySize(kept, measure)
+	out.Compacted = compacted
+	out.Note = fmt.Sprintf("已把 %d 条工具结果压成指代：%d → %d（%s）",
+		compacted, out.Before, out.After, out.Mode)
+	return out
+}
+
+// historySize 按给定口径统计历史体积。
+func historySize(msgs []Message, size func(string) int) int {
+	total := 0
+	for _, m := range msgs {
+		total += size(m.Content)
+	}
+	return total
+}

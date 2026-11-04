@@ -994,6 +994,15 @@
         }
       }
     },
+    "/api/v1/agent/conversations/{id}/compact": {
+      "post": {
+        "summary": "由人主动压缩一次历史（把最早的工具结果换成指代；低于预算时不做并说明）",
+        "responses": {
+          "200": { "description": "ok（skipped=true 表示没超预算，什么都没改）" },
+          "404": { "description": "会话不存在或已过期" }
+        }
+      }
+    },
     "/api/v1/agent/conversations/{id}/messages": {
       "post": {
         "summary": "发一条消息（含步骤、结论与待批预案）；加 ?stream=1 改为 NDJSON 流式",

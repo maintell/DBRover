@@ -320,6 +320,7 @@ POST /connections
 | `POST` | `/agent/conversations/{id}/messages` | 发送消息 | ✅ 同步返回；`?stream=1` 改 NDJSON 流（step / answer / done / result / error） |
 | `POST` | `/agent/conversations/{id}/approvals/{aid}` | 批准/拒绝（`aid` 为预案 ID） | ✅ |
 | `POST` | `/agent/conversations/{id}/abort` | 中止正在跑的一轮：返回 `200 {aborted:true}` 表示**取消已发出**（这一轮在下一个模型调用或工具边界收尾，被中止的 `messages` 请求会带 `stop_message` 返回 200）；没有在跑的一轮时返回 `409 CONVERSATION_IDLE`，不假装停掉了什么 | ✅ |
+| `POST` | `/agent/conversations/{id}/compact` | 由人主动压缩一次历史（把最早的工具结果换成指代）：低于预算时 `skipped=true` 且什么都没改；连点幂等 | ✅ |
 | `GET` | `/agent/conversations/{id}/export` | 导出（含全部步骤） | ✅ |
 | `GET` | `/agent/tools` | 工具清单与 schema（名称、说明、参数 schema、风险与是否写），**不需要连接也不需要模型配置**，按名字排序（顺序稳定才能做快照比对） | ✅ |
 | `GET/POST` | `/agent/providers` | Provider 配置 | ⛔（现在走环境变量，见 `docs/11 §8.3`） |
