@@ -34,3 +34,19 @@ docker run -d --name dbrover-pg  -e POSTGRES_PASSWORD=testpass     -e POSTGRES_D
 - 每个脚本自己 `Start-Process bin\dbrover.exe serve` 并在 `finally` 里停掉，不依赖外部服务。
 - 失败一律 `throw`，不做「打印一行警告继续跑」——验收脚本的意义就是能红。
 - 跑完记得删测试容器：`docker rm -f dbrover-my dbrover-pg`。
+
+## 引擎名
+
+`-Engine` 接受 `mysql` / `postgres`；写 `pg` 会被脚本规范化成 `postgres`（服务端只认规范值，早先直接用 `pg` 会得到 `DB_CONNECT_FAILED: 暂不支持的引擎`）。这条是实际跑脚本时踩出来的，别改成只认 `pg`。
+
+## 最近一次全跑（2026-11-04，HEAD 8461c75）
+
+| 脚本 | 引擎 | 结果 |
+|---|---|---|
+| `bulk-20k-sqlite.ps1` | SQLite | 通过：20000 行 / 20 条进度 / 断线后重提补齐（幂等） |
+| `bulk-engines.ps1` | MySQL 5.7 / PostgreSQL 17 | 通过：3000 行 3 批 + 复合主键 1500 行 8 批×200 |
+| `precision.ps1` | MySQL 5.7 / PostgreSQL 17 | 通过：BIGINT 上下界与 NUMERIC(38,10) 极值逐字符一致；JSON 数字形态被 400 拒绝 |
+| `timezone.ps1` | MySQL 5.7 / PostgreSQL 17 | 通过：两种展示指向同一瞬间，写回按 UTC 存 |
+| `fk-add.ps1` | MySQL 5.7 / PostgreSQL 17 | 通过：孤儿阻断带样本 → 预案 → 执行 → 撤销 |
+| `deps-drop.ps1` | MySQL 5.7 / PostgreSQL 17 | 通过：视图 + 外键双阻断并点名 → 拆掉后删表成功 |
+| `compare-cross.ps1` | MySQL 5.7 ↔ PostgreSQL 17 | 通过：同构表零差异、单侧视图分类、同引擎视图零误报 |

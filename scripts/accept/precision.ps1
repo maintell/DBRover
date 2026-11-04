@@ -14,6 +14,9 @@ param(
 # 任何一环把值当 double 处理，38 位的十进制数就会在低位悄悄变形。
 $ErrorActionPreference = 'Stop'
 
+# 引擎名用服务端的规范值：`pg` 是早先的别名，服务端只认 postgres。
+if ($Engine -eq 'pg') { $Engine = 'postgres' }
+
 $root = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 $bin = Join-Path $root 'bin\dbrover.exe'
 $httpPort = if ($Engine -eq 'mysql') { 7794 } else { 7795 }
