@@ -475,6 +475,24 @@ func (c *Connector) DDL(ctx context.Context, ref model.ObjectRef) (string, error
 		schema = c.config().Schema
 	}
 
+	// 触发器：pg_get_triggerdef 给出 CREATE TRIGGER 的原文（不含尾分号）。
+	if ref.Kind == model.KindTrigger {
+		var def string
+		err := h.QueryRowContext(ctx,
+			`SELECT pg_get_triggerdef(t.oid) FROM pg_trigger t
+			   JOIN pg_class c ON c.oid = t.tgrelid
+			   JOIN pg_namespace n ON n.oid = c.relnamespace
+			  WHERE n.nspname = $1 AND t.tgname = $2 AND NOT t.tgisinternal`,
+			schema, ref.Name).Scan(&def)
+		if err == sql.ErrNoRows {
+			return "", fmt.Errorf("pg: 触发器不存在: %s", ref.Name)
+		}
+		if err != nil {
+			return "", err
+		}
+		return def + ";", nil
+	}
+
 	// 视图直接取定义。
 	if ref.Kind == model.KindView || ref.Kind == model.KindMatView {
 		var def string

@@ -330,9 +330,19 @@ func (c *Connector) DDL(ctx context.Context, ref model.ObjectRef) (string, error
 		return "", err
 	}
 	qual := sqliteQualifier(ref.Catalog)
+	// 触发器/视图的原文也在 sqlite_master 里，只是 type 不同；按 Kind 收窄一下，
+	// 免得把同名对象的 DDL 认错（索引与触发器都可能与表重名）。
+	q := "SELECT sql FROM " + qual + ".sqlite_master WHERE name = ?"
+	switch ref.Kind {
+	case model.KindTrigger:
+		q += " AND type = 'trigger'"
+	case model.KindView:
+		q += " AND type = 'view'"
+	case model.KindIndex:
+		q += " AND type = 'index'"
+	}
 	var ddl sql.NullString
-	err = h.QueryRowContext(ctx,
-		"SELECT sql FROM "+qual+".sqlite_master WHERE name = ?", ref.Name).Scan(&ddl)
+	err = h.QueryRowContext(ctx, q, ref.Name).Scan(&ddl)
 	if err == sql.ErrNoRows {
 		return "", fmt.Errorf("sqlite: 对象不存在: %s", ref.Name)
 	}

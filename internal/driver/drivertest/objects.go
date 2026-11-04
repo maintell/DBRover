@@ -2,6 +2,7 @@ package drivertest
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/maintell/DBRover/internal/model"
@@ -45,17 +46,26 @@ func testTriggerListing(t *testing.T, cfg Config) {
 	if err != nil {
 		t.Fatalf("Objects(KindTrigger): %v", err)
 	}
-	found := false
+	var ref model.ObjectRef
 	for _, o := range objs {
 		if o.Name == name {
-			found = true
+			ref = o
 			if o.Kind != model.KindTrigger {
 				t.Errorf("Kind = %q，期望 trigger", o.Kind)
 			}
 		}
 	}
-	if !found {
+	if ref.Name == "" {
 		t.Fatalf("触发器 %s 没出现在列表里：%+v", name, objs)
+	}
+
+	// 只能看到名字、看不到它干什么，等于没做完：定义必须取得到。
+	ddl, err := c.Meta().DDL(ctx, ref)
+	if err != nil {
+		t.Fatalf("DDL(%s): %v", name, err)
+	}
+	if !strings.Contains(strings.ToUpper(ddl), "TRIGGER") || !strings.Contains(ddl, name) {
+		t.Fatalf("触发器定义不像 CREATE TRIGGER %s：%q", name, ddl)
 	}
 
 	// 按表过滤时不该把触发器混进来：两者是不同对象。

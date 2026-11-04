@@ -888,7 +888,39 @@ func (s *Server) handleTableSchema(w http.ResponseWriter, r *http.Request) {
 			"这是一个 key-value 连接，没有表结构", "改用 GET /api/v1/connections/{id}/kv/entry?key=...", false)
 		return
 	}
-	ref := model.ObjectRef{Kind: model.KindTable, Name: r.PathValue("name"), Schema: r.URL.Query().Get("schema")}
+	// kind=trigger 时只回定义：触发器没有列结构，套用 DescribeTable 只会
+	// 得到一个「对象不存在」。
+	kind := model.KindTable
+	switch r.URL.Query().Get("kind") {
+	case "", "table", "view":
+		kind = model.KindTable
+	case "trigger":
+		kind = model.KindTrigger
+	default:
+		writeError(w, http.StatusBadRequest, "REQUEST_INVALID", "internal",
+			"kind 只支持 table / view / trigger", "", false)
+		return
+	}
+	ref := model.ObjectRef{Kind: kind, Name: r.PathValue("name"), Schema: r.URL.Query().Get("schema")}
+
+	if kind == model.KindTrigger {
+		ddlText, derr := e.exec.TableDDL(r.Context(), ref)
+		if errors.Is(derr, driver.ErrObjectNotFound) {
+			writeError(w, http.StatusNotFound, "OBJECT_NOT_FOUND", "resource",
+				derr.Error(), "刷新对象清单后重试", false)
+			return
+		}
+		if derr != nil {
+			writeError(w, http.StatusBadRequest, "SCHEMA_READ_FAILED", "internal", derr.Error(), "", false)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{
+			"object":       ref,
+			"ddl":          ddlText,
+			"capabilities": drv.Capabilities(),
+		})
+		return
+	}
 
 	detail, err := e.exec.DescribeTable(r.Context(), ref)
 	if errors.Is(err, driver.ErrObjectNotFound) {

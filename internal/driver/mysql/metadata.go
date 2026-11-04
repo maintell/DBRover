@@ -247,6 +247,63 @@ func (c *Connector) triggerRefs(ctx context.Context, db string) ([]model.ObjectR
 	return out, rows.Err()
 }
 
+// showCreate 执行 SHOW CREATE <对象>，并按**列名**取定义。
+//
+// SHOW CREATE TRIGGER 的列名与顺序随版本变（5.7 叫 "SQL Original Statement"），
+// 按下标取会随版本坏掉；同时模板里没有分号，补一个才是一条可回放的语句。
+func (c *Connector) showCreate(ctx context.Context, q, column, name string) (string, error) {
+	h, err := c.handle()
+	if err != nil {
+		return "", err
+	}
+	rows, err := h.QueryContext(ctx, q)
+	if err != nil {
+		return "", err
+	}
+	defer func() { _ = rows.Close() }()
+
+	cols, err := rows.Columns()
+	if err != nil {
+		return "", err
+	}
+	idx := -1
+	for i, col := range cols {
+		if strings.EqualFold(col, column) {
+			idx = i
+		}
+	}
+	if idx < 0 {
+		return "", fmt.Errorf("mysql: SHOW CREATE 结果里没有列 %q", column)
+	}
+	if !rows.Next() {
+		if err := rows.Err(); err != nil {
+			return "", err
+		}
+		return "", fmt.Errorf("mysql: 对象不存在: %s", name)
+	}
+	vals := make([]any, len(cols))
+	ptrs := make([]any, len(cols))
+	for i := range vals {
+		ptrs[i] = &vals[i]
+	}
+	if err := rows.Scan(ptrs...); err != nil {
+		return "", err
+	}
+	var def string
+	switch v := vals[idx].(type) {
+	case string:
+		def = v
+	case []byte:
+		def = string(v)
+	default:
+		return "", fmt.Errorf("mysql: %s 的定义不是字符串", column)
+	}
+	if !strings.HasSuffix(strings.TrimSpace(def), ";") {
+		def += ";"
+	}
+	return def, nil
+}
+
 // DescribeTable 返回列、索引、外键与体量。
 func (c *Connector) DescribeTable(ctx context.Context, ref model.ObjectRef) (*model.TableDetail, error) {
 	h, err := c.handle()
@@ -415,6 +472,13 @@ func (c *Connector) DDL(ctx context.Context, ref model.ObjectRef) (string, error
 	db := ref.Catalog
 	if db == "" {
 		db = c.config().Catalog
+	}
+
+	if ref.Kind == model.KindTrigger {
+		// SHOW CREATE TRIGGER 的列名随版本变（5.7 是 SQL Original Statement），
+		// 按列名取比按下标取稳。返回值末尾补分号，才是一条可回放的语句。
+		return c.showCreate(ctx, "SHOW CREATE TRIGGER "+quoteIdent(db)+"."+quoteIdent(ref.Name),
+			"SQL Original Statement", ref.Name)
 	}
 
 	q := "SHOW CREATE TABLE " + quoteIdent(db) + "." + quoteIdent(ref.Name)

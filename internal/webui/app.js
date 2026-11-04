@@ -476,8 +476,13 @@ async function loadTables() {
       if (browsable) {
         b.textContent = t.name;
         b.onclick = () => browseTable(t.name);
+      } else if (kind === 'trigger') {
+        // 触发器没有数据行，但有定义：点开看 CREATE TRIGGER 原文。
+        b.textContent = t.name + ' · 触发器';
+        b.title = '查看触发器定义';
+        b.onclick = () => showObjectDDL('trigger', t.name);
       } else {
-        b.textContent = t.name + ' · ' + (kind === 'trigger' ? '触发器' : '序列');
+        b.textContent = t.name + ' · 序列';
         b.disabled = true;
         b.title = '这个对象没有可浏览的数据行';
       }
@@ -485,6 +490,23 @@ async function loadTables() {
     }
   } catch (e) {
     showNotice('加载表清单失败：' + e.message, 'error');
+  }
+}
+
+// showObjectDDL 展示没有数据行、但有定义的对象（目前是触发器）。
+async function showObjectDDL(kind, name) {
+  if (!state.current) return;
+  setStatus('取定义…');
+  try {
+    const out = await api(path(API.schema, { id: state.current.id, name }) + '?kind=' + kind);
+    $('results').replaceChildren();
+    const pre = document.createElement('pre');
+    pre.textContent = out.ddl || '（没有取到定义）';
+    $('results').appendChild(pre);
+    setStatus(kind + ' · ' + name);
+  } catch (e) {
+    showNotice('取定义失败：' + e.message, 'error');
+    setStatus('失败');
   }
 }
 

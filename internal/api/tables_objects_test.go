@@ -2,6 +2,7 @@ package api_test
 
 import (
 	"net/http"
+	"strings"
 	"testing"
 )
 
@@ -41,5 +42,16 @@ func TestTablesIncludeTriggers(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("触发器没出现在对象列表里：%v", items)
+	}
+
+	// 只能看到名字、看不到它干什么，等于没做完：定义也要取得到。
+	code, body = do(t, ts, http.MethodGet,
+		"/api/v1/connections/"+id+"/tables/trg_t/schema?kind=trigger", nil, true)
+	if code != http.StatusOK {
+		t.Fatalf("取触发器定义状态码 = %d", code)
+	}
+	ddl, _ := body["ddl"].(string)
+	if !strings.Contains(strings.ToUpper(ddl), "CREATE TRIGGER") {
+		t.Fatalf("触发器定义不对：%q", ddl)
 	}
 }
