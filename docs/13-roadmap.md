@@ -24,7 +24,7 @@
 
 | 里程碑 | 状态 | 说明 |
 |---|---|---|
-| M0 文档基线 | ✅ 完成 | 14 份设计文档 + 14 份 ADR（0001 技术栈 / 0002 Agent 边界 / 0003 Plan-Apply / 0004 环境模型 / 0005 跨引擎差异 / 0006 依赖检查 / 0007 非关系型接口 / 0008 SQL Server 接入 / 0009 备份续跑粒度 / 0010 备份加密 / 0011 迁移搬数据 / 0012 迁移约束与默认值 / 0013 迁移外键 / 0014 迁移注释） |
+| M0 文档基线 | ✅ 完成 | 14 份设计文档 + 15 份 ADR（0001 技术栈 / 0002 Agent 边界 / 0003 Plan-Apply / 0004 环境模型 / 0005 跨引擎差异 / 0006 依赖检查 / 0007 非关系型接口 / 0008 SQL Server 接入 / 0009 备份续跑粒度 / 0010 备份加密 / 0011 迁移搬数据 / 0012 迁移约束与默认值 / 0013 迁移外键 / 0014 迁移注释 / 0015 连接器目标标识与恢复确认）。**这份清单由 `internal/ci` 守住**：列出的编号必须存在，新增 ADR 必须登记进来 |
 | M1 最小闭环 | 🚧 进行中 | SQLite / MySQL / PostgreSQL 三引擎端到端已通；API、临时前端、CLI 已可用；**SQL Server 未开工，卡在镜像而不是磁盘**：`mcr.microsoft.com` 的 API 可达，但 blob 走 `southeastasia.data.mcr.microsoft.com`，实测约 85 KB/s 且被 `connection reset` 掐断；Docker Hub 直接拒连。决策与实现口径见 ADR-0008，拿到能拉镜像的机器即可开工 |
 | M2 写入与变更安全 | ✅ 基本完成 | 变更集、乐观并发、Plan/Apply、行内编辑、筛选排序、结构设计器、批量修改（含分批与中止）、一键撤销、导出、结构比对、依赖检查 —— 见下表 |
 | M3 AI Agent | 🚧 切片一、二完成 | `internal/agent`：Provider 抽象 + OpenAI 兼容客户端（DeepSeek / 通义 / Moonshot / vLLM / Ollama 走同一套协议，用 `base_url` + `model` 区分）、14 个工具、权限三模式与环境上限、执行循环（步数 / 时长 / 循环检测 / 失败上限）、审批门（预案只由服务端保管，Agent 无法自批）。已接 HTTP（`/agent/status`、`/agent/conversations`、`/messages`（含 `?stream=1` NDJSON）、`/approvals`、`/export`）与界面（步骤时间线、可展开 SQL、审批卡片、会话导出），内置浏览器实测通过。上下文检索已做三路（名称 + 注释 + 结构邻近，最多 40 个对象 / 5 张表列定义），长会话压缩按「配了窗口就按估算 token 的 85%、没配退回字符预算」触发，只压工具结果。评测集（`internal/agent/eval`，14 条录制回放，SQLite/MySQL/PG 三引擎真机全过，CI 门禁）、Windows 凭据库与 `dbrover secret` 都已做。**未做**：向量召回（P1，需先定嵌入模型与索引方案）、macOS/Linux 凭据库、审计外部锚点。不再被「接哪个模型服务」卡住——那是配置项，不是设计决策 |
@@ -47,30 +47,31 @@ M1/M2 已完成并有测试覆盖的部分：
 | 方言层：词法、语句切分、指纹归一化、分类、条件分析、标识符引用 | `internal/driver/dialect` | 5 种方言表驱动用例，含 dollar-quote、`DELIMITER`、`GO`、Oracle `/`、嵌套注释 |
 | 风险分级 `R0`–`R4` | `internal/policy` | 40+ 边界语句（`WHERE 1=1`、CTE 内写、`SELECT INTO`、`EXPLAIN ANALYZE` 包装）+ Redis 命令风险表（不在表里的一律 `R4`） |
 | 摩擦分级 `F0`–`F5` | `internal/policy` | 5 环境 × 5 风险矩阵穷举 + 修正项 + 放宽方向断言 |
-| 连接器契约 + 一致性套件 | `internal/driver`、`internal/driver/drivertest` | 套件 14 项（含 `DependentsReported`、`BlockersReported`，以及新增的 `TriggerListing` / `SequenceListing` / `SearchMatchesComments`——都靠各驱动自己提供建对象/写注释的钩子，没钩子的引擎如实跳过） |
+| 连接器契约 + 一致性套件 | `internal/driver`、`internal/driver/drivertest` | 套件 19 项（含 `DependentsReported`、`BlockersReported`，以及 `TriggerListing` / `SequenceListing` / `TypeListing` / `RoutineListing` / `SearchMatchesComments`——都靠各驱动自己提供建对象/写注释的钩子，没钩子的引擎如实跳过；`RoutineListing` 还会把取到的定义**回放**一遍，回放不了就说明定义不完整） |
 | SQLite / MySQL / PostgreSQL 连接器 | `internal/driver/*` | 三引擎套件全绿（真实 MySQL 5.7.38、PostgreSQL 17.11）；`clientFoundRows` 修掉「改成相同值被判冲突」；会话时区钉 UTC |
 | 执行门 | `internal/service` | 集成用例，含整批原子拦截与审计 |
 | 回环 HTTP 服务 | `internal/api` | 鉴权、连接生命周期、查询、审批拒绝、只读拒绝、审计、非回环地址拒绝、游标分页、键集分页、筛选排序、OpenAPI 契约门禁 |
 | 结果游标与分页 | `internal/service` | 流式游标（5 分钟 TTL、续期、占用互斥）+ 键集分页（无主键表显式拒绝） |
 | 数据变更集与预案 | `internal/service`、`internal/api` | 乐观并发、冲突整体回滚、预案服务端保管、审批绑定指纹、一键撤销（同风险同摩擦） |
-| 结构设计器 | `internal/service/ddl.go` | 建表 / 加列 / 删列 / 改列类型（收窄预检）/ 索引建删（唯一索引查重）/ 加外键（孤儿预检）/ 删表（依赖阻断）；定义哈希与「建表时表仍不存在」两种竞态保护 |
+| 结构设计器 | `internal/service/ddl.go` | 18 个动作：建表 / 加列 / 删列 / 改列类型（收窄预检）/ 改可空（NULL 预检）/ 改默认值 / 索引建删（唯一索引查重）/ 加外键（孤儿预检）/ 删表（依赖阻断）/ 加检查约束（先数违规行）/ 视图 / 物化视图 / 序列 / 触发器 / 枚举类型 / 例程（新建 + 整段替换）/ 手写 DDL；定义哈希与「建表时表仍不存在」两种竞态保护。不能做的引擎明确拒绝并说明（MySQL 的 CHECK 不强制、PG 的触发器要先建函数、MySQL 建函数要 DETERMINISTIC 否则 1418） |
 | 批量修改 | `internal/service/bulk*.go` | 精确 `COUNT(*)`、每批独立事务、单列主键 1000 行/批、复合主键 200 行/批（SQLite 表达式树深度）、NDJSON 进度、可中止、幂等重提 |
-| 流式导出 | `internal/service/export.go` | CSV / NDJSON，100 万行内存增长 10.6 MB |
-| 结构比对 | `internal/service/compare.go` | 表/列/索引/外键/检查约束/视图定义；类型同义归一；升级与回退脚本覆盖索引、外键与视图；每条差异带两侧原文 |
+| 流式导出 | `internal/service/export.go` | CSV / NDJSON / XLSX（XLSX 手写 OOXML，不引三方库；数字单元格是真数字），100 万行内存增长 10.6 MB |
+| 结构比对 | `internal/service/compare.go` | 表/列/索引/外键/检查约束/视图**与物化视图**定义（物化视图用 `DROP MATERIALIZED VIEW`，一侧没有这个概念时只记 `need_review` 不出脚本）；类型同义归一；升级与回退脚本覆盖索引、外键、视图与物化视图；每条差异带两侧原文 |
 | Agent 运行时 | `internal/agent` | Provider 抽象 + OpenAI 兼容客户端（httptest 验证协议编解码）；14 个工具（元数据 / 只读查询 / 执行计划 / 采样 / 变更预案与执行 / 会话快照 / 笔记）；权限三模式 × 环境上限 × 连接访问模式；执行循环含步数、时长、循环检测与同工具失败上限；`change.apply` 必须人工批准；只读判定在 service 侧（`ReadOnlyQuery`），不靠调用方自觉 |
 | Agent 端点与界面 | `internal/api/agent.go`、`internal/webui` | 会话按连接隔离（换连接换会话，防止跨连接复用已批预案）；`messages` 同步返回步骤与待批预案；审批卡片展示最终 SQL；界面画步骤时间线并可展开 SQL |
 | 依赖与预执行检查 | `internal/service`、`internal/driver/*` | 删表/删列前查视图与入向外键（`Exact` 标注）；锁等待阻断、长事务只提示 |
 | SSH 隧道 | `internal/infra/tunnel` | 8 项用例：单跳、双跳、私钥认证、错误密码、主机密钥不匹配拒绝、缺少信任库拒绝、跳数上限、TOFU 固定 |
 | 临时 Web 界面 | `internal/webui` | 免构建、随二进制内嵌；连接、对象树、SQL 执行、结果网格、审批弹窗、行内编辑、筛选排序、结构设计器、批量修改进度与停止、结构比对、导出 |
-| CLI | `cmd/dbrover` | `version` / `health` / `tables` / `exec` / `serve` / `tunnel`，退出码 0/1/2；`-rw` / `-password-file` / `-schema` |
+| CLI | `cmd/dbrover` | `version` / `health` / `tables` / `exec` / `serve` / `tunnel` / `secret` / `backup`（含 `inspect` `create`）/ `restore` / `migrate`，退出码 0/1/2；`-rw` / `-password-file` / `-schema` |
 | 真实实例验收脚本 | `scripts/accept` | 7 个可真跑脚本 + README（分批 2 万行与中途断开、MySQL/PG 分批与同值批次、精度、跨引擎比对、加外键、删除依赖、展示时区） |
 
 **已知的下一步（按性价比排序）**
 
-1. Redis 连接器：模型已由 ADR-0007 定好，需引入 `go-redis`（纯 Go）。**先确认依赖再动手**。
-2. SQL Server 连接器：磁盘已够（需拉 ~1.5G 镜像），难点是 `sys.*` 自拼 DDL。
-3. `docs/07` 验收 12 手写 SQL 模式：需要 DDL 解析，工作量大于本轮任何一项。
-4. AI Agent：等「接哪个模型服务」这个决策。
+1. SQL Server / Oracle / MySQL 8 连接器：**全部卡在拉不到镜像**（`mcr.microsoft.com` 的 blob 约 85 KB/s 且被 `connection reset`，Docker Hub 直连拒；见 [ADR-0008](adr/0008-mssql-connector.md)），拿到能拉镜像的机器即可开工。难点分别是 MSSQL 的 `sys.*` 自拼 DDL、Oracle 的 `DBMS_METADATA` 与空串语义。
+2. `docs/07` 验收 12 手写 SQL 模式：DDL **反解回表单**需要完整解析器，是剩余项里最大的一块。
+3. 引擎特有项（`EngineExtra`）表单：需要各引擎先补充元数据，块头也不小。
+4. 磁盘余量探测：只有 SQLite 能诚实实现（本地文件所在卷），MySQL / PG 拿不到「所在卷余量」，硬做只能是假的。
+5. 例程依赖检查：文本搜索例程体误报率太高，等确切需求再做。
 
 > `internal/webui` 是临时界面，目标是让能力可被点击验收，不替代 ADR-0001 规定的正式前端。
 
