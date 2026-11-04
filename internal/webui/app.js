@@ -702,6 +702,17 @@ function renderToolbar() {
   exportBtn.onclick = () => exportTable(exportSel.value);
   bar.append(exportSel, exportBtn);
 
+  // 新增行：只给可写、且有主键的表（没主键的行级操作一律不可编辑）。
+  const canWrite = state.current && state.current.access_mode !== 'read-only';
+  if (canWrite && state.pkCols && state.pkCols.length) {
+    const insBtn = document.createElement('button');
+    insBtn.id = 'btn-insert-row';
+    insBtn.textContent = '新增行';
+    insBtn.title = '插入一行：留空的列走默认值或自增';
+    insBtn.onclick = () => showInsertRow();
+    bar.appendChild(insBtn);
+  }
+
   const bulkBtn = document.createElement('button');
   bulkBtn.id = 'btn-bulk';
   bulkBtn.textContent = '批量修改';
@@ -980,6 +991,43 @@ async function submitChanges() {
   if (!ok) return;
 
   await applyPlan(plan.id);
+}
+
+// showInsertRow 插入一行。
+//
+// 「留空 = 不写这一列」是这里唯一的一条规则，它能同时覆盖自增主键与有默认值的
+// 列——刻意不做「空输入框就是 NULL」：那会把用户想要的默认值写成 NULL，而且与
+// 网格里「NULL 与空串是两件事」的约定冲突。要显式写 NULL 或空串，插完在网格里改。
+async function showInsertRow() {
+  if (!state.current || !state.tableName) return;
+  const cols = (state.columns || []).filter((c) => !c.is_generated);
+  if (!cols.length) {
+    showNotice('这张表没有可写的列。', 'warn');
+    return;
+  }
+  const body = cols
+    .map((c, i) => {
+      const type = (c.type && c.type.raw) || '';
+      const hint = c.default ? '默认 ' + c.default : (c.nullable ? '可空' : '必填');
+      return '<label class="field">' + c.name + '（' + type + ' · ' + hint + '）</label>' +
+        '<input id="ins-' + i + '" style="width:100%" autocomplete="off" spellcheck="false">';
+    })
+    .join('');
+  const ok = await dialog('新增一行', body +
+    '<p>留空 = 不写这一列（走默认值或自增）。要显式写 NULL 或空串，插入后在网格里改。</p>',
+    '生成预案');
+  if (!ok) return;
+  const after = {};
+  cols.forEach((c, i) => {
+    const v = $('ins-' + i).value;
+    if (v !== '') after[c.name] = v;
+  });
+  if (!Object.keys(after).length) {
+    // 服务端的 insert 要求至少给一列（整行都用默认值它拼不出语句），这里先说清楚。
+    showNotice('至少填一列：整行都用默认值的插入暂不支持。', 'warn');
+    return;
+  }
+  await submitRowChange({ op: 'insert', after }, '新增这行');
 }
 
 // rowValues 把这一行的所有列拼成「列名 → 值」。

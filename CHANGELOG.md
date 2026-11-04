@@ -164,6 +164,8 @@
 
 - **连接失败可诊断**（FR-CON-03，P0）：以前所有连接失败都是同一句 `DB_CONNECT_FAILED` + 一句「检查文件路径与访问模式」——那句话只对 SQLite 成立，MySQL 口令错也这么提示。现在**分类由驱动给**（只有驱动认识引擎错误码），`api` 只把类别翻成协议里的码与建议：`DB_CONNECT_DNS` / `REFUSED` / `TIMEOUT` / `AUTH` / `NO_DATABASE` / `TLS` / `HANDSHAKE` / `FILE`，未分类才回落到 `DB_CONNECT_FAILED` 且**不给建议**（编一句错的建议比不给更糟）。真机验证六种：PG 口令错、PG 库不存在、PG 端口关闭、MySQL 口令错（1045）、MySQL 库不存在（1049）、以及「TCP 通了但握手被切断」。**两个实测发现**：① Windows 上内核给的是 `WSAECONNREFUSED`，与 `syscall.ECONNREFUSED` 不是同一个值，`errors.Is` 匹配不到（端口关了却报「连接失败」），补了按 `*net.OpError` 的 `Op == "dial"` 兜底；② 「连上去但立刻 EOF」在真实网络里非常常见（代理/负载均衡掐断、端口指向的不是这个引擎），原来归到「其他」且无提示，现在单列 `DB_CONNECT_HANDSHAKE`。顺带把 `docs/12` 的错误码表改成真实集合——表里原来那三个码（`DB_DNS_FAILED` / `DB_TLS_FAILED` / `DB_AUTH_FAILED`）**在代码里从来没存在过**，以及删掉「连接只支持 SQLite」这条早就过期的描述。
 
+- **新增空白行**（FR-DATA-02 的最后一块）：数据页工具条多了「新增行」（只给可写、且有主键的表）。**只有一条规则：留空 = 不写这一列**——它同时覆盖自增主键与有默认值的列；刻意不做「空输入框就是 NULL」，那会把用户想要的默认值写成 NULL，而且与网格里「NULL 与空串是两件事」的约定冲突。要显式写 NULL 或空串，插完在网格里改（右键菜单已有那两项）。真机实测（PG 17，内置浏览器）：`ins_demo (id serial, v text, n int default 7)` 上只填 `v`，预案是 `INSERT INTO "ins_demo" ("v") VALUES (?)`（不含 id 与 n），执行后新行是 `2 | from-ui | 7`——自增与默认值都对。
+
 ### 安全
 
 - **大整数不再静默丢精度**：`BIGINT` 超过 2^53 时，界面保持字符串、服务端按列类型还原；客户端若把它写成 JSON 数字，直接 `400 NUMBER_PRECISION_LOSS` 并提示改用字符串，而不是把丢了低位的值写进库。此前界面 `coerce()` 用 `Number()` 转换整数列，编辑 `9223372036854775807` 会变成 `...5808`。

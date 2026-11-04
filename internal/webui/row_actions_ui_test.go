@@ -30,6 +30,11 @@ func TestUIRowActions(t *testing.T) {
 		"pks.includes(name.toLowerCase())",
 		// 只读连接不摆行级入口。
 		"state.current.access_mode !== 'read-only'",
+		// 新增行：按钮、对话框、「留空=不写这一列」这条规则、以及空提交的拦截。
+		"id = 'btn-insert-row'",
+		"function showInsertRow(",
+		"留空 = 不写这一列",
+		"至少填一列",
 	} {
 		if !strings.Contains(src, want) {
 			t.Errorf("行级操作缺少 %q", want)
