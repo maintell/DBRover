@@ -51,8 +51,12 @@ func TestBackupKeepsIndexes(t *testing.T) {
 	var buf bytes.Buffer
 	srcEx := NewExecutor(src, model.EnvTest, model.AccessReadWrite, nil)
 	defer srcEx.Close()
-	if _, err := srcEx.Backup(ctx, BackupRequest{}, &buf); err != nil {
+	hdr, err := srcEx.Backup(ctx, BackupRequest{}, &buf)
+	if err != nil {
 		t.Fatalf("Backup: %v", err)
+	}
+	if len(hdr.Objects) != 1 || hdr.Objects[0].Indexes < 2 {
+		t.Fatalf("头部应记下索引数（至少 2），实际 %+v", hdr.Objects)
 	}
 	script := buf.String()
 	if !bytes.Contains(buf.Bytes(), []byte("CREATE INDEX")) {
@@ -68,6 +72,9 @@ func TestBackupKeepsIndexes(t *testing.T) {
 	}
 	if len(rep.Objects) != 1 || rep.Objects[0].Indexes < 2 {
 		t.Fatalf("报告里的索引数不对：%+v（至少应有 idx_t_a 与 idx_t_c）", rep.Objects)
+	}
+	if len(rep.Mismatches) != 0 {
+		t.Fatalf("索引都恢复了，不该有计数不一致：%v", rep.Mismatches)
 	}
 
 	detail, err := dstEx.DescribeTable(ctx, model.ObjectRef{Kind: model.KindTable, Name: "t"})

@@ -167,3 +167,42 @@ func TestRestoreRefusesSource(t *testing.T) {
 		t.Fatalf("目标不是源库时应当允许：%v", err)
 	}
 }
+
+// TestRestoreReportsCountMismatch 保证「恢复后与备份时对不上」会被报出来，
+// 而不是安静地给一份看起来正常的报告。
+//
+// 容器里写的是「该表有 99 个索引」，实际脚本只建了主键——数量必然对不上。
+func TestRestoreReportsCountMismatch(t *testing.T) {
+	hdr := BackupHeader{
+		FormatVersion: backupFormatVersion,
+		Engine:        "sqlite",
+		Objects:       []BackupObject{{Kind: "table", Name: "m", Indexes: 99}},
+	}
+	hj, err := json.Marshal(hdr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var buf bytes.Buffer
+	buf.WriteString(backupMagic)
+	_ = binary.Write(&buf, binary.LittleEndian, uint16(backupFormatVersion))
+	_ = binary.Write(&buf, binary.LittleEndian, uint16(0))
+	_ = binary.Write(&buf, binary.LittleEndian, uint32(len(hj)))
+	buf.Write(hj)
+	sec := []byte("CREATE TABLE m (id INTEGER PRIMARY KEY)")
+	_ = binary.Write(&buf, binary.LittleEndian, uint32(len(sec)))
+	buf.Write(sec)
+
+	dst := openEmptySQLite(t)
+	ex := NewExecutor(dst, model.EnvTest, model.AccessReadWrite, nil)
+	defer ex.Close()
+	rep, err := ex.Restore(context.Background(), bytes.NewReader(buf.Bytes()), RestoreRequest{})
+	if err != nil {
+		t.Fatalf("Restore: %v", err)
+	}
+	if len(rep.Mismatches) == 0 {
+		t.Fatal("索引数不一致时必须报出来")
+	}
+	if !strings.Contains(rep.Mismatches[0], "索引") {
+		t.Errorf("不一致描述里要指明是哪一项，实际 %q", rep.Mismatches[0])
+	}
+}

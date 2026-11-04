@@ -759,7 +759,13 @@ func cmdRestore(args []string) error {
 	}
 	fmt.Printf("恢复完成：%d 个对象、%d 行，用时 %d ms\n", len(rep.Objects), rep.Rows, rep.Duration.Milliseconds())
 	for _, o := range rep.Objects {
-		fmt.Printf("  %-40s %d 行 · %d 个索引\n", o.Name, o.Rows, o.Indexes)
+		fmt.Printf("  %-40s %d 行 · %d 个索引 · %d 个外键\n", o.Name, o.Rows, o.Indexes, o.ForeignKeys)
+	}
+	if len(rep.Mismatches) > 0 {
+		fmt.Println("警告：以下计数与备份时不一致（数据已写入，但请人工确认）：")
+		for _, m := range rep.Mismatches {
+			fmt.Println("  - " + m)
+		}
 	}
 	return nil
 }

@@ -42,6 +42,12 @@ type BackupObject struct {
 	Kind   string `json:"kind"`
 	Schema string `json:"schema,omitempty"`
 	Name   string `json:"name"`
+	// Indexes / ForeignKeys 是备份时该对象的索引与外键个数，用来在恢复后比对。
+	//
+	// 只记数量：名字与定义已经在那段 SQL 里了，重复存一份只会带来不一致。
+	// 老容器没有这两个字段（0），恢复时跳过比对而不是报「缺 0 个」。
+	Indexes     int `json:"indexes,omitempty"`
+	ForeignKeys int `json:"foreign_keys,omitempty"`
 }
 
 // BackupHeader 是容器的头部。
@@ -351,7 +357,14 @@ func (e *Executor) backupPlan(ctx context.Context, req BackupRequest) ([]string,
 		SourceID:      req.SourceID,
 	}
 	for _, name := range tables {
-		header.Objects = append(header.Objects, BackupObject{Kind: string(model.KindTable), Name: name})
+		obj := BackupObject{Kind: string(model.KindTable), Name: name}
+		// 数量取不到就不记（保持 0），恢复时自然跳过比对——不要为了凑数字让
+		// 备份直接失败。
+		if detail, err := e.DescribeTable(ctx, model.ObjectRef{Kind: model.KindTable, Name: name}); err == nil {
+			obj.Indexes = len(detail.Indexes)
+			obj.ForeignKeys = len(detail.ForeignKeys)
+		}
+		header.Objects = append(header.Objects, obj)
 	}
 	return tables, header, nil
 }
@@ -372,7 +385,8 @@ type RestoreObject struct {
 	Rows int64  `json:"rows"`
 	// Indexes 是恢复后的索引个数（含主键约束背后的索引）。
 	// 只报数量与存在性：索引的有效性（例如 PG 的 indisvalid）还没查。
-	Indexes int `json:"indexes"`
+	Indexes     int `json:"indexes"`
+	ForeignKeys int `json:"foreign_keys"`
 }
 
 // RestoreReport 是恢复后的演练报告（docs/08 §3.3 的最小版本）。
@@ -380,6 +394,9 @@ type RestoreReport struct {
 	Objects  []RestoreObject `json:"objects"`
 	Rows     int64           `json:"rows"`
 	Duration time.Duration   `json:"duration_ms"`
+	// Mismatches 是「恢复后与备份时的计数对不上」的清单。空表示计数一致；
+	// 非空不代表恢复失败（数据已经写进去了），但必须让人看见。
+	Mismatches []string `json:"mismatches,omitempty"`
 }
 
 // ErrRestoreTarget 表示目标库不满足恢复前提。
@@ -486,12 +503,23 @@ func (e *Executor) Restore(ctx context.Context, r io.Reader, req RestoreRequest)
 			}
 			_ = cur.Close()
 		}
-		idx := 0
+		idx, fks := 0, 0
 		if detail, derr := e.DescribeTable(ctx, model.ObjectRef{Kind: model.KindTable, Name: o.Name}); derr == nil {
 			idx = len(detail.Indexes)
+			fks = len(detail.ForeignKeys)
 		}
-		rep.Objects = append(rep.Objects, RestoreObject{Name: o.Name, Rows: n, Indexes: idx})
+		rep.Objects = append(rep.Objects, RestoreObject{Name: o.Name, Rows: n, Indexes: idx, ForeignKeys: fks})
 		rep.Rows += n
+		// 与备份时的计数比对。老容器没有这两个字段（0）时跳过——不能把
+		// 「当时没记」报成「恢复丢了」。
+		if o.Indexes > 0 && idx != o.Indexes {
+			rep.Mismatches = append(rep.Mismatches,
+				fmt.Sprintf("%s：索引 %d 个，备份时 %d 个", o.Name, idx, o.Indexes))
+		}
+		if o.ForeignKeys > 0 && fks != o.ForeignKeys {
+			rep.Mismatches = append(rep.Mismatches,
+				fmt.Sprintf("%s：外键 %d 个，备份时 %d 个", o.Name, fks, o.ForeignKeys))
+		}
 	}
 	rep.Duration = time.Since(started)
 	return rep, nil
