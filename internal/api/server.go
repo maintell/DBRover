@@ -971,7 +971,13 @@ type schemaPlanRequest struct {
 	PrimaryKey []string               `json:"primary_key"`
 	Index      service.IndexSpec      `json:"index"`
 	ForeignKey service.ForeignKeySpec `json:"foreign_key"`
-	RawSQL     string                 `json:"sql"`
+	// Check 与 View 是 add_check / create_view 的入参。
+	//
+	// 漏了它们不会报编译错：decode 用 DisallowUnknownFields，请求会以
+	// 「json: unknown field」被拒——服务层测试全绿、界面点了才炸。
+	Check  service.CheckSpec `json:"check"`
+	View   service.ViewSpec  `json:"view"`
+	RawSQL string            `json:"sql"`
 }
 
 // handleSchemaPlan 生成结构变更预案。执行走同一个 /changes/{pid}/apply。
@@ -990,7 +996,7 @@ func (s *Server) handleSchemaPlan(w http.ResponseWriter, r *http.Request) {
 	plan, err := e.exec.BuildDDLPlan(r.Context(), service.DDLRequest{
 		Table: req.Table, Action: req.Action, Column: req.Column,
 		Columns: req.Columns, PrimaryKey: req.PrimaryKey, Index: req.Index,
-		ForeignKey: req.ForeignKey, RawSQL: req.RawSQL,
+		ForeignKey: req.ForeignKey, Check: req.Check, View: req.View, RawSQL: req.RawSQL,
 	})
 	if errors.Is(err, service.ErrLockWait) {
 		writeError(w, http.StatusConflict, "LOCK_WAIT_BLOCKED", "connection",
