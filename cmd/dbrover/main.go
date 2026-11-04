@@ -888,6 +888,14 @@ func cmdMigrate(args []string) error {
 	defer dstEx.Close()
 	ctx := context.Background()
 
+	// 源表详情只取一次：notes 与索引生成都要用。
+	srcDetail, derr := srcEx.DescribeTable(ctx, model.ObjectRef{Kind: model.KindTable, Name: *table})
+	if derr == nil {
+		for _, n := range service.BuildMigrationNotes(srcDetail) {
+			fmt.Println("注意：" + n)
+		}
+	}
+
 	plan, ddlText, perr := service.PlanMigrationBetween(ctx, srcEx, dstEx, *table, *targetTable, decisions)
 	for _, c := range plan.Columns {
 		fmt.Printf("  %-24s %-18s %-8s %s\n", c.Column, c.Source, c.Status, c.Reason)
@@ -924,8 +932,8 @@ func cmdMigrate(args []string) error {
 	fmt.Println("结构已建立")
 
 	// 索引单独执行：DDLRaw 只接受一条语句，索引没法跟着建表语句一起过去。
-	if detail, derr := srcEx.DescribeTable(ctx, model.ObjectRef{Kind: model.KindTable, Name: *table}); derr == nil {
-		for _, stmt := range service.BuildMigrationIndexDDL(dstConn.Engine(), name, detail) {
+	if derr == nil {
+		for _, stmt := range service.BuildMigrationIndexDDL(dstConn.Engine(), name, srcDetail) {
 			ip, ierr := dstEx.BuildDDLPlan(ctx, service.DDLRequest{
 				Table:  model.ObjectRef{Kind: model.KindTable, Name: name},
 				Action: service.DDLRaw,

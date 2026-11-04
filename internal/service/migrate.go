@@ -263,6 +263,11 @@ func BuildMigrationDDL(dstEngine model.Engine, table string, src *model.TableDet
 		if !sc.Nullable {
 			spec += " NOT NULL"
 		}
+		// 默认值只搬字面量：表达式（nextval / now / 各种函数）跨引擎不等价，
+		// 搬错会悄悄改变写入数据的含义（ADR-0012 §2）。
+		if sc.Default != nil && defaultPattern.MatchString(strings.TrimSpace(*sc.Default)) {
+			spec += " DEFAULT " + strings.TrimSpace(*sc.Default)
+		}
 		cols = append(cols, spec)
 	}
 	if len(missing) > 0 {
@@ -279,6 +284,18 @@ func BuildMigrationDDL(dstEngine model.Engine, table string, src *model.TableDet
 			quoted[i] = d.QuoteIdent(c)
 		}
 		cols = append(cols, "PRIMARY KEY ("+strings.Join(quoted, ", ")+")")
+	}
+	// 唯一约束写成**匿名** UNIQUE：PG 的约束会隐式建同名索引，沿用源约束名
+	// 可能在目标 schema 里撞名（ADR-0012 §1）。
+	for _, ix := range src.Indexes {
+		if ix.Primary || !ix.Constraint || !ix.Unique || len(ix.Columns) == 0 {
+			continue
+		}
+		quoted := make([]string, len(ix.Columns))
+		for i, c := range ix.Columns {
+			quoted[i] = d.QuoteIdent(c)
+		}
+		cols = append(cols, "UNIQUE ("+strings.Join(quoted, ", ")+")")
 	}
 	return "CREATE TABLE " + d.QuoteIdent(table) + " (\n  " + strings.Join(cols, ",\n  ") + "\n)", nil
 }
@@ -336,4 +353,38 @@ func PlanMigrationBetween(ctx context.Context, src, dst *Executor, table, target
 	plan := PlanMigration(srcDetail, dstDetail, src.conn.Engine(), dstEngine)
 	ddlText, derr := BuildMigrationDDL(dstEngine, name, srcDetail, plan, decisions)
 	return plan, ddlText, derr
+}
+
+// BuildMigrationNotes 列出「不会自动迁移、需要人工补」的东西。
+//
+// 这些缺口必须说出来：迁移完看起来一切正常，但唯一性、默认值、注释、外键
+// 全都可能已经悄悄丢了（ADR-0012）。
+func BuildMigrationNotes(src *model.TableDetail) []string {
+	if src == nil {
+		return nil
+	}
+	var notes []string
+	for _, c := range src.Columns {
+		if c.Default != nil && strings.TrimSpace(*c.Default) != "" &&
+			!defaultPattern.MatchString(strings.TrimSpace(*c.Default)) {
+			notes = append(notes, fmt.Sprintf("列 %s 的默认值未迁移（表达式不受支持）：%s",
+				c.Name, strings.TrimSpace(*c.Default)))
+		}
+	}
+	commented := 0
+	for _, c := range src.Columns {
+		if strings.TrimSpace(c.Comment) != "" {
+			commented++
+		}
+	}
+	if commented > 0 {
+		notes = append(notes, fmt.Sprintf("列注释未迁移（%d 列）", commented))
+	}
+	if strings.TrimSpace(src.Comment) != "" {
+		notes = append(notes, "表注释未迁移")
+	}
+	if n := len(src.ForeignKeys); n > 0 {
+		notes = append(notes, fmt.Sprintf("外键未迁移（%d 个），需要人工补", n))
+	}
+	return notes
 }

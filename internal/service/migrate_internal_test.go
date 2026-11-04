@@ -235,3 +235,56 @@ func TestBuildMigrationIndexDDL(t *testing.T) {
 		t.Errorf("索引语句不对：%s", stmts[0])
 	}
 }
+
+// TestMigrationConstraintsAndDefaults 对应 ADR-0012 的四条验证。
+func TestMigrationConstraintsAndDefaults(t *testing.T) {
+	lit := "0"
+	expr := "nextval('s')"
+	src := &model.TableDetail{
+		Columns: []model.Column{
+			{Name: "id", Type: model.ColumnType{Raw: "int", Kind: model.TypeInteger}, IsPrimary: true},
+			{Name: "email", Type: model.ColumnType{Raw: "text", Kind: model.TypeString}},
+			{Name: "n", Type: model.ColumnType{Raw: "int", Kind: model.TypeInteger}, Default: &lit},
+			{Name: "s", Type: model.ColumnType{Raw: "int", Kind: model.TypeInteger}, Default: &expr},
+			{Name: "c", Type: model.ColumnType{Raw: "text", Kind: model.TypeString}, Comment: "有注释"},
+		},
+		Indexes: []model.Index{
+			{Name: "uq_email", Columns: []string{"email"}, Unique: true, Constraint: true},
+		},
+		ForeignKeys: []model.ForeignKey{{Name: "fk_x", Columns: []string{"n"}, RefTable: "other", RefColumns: []string{"id"}}},
+		Comment:     "表注释",
+	}
+	plan := PlanMigration(src, nil, model.EnginePostgres, model.EnginePostgres)
+	ddlText, err := BuildMigrationDDL(model.EnginePostgres, "t", src, plan, nil)
+	if err != nil {
+		t.Fatalf("BuildMigrationDDL: %v", err)
+	}
+
+	// 1) 匿名唯一约束：有 UNIQUE，但不能出现源约束名。
+	if !strings.Contains(ddlText, `UNIQUE ("email")`) {
+		t.Errorf("缺少唯一约束：\n%s", ddlText)
+	}
+	if strings.Contains(ddlText, "uq_email") {
+		t.Errorf("约束名不该沿用源名（PG 会撞索引名）：\n%s", ddlText)
+	}
+	// 2) 字面量默认值要搬。
+	if !strings.Contains(ddlText, "DEFAULT 0") {
+		t.Errorf("字面量默认值应当迁移：\n%s", ddlText)
+	}
+	// 3) 表达式默认值不搬。
+	if strings.Contains(ddlText, "nextval") {
+		t.Errorf("表达式默认值不该搬：\n%s", ddlText)
+	}
+
+	notes := strings.Join(BuildMigrationNotes(src), "\n")
+	if !strings.Contains(notes, "列 s 的默认值未迁移") {
+		t.Errorf("notes 要点名表达式默认值：%s", notes)
+	}
+	// 4) 注释与外键要出声。
+	if !strings.Contains(notes, "列注释未迁移") || !strings.Contains(notes, "表注释未迁移") {
+		t.Errorf("notes 要提到注释：%s", notes)
+	}
+	if !strings.Contains(notes, "外键未迁移") {
+		t.Errorf("notes 要提到外键：%s", notes)
+	}
+}
