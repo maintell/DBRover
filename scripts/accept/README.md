@@ -33,7 +33,8 @@ docker run -d --name dbrover-pg  -e POSTGRES_PASSWORD=testpass     -e POSTGRES_D
 - 端点与端口写死在脚本里（7791–7796），跑之前先确认没被占用。
 - 每个脚本自己 `Start-Process bin\dbrover.exe serve` 并在 `finally` 里停掉，不依赖外部服务。
 - 失败一律 `throw`，不做「打印一行警告继续跑」——验收脚本的意义就是能红。
-- 跑完记得删测试容器：`docker rm -f dbrover-my dbrover-pg`。
+- 跑完记得删测试容器：`docker rm -f dbrover-my dbrover-pg`
+- 这一轮的实际耗时（9d49052，本机）：`bulk-20k-sqlite` 约 10s，其余每条 1–5s；11 次全跑不到 1 分钟。慢的是容器启动，不是脚本。。
 
 ## 全量真机套件（不是这些脚本，是 `go test`）
 
@@ -53,9 +54,9 @@ go test ./... -count=1 -timeout 1800s
 
 `-Engine` 接受 `mysql` / `postgres`；写 `pg` 会被脚本规范化成 `postgres`（服务端只认规范值，早先直接用 `pg` 会得到 `DB_CONNECT_FAILED: 暂不支持的引擎`）。这条是实际跑脚本时踩出来的，别改成只认 `pg`。
 
-## 最近一次全跑（2026-11-05，HEAD 5015d27）
+## 最近一次全跑（2026-11-05，HEAD 9d49052）
 
-这一轮是**回归全跑**：自上一次（8461c75）之后改了迁移注释、长度预检、导出格式、结构设计器（改可空/改默认值/加检查约束）、Agent 三个端点与慢查询报时，全部 7 个脚本重跑一遍，确认没有牵连。
+这一轮是**回归全跑**：自 5015d27 之后动过公共路径的改动不少——用户类型能列/能建、例程能列/能新建/能整段替换，以及一处**切分器**修复（`CREATE DEFINER=… PROCEDURE` 之前认不出来，体内分号被切开）。切分器是每条语句都要过的路，所以 7 个脚本全部重跑：11 次运行（`bulk-engines` / `precision` / `timezone` / `fk-add` / `deps-drop` 各跑 MySQL 与 PostgreSQL 两遍，`compare-cross` 一次，`bulk-20k-sqlite` 一次）全绿，逐条退出码为 0。
 
 | 脚本 | 引擎 | 结果 |
 |---|---|---|
