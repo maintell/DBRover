@@ -476,15 +476,12 @@ async function loadTables() {
       if (browsable) {
         b.textContent = t.name;
         b.onclick = () => browseTable(t.name);
-      } else if (kind === 'trigger') {
-        // 触发器没有数据行，但有定义：点开看 CREATE TRIGGER 原文。
-        b.textContent = t.name + ' · 触发器';
-        b.title = '查看触发器定义';
-        b.onclick = () => showObjectDDL('trigger', t.name);
       } else {
-        b.textContent = t.name + ' · 序列';
-        b.disabled = true;
-        b.title = '这个对象没有可浏览的数据行';
+        // 触发器与序列都没有数据行，但都有定义：点开看原文。
+        const label = kind === 'trigger' ? '触发器' : '序列';
+        b.textContent = t.name + ' · ' + label;
+        b.title = '查看' + label + '定义';
+        b.onclick = () => showObjectDDL(kind, t.name);
       }
       $('tables').appendChild(b);
     }

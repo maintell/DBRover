@@ -31,8 +31,16 @@ type Config struct {
 	// 函数），硬编码只会得到一个覆盖不到任何引擎的用例。
 	Trigger func(ctx context.Context, s driver.Session, table string) (string, error)
 
-	// Sequence 建一个序列并返回名字；nil 时 SequenceListing 跳过。
-	Sequence func(ctx context.Context, s driver.Session) (string, error)
+	// Sequence 建一个序列，返回名字与「定义里必须出现的片段」（如 INCREMENT BY 3）。
+	//
+	// 带上期望片段是因为：只比对「取到的定义 vs 自己回放后的定义」是自证——
+	// 少拼一个子句，两次都少，比较照样相等。期望值必须来自建序列的那一方。
+	// nil 时 SequenceListing 跳过。
+	Sequence func(ctx context.Context, s driver.Session) (name string, expect []string, err error)
+
+	// DropSequence 删除一个序列，供 SequenceListing 做「删掉再用取到的定义
+	// 重建」的回放验证。给成钩子是因为各引擎的 DROP 语法不同，套件不猜。
+	DropSequence func(ctx context.Context, s driver.Session, name string) error
 }
 
 func (c Config) binaryType() string {

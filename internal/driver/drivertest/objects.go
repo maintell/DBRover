@@ -100,8 +100,8 @@ func testSequenceListing(t *testing.T, cfg Config) {
 	if err != nil {
 		t.Fatalf("Acquire: %v", err)
 	}
-	name, err := cfg.Sequence(ctx, s)
-	_ = s.Close()
+	defer func() { _ = s.Close() }()
+	name, expect, err := cfg.Sequence(ctx, s)
 	if err != nil {
 		t.Fatalf("建序列: %v", err)
 	}
@@ -110,13 +110,63 @@ func testSequenceListing(t *testing.T, cfg Config) {
 	if err != nil {
 		t.Fatalf("Objects(KindSequence): %v", err)
 	}
+	var ref model.ObjectRef
 	for _, o := range objs {
 		if o.Name == name {
-			if o.Kind != model.KindSequence {
-				t.Errorf("Kind = %q，期望 sequence", o.Kind)
-			}
-			return
+			ref = o
 		}
 	}
-	t.Fatalf("序列 %s 没出现在列表里：%+v", name, objs)
+	if ref.Name == "" {
+		t.Fatalf("序列 %s 没出现在列表里：%+v", name, objs)
+	}
+	if ref.Kind != model.KindSequence {
+		t.Errorf("Kind = %q，期望 sequence", ref.Kind)
+	}
+
+	// 取到的定义必须能拿来重建：删掉原序列，用 DDL 回放，再列一次必须还在。
+	// 只检查字符串像不像，是自欺——拼错一个子句，引擎才会告诉你。
+	ddl, err := c.Meta().DDL(ctx, ref)
+	if err != nil {
+		t.Fatalf("DDL(%s): %v", name, err)
+	}
+	if up := strings.ToUpper(ddl); !strings.Contains(up, "CREATE SEQUENCE") || !strings.Contains(ddl, name) {
+		t.Fatalf("序列定义不像 CREATE SEQUENCE %s：%q", name, ddl)
+	}
+	// 期望片段来自建序列的那一方：少拼一个子句这里就会红。
+	for _, want := range expect {
+		if !strings.Contains(strings.ToUpper(ddl), strings.ToUpper(want)) {
+			t.Fatalf("定义里缺 %q：%q", want, ddl)
+		}
+	}
+	if cfg.DropSequence == nil {
+		return
+	}
+	if err := cfg.DropSequence(ctx, s, name); err != nil {
+		t.Fatalf("删序列: %v", err)
+	}
+	if _, err := s.Execute(ctx, strings.TrimSuffix(strings.TrimSpace(ddl), ";"), nil); err != nil {
+		t.Fatalf("回放定义失败（拼出来的 DDL 不可用）：%v\n%s", err, ddl)
+	}
+	again, err := c.Meta().Objects(ctx, "", "", model.KindSequence)
+	if err != nil {
+		t.Fatalf("重建后 Objects: %v", err)
+	}
+	var rebuilt model.ObjectRef
+	for _, o := range again {
+		if o.Name == name {
+			rebuilt = o
+		}
+	}
+	if rebuilt.Name == "" {
+		t.Fatalf("回放后序列 %s 不在列表里", name)
+	}
+	// 「能建出来」还不够：参数也得回到原样。否则重建出来的是另一个序列，
+	// 只是恰好同名列。再取一次定义逐字比对。
+	ddl2, err := c.Meta().DDL(ctx, rebuilt)
+	if err != nil {
+		t.Fatalf("回放后 DDL: %v", err)
+	}
+	if ddl2 != ddl {
+		t.Fatalf("回放后的定义与原定义不一致（参数丢了）：\n原：%s\n后：%s", ddl, ddl2)
+	}
 }

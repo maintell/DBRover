@@ -896,14 +896,16 @@ func (s *Server) handleTableSchema(w http.ResponseWriter, r *http.Request) {
 		kind = model.KindTable
 	case "trigger":
 		kind = model.KindTrigger
+	case "sequence":
+		kind = model.KindSequence
 	default:
 		writeError(w, http.StatusBadRequest, "REQUEST_INVALID", "internal",
-			"kind 只支持 table / view / trigger", "", false)
+			"kind 只支持 table / view / trigger / sequence", "", false)
 		return
 	}
 	ref := model.ObjectRef{Kind: kind, Name: r.PathValue("name"), Schema: r.URL.Query().Get("schema")}
 
-	if kind == model.KindTrigger {
+	if kind == model.KindTrigger || kind == model.KindSequence {
 		ddlText, derr := e.exec.TableDDL(r.Context(), ref)
 		if errors.Is(derr, driver.ErrObjectNotFound) {
 			writeError(w, http.StatusNotFound, "OBJECT_NOT_FOUND", "resource",

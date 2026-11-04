@@ -138,10 +138,18 @@ func factory(t *testing.T, tgt testTarget) drivertest.Config {
 			}
 			return name, nil
 		},
-		Sequence: func(ctx context.Context, s driver.Session) (string, error) {
+		Sequence: func(ctx context.Context, s driver.Session) (string, []string, error) {
+			// 带非默认选项建：只有这样，「取到的定义」是否保真才有意义。
 			const name = "seq_probe"
-			_, err := s.Execute(ctx, "CREATE SEQUENCE "+name, nil)
-			return name, err
+			_, err := s.Execute(ctx,
+				"CREATE SEQUENCE "+name+" AS bigint INCREMENT BY 3 MINVALUE 5 MAXVALUE 9000 START WITH 7 CACHE 4", nil)
+			return name, []string{
+				"AS bigint", "INCREMENT BY 3", "MINVALUE 5", "MAXVALUE 9000", "START WITH 7", "CACHE 4",
+			}, err
+		},
+		DropSequence: func(ctx context.Context, s driver.Session, name string) error {
+			_, err := s.Execute(ctx, "DROP SEQUENCE "+name, nil)
+			return err
 		},
 	}
 }

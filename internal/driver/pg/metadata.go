@@ -475,6 +475,39 @@ func (c *Connector) DDL(ctx context.Context, ref model.ObjectRef) (string, error
 		schema = c.config().Schema
 	}
 
+	// 序列：没有「取定义」的内置函数，从 pg_sequences 拼回 CREATE SEQUENCE。
+	// 拼出来的必须与原序列等价（起始值、步长、上下界、缓存、循环），否则
+	// 「拿定义去别的库重建」会悄悄变成另一个序列。
+	if ref.Kind == model.KindSequence {
+		var dataType string
+		var startValue, minValue, maxValue, incrementBy, cacheSize int64
+		var cycle bool
+		err := h.QueryRowContext(ctx,
+			`SELECT data_type, start_value, min_value, max_value, increment_by, cache_size, cycle
+			   FROM pg_sequences WHERE schemaname = $1 AND sequencename = $2`,
+			schema, ref.Name).
+			Scan(&dataType, &startValue, &minValue, &maxValue, &incrementBy, &cacheSize, &cycle)
+		if err == sql.ErrNoRows {
+			return "", fmt.Errorf("pg: 序列不存在: %s", ref.Name)
+		}
+		if err != nil {
+			return "", err
+		}
+		var b strings.Builder
+		b.WriteString("CREATE SEQUENCE ")
+		b.WriteString(quoteIdent(schema) + "." + quoteIdent(ref.Name))
+		if dataType != "" {
+			b.WriteString(" AS " + dataType)
+		}
+		fmt.Fprintf(&b, " INCREMENT BY %d MINVALUE %d MAXVALUE %d START WITH %d CACHE %d",
+			incrementBy, minValue, maxValue, startValue, cacheSize)
+		if cycle {
+			b.WriteString(" CYCLE")
+		}
+		b.WriteString(";")
+		return b.String(), nil
+	}
+
 	// 触发器：pg_get_triggerdef 给出 CREATE TRIGGER 的原文（不含尾分号）。
 	if ref.Kind == model.KindTrigger {
 		var def string
