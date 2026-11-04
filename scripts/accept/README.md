@@ -35,6 +35,20 @@ docker run -d --name dbrover-pg  -e POSTGRES_PASSWORD=testpass     -e POSTGRES_D
 - 失败一律 `throw`，不做「打印一行警告继续跑」——验收脚本的意义就是能红。
 - 跑完记得删测试容器：`docker rm -f dbrover-my dbrover-pg`。
 
+## 全量真机套件（不是这些脚本，是 `go test`）
+
+`scripts/check.ps1` 只跑不依赖真机的那部分。要连真机跑**所有**用例（连接器一致性套件、迁移跨引擎、结构变更真机用例…）：
+
+```powershell
+$env:DBRover_TEST_MYSQL='root:testpass@192.168.2.88:13306'
+$env:DBRover_TEST_PG='postgres:testpass@192.168.2.88:15432'
+go test ./... -count=1 -timeout 1800s
+```
+
+**空实例上应当直接可跑**：真机用例会自己建 `dbrover_test`（`openReal` 与 `rowsTargets` 都做了）。这条是 2026-11-05 修的——此前必须先手工 `CREATE DATABASE`，否则整包跑在第一条真机用例上就红，而单独跑某一条又可能是绿的，极难排查。
+
+排错顺序：先看是不是「库不存在」（我们的事），再看是不是容器没起来（环境的事）。
+
 ## 引擎名
 
 `-Engine` 接受 `mysql` / `postgres`；写 `pg` 会被脚本规范化成 `postgres`（服务端只认规范值，早先直接用 `pg` 会得到 `DB_CONNECT_FAILED: 暂不支持的引擎`）。这条是实际跑脚本时踩出来的，别改成只认 `pg`。

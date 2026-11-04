@@ -284,6 +284,11 @@ func openReal(t *testing.T, engine, dsn string) driver.Connector {
 	for _, ch := range addr[colon+1:] {
 		port = port*10 + int(ch-'0')
 	}
+	// 先尽力建一次测试库：这些用例直接连 dbrover_test，而空实例上它还不存在。
+	// 不建的话，整包跑会在第一条真机用例上红，报「database does not exist」——
+	// 而单独跑某一条又可能是绿的（库是上一次手工建的），最难查的那种。
+	ensureRealCatalog(t, engine, cred, addr[:colon], port)
+
 	var c driver.Connector
 	switch engine {
 	case "mysql":
@@ -639,5 +644,44 @@ func TestMigrateDecimalFidelity(t *testing.T) {
 		if strings.TrimSpace(got[i]) != want[i] {
 			t.Errorf("第 %d 行 = %q，期望 %q", i+1, got[i], want[i])
 		}
+	}
+}
+
+// ensureRealCatalog 用「不指定库」的连接尽力建一次 dbrover_test。
+//
+// 为什么放在 openReal 里而不是各用例里：六个真机用例都要它，漏一个就是一个
+// 「本机能过、空实例上红」的用例。建不成也继续往下走——正式打开会给出真正的
+// 错误，别让这里的权限问题伪装成连不上。
+func ensureRealCatalog(t *testing.T, engine, cred, host string, port int) {
+	t.Helper()
+	parts := strings.SplitN(cred, ":", 2)
+	if len(parts) != 2 || host == "" || port <= 0 {
+		return
+	}
+	var c driver.Connector
+	switch engine {
+	case "mysql":
+		c = mysql.New()
+	case "pg":
+		c = pg.New()
+	default:
+		return
+	}
+	ctx := context.Background()
+	if err := c.Open(ctx, driver.ConnectConfig{Host: host, Port: port,
+		User: parts[0], Password: parts[1], AccessMode: model.AccessReadWrite, Environment: model.EnvTest}); err != nil {
+		t.Logf("建测试库：先连不指定库的连接失败（%v），继续让正式打开报错", err)
+		return
+	}
+	defer func() { _ = c.Close() }()
+	s, err := c.Acquire(ctx)
+	if err != nil {
+		t.Logf("建测试库：Acquire 失败（%v）", err)
+		return
+	}
+	defer func() { _ = s.Close() }()
+	// 已存在时两种引擎都会报错，直接忽略——我们只关心「建好之后能连」。
+	if _, cerr := s.Execute(ctx, "CREATE DATABASE dbrover_test", nil); cerr != nil {
+		t.Logf("建测试库：CREATE DATABASE 失败（%v）", cerr)
 	}
 }
