@@ -327,7 +327,7 @@ for each table:
 | 2 | 备份中途 kill 进程，重启可续跑且不重复 | 集成 ✅ **表级续跑**（[ADR-0009](adr/0009-backup-resume-granularity.md)）：每写完一张表追加检查点到 `<file>.progress`，续跑时截断到最后一条偏移再继续，容器格式不变。`TestBackupResumeAfterFailure`（注入失败→续跑→断言三段且每表只出现一次）、`TestBackupResumeNeedsCheckpoint`（无检查点必须报 `ErrBackupNoCheckpoint` 并说明整库重跑）。**行级续跑明确不做**：需要 v2 分块表，收益不抵复杂度 |
 | 3 | 恢复到已有对象的库被拒绝 | 集成 ✅ 默认拒绝并点名冲突对象（`TestRestoreRefusesNonEmptyTarget`）；`-allow-existing` 可显式覆盖。**与目标的差距**：要求里的「输入目标库名」没做，v1 只用一个布尔开关——挡误操作够用，挡不住「看错目标库」 |
 | 4 | 恢复后演练报告给出对象数/行数/索引状态 | 集成 ⚠️ **大部分**：对象数、行数、索引数、外键数都有；容器头在备份时记下每张表的索引/外键个数，恢复后逐表比对，不一致进 `Mismatches` 并打印警告（`TestRestoreReportsCountMismatch` 造假一份「99 个索引」的容器头验证它真的会报；`TestBackupKeepsIndexes` 验证正常恢复时 `Mismatches` 为空）。**未做**：索引有效性（如 PG 的 `indisvalid`）、抽样内容哈希校验 |
-| 5 | 加密备份用错误口令无法打开且报错明确 | 单测 |
+| 5 | 加密备份用错误口令无法打开且报错明确 | 单测 ✅ `TestRestoreWrongPassphrase`（错误类型 `ErrBackupBadPassphrase`，文案同时说明「口令不对」与「文件可能被改动」——AEAD 分不清这两者）、`TestRestoreNeedsPassphrase`、`TestBackupEncryptedRoundTrip`（加密+压缩的文件里搜不到 `CREATE TABLE` 明文） |
 | 6 | 迁移中断后续跑，目标表行数与源一致且无重复 | 集成（2 万行，中途 kill） |
 | 7 | 迁移校验能发现篡改的 1 行 | 集成（人为改一行） |
 | 8 | MySQL `TINYINT(1)` → PG 被标记为冲突需人工确认 | 单测 |
@@ -362,7 +362,7 @@ for each table:
 | 段内容 | 就是 `Export` 的 `sql` 格式（建表 + INSERT），同引擎可回放 | 跨引擎迁移要类型映射，不在 v1 范围 |
 | 查看 | `dbrover backup inspect <文件>`：只读头部、不连库、秒级列出对象 | 对象条目不含行数/大小（头在最前面，行数要等表导完）；不提供「按需解压单段预览」 |
 | 压缩 | **已做**：`backup create -compress`，每段 gzip，标志记在头部的 flags bit1；续跑沿用文件里的 flags（不会因为 `-resume` 忘了带 `-compress` 而把同一个文件写成两种格式）。读到未知 flags 位直接拒绝 | 与目标一致 |
-| 加密 | **未做**：flags bit0 保留，读到加密容器明确拒绝（「v1 不支持解密」） | 目标形态要求可加密；密钥要先接凭据库 |
+| 加密 | **已做**：`-passphrase-stdin` 读口令（不从命令行参数读、不落凭据库），PBKDF2-SHA256 210k 迭代 + AES-256-GCM，每段独立 nonce；头保持明文以便列出对象与派生密钥（[ADR-0010](adr/0010-backup-encryption.md)） | 与目标一致；**头是明文的**（能看到表名与时间）；口令丢失无后门 |
 | 续跑 | 表级：每张表完成即写检查点，`-resume` 截断后续跑；完成后删检查点 | 行级续跑不做（需 v2 分块表）；单表失败要重导整表，这一点在 ADR-0009 里写明 |
 | 恢复 | 同引擎、目标非空默认拒绝、禁止恢复到源库（头部记 `source_id`）、全程单事务；报告给对象数与行数 | **未做**：索引/外键状态、跨引擎；`-allow-existing` 只是布尔开关，没有「输入目标库名」那层确认；`source_id` 由调用方给，只能防手滑，不是认证 |
 | 迁移 | **没有** | 验收第 6–12 条未做 |

@@ -72,6 +72,13 @@ type BackupHeader struct {
 	// Flags 是二进制头里的 flags 字段（不进 JSON）。读容器时由 InspectBackup
 	// 填好；写入时由 Backup 按请求设置。
 	Flags uint16 `json:"-"`
+
+	// 加密参数（只有加密容器才有值）。盐与迭代次数写明文头，因为派生前必须
+	// 先拿到它们；这不是秘密，真正的秘密只有口令。
+	KDF        string `json:"kdf,omitempty"`
+	Cipher     string `json:"cipher,omitempty"`
+	Salt       string `json:"salt,omitempty"`
+	Iterations int    `json:"iterations,omitempty"`
 }
 
 // BackupRequest 是一次备份请求。
@@ -84,6 +91,9 @@ type BackupRequest struct {
 	SourceID string
 	// Compress 对每段做 gzip。文本型 SQL 通常能压到原来的 1/5～1/10。
 	Compress bool
+	// Passphrase 非空时加密每段（AES-256-GCM，密钥由 PBKDF2 派生）。
+	// 口令由调用方从 stdin 读，不作为命令行参数（进程列表可见）。
+	Passphrase string
 
 	// afterSection 是测试用的失败注入点：每写完一张表调用一次，返回错误即中断。
 	// 用它模拟「中途被 kill」，比真的杀进程稳定，且能精确控制断在第几张表。
@@ -96,6 +106,10 @@ type BackupRequest struct {
 // inspect 打开看清单，也可以逐段取出直接回放。
 func (e *Executor) Backup(ctx context.Context, req BackupRequest, w io.Writer) (*BackupHeader, error) {
 	tables, header, err := e.backupPlan(ctx, req)
+	if err != nil {
+		return nil, err
+	}
+	key, err := prepareBackupKey(req.Passphrase, header)
 	if err != nil {
 		return nil, err
 	}
@@ -114,6 +128,9 @@ func (e *Executor) Backup(ctx context.Context, req BackupRequest, w io.Writer) (
 	if req.Compress {
 		flags |= backupFlagCompressed
 	}
+	if key != nil {
+		flags |= backupFlagEncrypted
+	}
 	if err := binary.Write(w, binary.LittleEndian, flags); err != nil {
 		return nil, err
 	}
@@ -129,11 +146,29 @@ func (e *Executor) Backup(ctx context.Context, req BackupRequest, w io.Writer) (
 		if _, err := e.Export(ctx, ExportRequest{Table: name, Format: ExportSQL}, &sec); err != nil {
 			return nil, fmt.Errorf("导出 %s: %w", name, err)
 		}
-		if err := writeBackupSection(w, sec.Bytes(), req.Compress); err != nil {
+		if err := writeBackupSection(w, sec.Bytes(), req.Compress, key); err != nil {
 			return nil, err
 		}
 	}
 	return header, nil
+}
+
+// prepareBackupKey 在需要加密时生成盐、填好头部参数并派生密钥。
+//
+// 头里只放盐与迭代次数（派生要用），密钥本身不落盘。
+func prepareBackupKey(passphrase string, header *BackupHeader) ([]byte, error) {
+	if passphrase == "" {
+		return nil, nil
+	}
+	salt, saltB64, err := newBackupSalt()
+	if err != nil {
+		return nil, err
+	}
+	header.KDF = backupKDF
+	header.Cipher = backupCipher
+	header.Salt = saltB64
+	header.Iterations = backupKDFIterations
+	return deriveBackupKey(passphrase, salt, backupKDFIterations)
 }
 
 // ErrBackupFormat 表示容器损坏或不是 DBR 文件。
@@ -164,10 +199,9 @@ func InspectBackup(r io.Reader) (*BackupHeader, error) {
 	if ver != backupFormatVersion {
 		return nil, fmt.Errorf("%w: 格式版本 %d，本工具只认 %d", ErrBackupFormat, ver, backupFormatVersion)
 	}
-	if flags&backupFlagEncrypted != 0 {
-		return nil, fmt.Errorf("%w: 这是加密容器，v1 不支持解密", ErrBackupFormat)
-	}
-	if flags & ^backupFlagCompressed != 0 {
+	// 加密容器的头仍然是明文（要能列出对象、要能拿到盐），所以这里不拦；
+	// 解密在 Restore 里按口令做。未知位必须拒绝——静默忽略会让读端解出错误数据。
+	if flags & ^(backupFlagCompressed|backupFlagEncrypted) != 0 {
 		return nil, fmt.Errorf("%w: 未知的容器 flags（0x%02x）", ErrBackupFormat, flags)
 	}
 	if hlen == 0 || hlen > 16<<20 {
@@ -188,11 +222,14 @@ func InspectBackup(r io.Reader) (*BackupHeader, error) {
 // BackupSummary 把头部渲染成人看的清单（CLI 与界面共用）。
 func BackupSummary(h *BackupHeader) string {
 	var b strings.Builder
+	// 压缩/加密是容器属性（flags），不在 header JSON 里；不说一声，用户会以为
+	// 文件坏了、或者怀疑某个备份没加密。
 	packed := ""
 	if h.Flags&backupFlagCompressed != 0 {
-		// 压缩是容器属性，不在 header JSON 里；不说一声，用户会以为文件坏了
-		// 或者怀疑体积对不上。
-		packed = " · 已压缩"
+		packed += " · 已压缩"
+	}
+	if h.Flags&backupFlagEncrypted != 0 {
+		packed += " · 已加密"
 	}
 	fmt.Fprintf(&b, "DBR 备份 v%d · %s · %s%s · %d 个对象\n",
 		h.FormatVersion, h.Engine, h.CreatedAt, packed, len(h.Objects))
@@ -318,6 +355,11 @@ func (e *Executor) BackupToFile(ctx context.Context, req BackupRequest, path str
 		}
 		_ = os.Remove(backupProgressPath(path))
 
+		freshKey, err := prepareBackupKey(req.Passphrase, header)
+		if err != nil {
+			return nil, err
+		}
+		_ = freshKey // 密钥在后面按头部的盐统一派生
 		hj, err := json.Marshal(header)
 		if err != nil {
 			return nil, err
@@ -331,6 +373,9 @@ func (e *Executor) BackupToFile(ctx context.Context, req BackupRequest, path str
 		var flags uint16
 		if req.Compress {
 			flags |= backupFlagCompressed
+		}
+		if header.KDF != "" {
+			flags |= backupFlagEncrypted
 		}
 		header.Flags = flags
 		// 注意：flags 在 header 里是 json:"-"，改它不会影响已序列化的 hj；
@@ -346,6 +391,13 @@ func (e *Executor) BackupToFile(ctx context.Context, req BackupRequest, path str
 		}
 	}
 
+	// 写入端的密钥：加密由头部参数决定。续跑时头部来自文件，因此这里必须
+	// 按文件里的盐重新派生，而不是按本次请求——否则新旧段用两把不同的钥匙。
+	writeKey, err := writeKeyForHeader(header, req.Passphrase)
+	if err != nil {
+		return nil, err
+	}
+
 	for _, name := range tables {
 		if done[name] {
 			continue
@@ -354,7 +406,7 @@ func (e *Executor) BackupToFile(ctx context.Context, req BackupRequest, path str
 		if _, err := e.Export(ctx, ExportRequest{Table: name, Format: ExportSQL}, &sec); err != nil {
 			return nil, fmt.Errorf("导出 %s: %w", name, err)
 		}
-		if err := writeBackupSection(f, sec.Bytes(), header.Flags&backupFlagCompressed != 0); err != nil {
+		if err := writeBackupSection(f, sec.Bytes(), header.Flags&backupFlagCompressed != 0, writeKey); err != nil {
 			return nil, err
 		}
 		end, err := f.Seek(0, io.SeekCurrent)
@@ -416,6 +468,9 @@ type RestoreRequest struct {
 	// SourceID 是目标库的身份串。与容器头一致时拒绝——「禁止恢复到源库」
 	// 是 docs/08 §3.1 的第 2 条硬性约束。
 	SourceID string
+	// Passphrase 是加密容器的口令；容器加密却没给会返回
+	// ErrBackupNeedPassphrase，口令不对返回 ErrBackupBadPassphrase。
+	Passphrase string
 }
 
 // RestoreObject 是报告里的一个对象。
@@ -453,7 +508,7 @@ var ErrRestoreTarget = errors.New("目标库不满足恢复前提")
 // 只能靠调用方自律（见 docs/08 §7 的 v1 口径）。
 func (e *Executor) Restore(ctx context.Context, r io.Reader, req RestoreRequest) (*RestoreReport, error) {
 	started := time.Now()
-	header, sections, err := readBackupContainer(r)
+	header, sections, err := readBackupContainer(r, req.Passphrase)
 	if err != nil {
 		return nil, err
 	}
@@ -568,15 +623,19 @@ func (e *Executor) Restore(ctx context.Context, r io.Reader, req RestoreRequest)
 //
 // v1 一次性读进内存：容器里每段本来就是该表的完整脚本，恢复时也按段执行，
 // 拆成流式读取的收益要到「超大库」才显现，先不为它增加状态机。
-func readBackupContainer(r io.Reader) (*BackupHeader, []string, error) {
+func readBackupContainer(r io.Reader, passphrase string) (*BackupHeader, []string, error) {
 	h, err := InspectBackup(r)
 	if err != nil {
 		return nil, nil, err
 	}
 	compressed := h.Flags&backupFlagCompressed != 0
+	key, err := restoreKeyFromHeader(h, passphrase)
+	if err != nil {
+		return nil, nil, err
+	}
 	var sections []string
 	for {
-		sec, err := readBackupSection(r, compressed)
+		sec, err := readBackupSection(r, compressed, key)
 		if err != nil {
 			if errors.Is(err, io.EOF) {
 				break
@@ -620,7 +679,7 @@ func countValue(v any) int64 {
 //
 // 压缩开关记在头的 flags 里，读端据此解压；段本身不带标志，避免同一份文件里
 // 两种形态混用。
-func writeBackupSection(w io.Writer, data []byte, compress bool) error {
+func writeBackupSection(w io.Writer, data []byte, compress bool, key []byte) error {
 	if compress {
 		var buf bytes.Buffer
 		zw := gzip.NewWriter(&buf)
@@ -632,6 +691,13 @@ func writeBackupSection(w io.Writer, data []byte, compress bool) error {
 		}
 		data = buf.Bytes()
 	}
+	if key != nil {
+		enc, err := encryptSection(key, data)
+		if err != nil {
+			return err
+		}
+		data = enc
+	}
 	if err := binary.Write(w, binary.LittleEndian, uint32(len(data))); err != nil {
 		return err
 	}
@@ -640,7 +706,7 @@ func writeBackupSection(w io.Writer, data []byte, compress bool) error {
 }
 
 // readBackupSection 读一段，按需解压。
-func readBackupSection(r io.Reader, compressed bool) (string, error) {
+func readBackupSection(r io.Reader, compressed bool, key []byte) (string, error) {
 	var n uint32
 	if err := binary.Read(r, binary.LittleEndian, &n); err != nil {
 		return "", err
@@ -651,6 +717,13 @@ func readBackupSection(r io.Reader, compressed bool) (string, error) {
 	buf := make([]byte, n)
 	if _, err := io.ReadFull(r, buf); err != nil {
 		return "", fmt.Errorf("%w: 段内容不完整", ErrBackupFormat)
+	}
+	if key != nil {
+		plain, err := decryptSection(key, buf)
+		if err != nil {
+			return "", err
+		}
+		buf = plain
 	}
 	if !compressed {
 		return string(buf), nil

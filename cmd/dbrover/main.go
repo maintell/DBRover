@@ -89,7 +89,7 @@ func usage() {
   dbrover serve  [-addr 127.0.0.1:7788] [-token <token>] [-allow-remote] [-open] [-audit <path>] [-audit-anchor <path>]
   dbrover tunnel -via user@hop1:22[,user@hop2:22] -to host:port (-password-stdin | -key <path>)
   dbrover secret (set|clear|status) [-service dbrover/agent] [-account api-key]  # 口令从 stdin 读
-  dbrover backup (create|inspect) [-db <file> ...] [-out <文件.dbr>] [-resume]  # 容器 v1
+  dbrover backup (create|inspect) [-db <file> ...] [-out <文件.dbr>] [-resume] [-compress] [-passphrase-stdin]
   dbrover restore -file <文件.dbr> -db <file> -env ... -yes [-allow-existing]  # 同引擎恢复
 
 退出码:
@@ -683,6 +683,7 @@ func cmdBackup(args []string) error {
 		out := fs.String("out", "", "输出文件（.dbr）")
 		resume := fs.Bool("resume", false, "接着上次未完成的备份继续（需要 <文件>.progress）")
 		compress := fs.Bool("compress", false, "对每段做 gzip（文本型 SQL 通常能压到 1/5～1/10）")
+		passStdin := fs.Bool("passphrase-stdin", false, "从标准输入读加密口令（不从命令行参数读）")
 		if err := fs.Parse(args[1:]); err != nil {
 			return err
 		}
@@ -697,10 +698,20 @@ func cmdBackup(args []string) error {
 
 		ex := service.NewExecutor(conn, env, mode, nil)
 		defer ex.Close()
+		pass := ""
+		if *passStdin {
+			if pass, err = readPassphraseStdin(); err != nil {
+				return err
+			}
+			if pass == "" {
+				return errors.New("给了 -passphrase-stdin 但没读到口令")
+			}
+		}
 		h, err := ex.BackupToFile(context.Background(), service.BackupRequest{
-			Resume:   *resume,
-			SourceID: cf.sourceID(),
-			Compress: *compress,
+			Resume:     *resume,
+			SourceID:   cf.sourceID(),
+			Compress:   *compress,
+			Passphrase: pass,
 		}, *out)
 		if err != nil {
 			// 没有检查点时错误本身已经说清「需整库重跑」，再加一句「可续跑」
@@ -729,6 +740,7 @@ func cmdRestore(args []string) error {
 	file := fs.String("file", "", "备份文件（.dbr）")
 	allowExisting := fs.Bool("allow-existing", false, "目标库已有同名对象时覆盖")
 	yes := fs.Bool("yes", false, "确认要写目标库")
+	passStdin := fs.Bool("passphrase-stdin", false, "从标准输入读解密口令")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -752,9 +764,16 @@ func cmdRestore(args []string) error {
 	ex := service.NewExecutor(conn, env, mode, nil)
 	defer ex.Close()
 
+	pass := ""
+	if *passStdin {
+		if pass, err = readPassphraseStdin(); err != nil {
+			return err
+		}
+	}
 	rep, err := ex.Restore(context.Background(), f, service.RestoreRequest{
 		AllowExisting: *allowExisting,
 		SourceID:      cf.sourceID(),
+		Passphrase:    pass,
 	})
 	if err != nil {
 		return err
@@ -793,4 +812,16 @@ func (c *connFlags) sourceID() string {
 		}
 	}
 	return c.engine + "://" + c.host + ":" + strconv.Itoa(port) + "/" + c.db
+}
+
+// readPassphraseStdin 从标准输入读一行口令。
+//
+// 不从命令行参数读：进程列表与 shell 历史都能看到。空行视为没给。
+func readPassphraseStdin() (string, error) {
+	r := bufio.NewReader(os.Stdin)
+	line, err := r.ReadString('\n')
+	if err != nil && line == "" {
+		return "", fmt.Errorf("读取口令失败: %w", err)
+	}
+	return strings.TrimRight(line, "\r\n"), nil
 }
