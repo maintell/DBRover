@@ -830,6 +830,37 @@
         }
       }
     },
+    "/api/v1/migrate/run": {
+      "post": {
+        "summary": "搬运一张表的数据并校验（目标表必须已存在）",
+        "description": "按主键键集分批搬运（每批多行 INSERT，走目标端执行门），搬完比对行数与整表摘要；不一致返回 409 MIGRATE_VERIFY_FAILED 并提示不要直接使用这份数据。无主键表退化为一次性搬运，报告里标注「不可续跑 / 未做内容校验」。HTTP 侧暂不接检查点续跑（服务层与 CLI 才有本地路径语义）。",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["source", "target", "table"],
+                "properties": {
+                  "source": { "type": "string" },
+                  "target": { "type": "string" },
+                  "table": { "type": "string" },
+                  "target_table": { "type": "string" },
+                  "batch_size": { "type": "integer", "description": "每批行数，默认 1000" },
+                  "max_rows": { "type": "integer", "description": ">0 时只搬这么多行（演练）" }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": { "description": "搬运报告：rows / batches / keyset_ok / verified / 摘要" },
+          "400": { "description": "参数缺失或搬运失败（MIGRATE_RUN_FAILED）" },
+          "404": { "description": "连接不存在" },
+          "409": { "description": "校验不一致（MIGRATE_VERIFY_FAILED）" }
+        }
+      }
+    },
     "/api/v1/connections/{id}/fk/precheck": {
       "post": {
         "summary": "加外键前的孤儿数据预检（只读）",

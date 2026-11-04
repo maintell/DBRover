@@ -142,3 +142,62 @@ func deepGet(v any, path ...string) (any, bool) {
 	}
 	return cur, true
 }
+
+// TestMigrateRunEndpoint 覆盖搬运端点：目标表已建好时，数据搬过去并校验通过。
+func TestMigrateRunEndpoint(t *testing.T) {
+	_, ts, dir := newServer(t)
+	src := createConn(t, ts, dir, "local", "read-write")
+	dst := createConnAt(t, ts, filepath.Join(dir, "migrate-run-dst.db"), "dst2", "read-write")
+
+	for _, q := range []string{
+		"CREATE TABLE r (id INTEGER PRIMARY KEY, v TEXT)",
+		"INSERT INTO r (id, v) VALUES (1,'a'), (2,'b'), (3,'c')",
+	} {
+		if code := execApproved(t, ts, src, q); code != http.StatusOK {
+			t.Fatalf("准备源表失败: %d", code)
+		}
+	}
+	if code := execApproved(t, ts, dst, "CREATE TABLE r (id INTEGER PRIMARY KEY, v TEXT)"); code != http.StatusOK {
+		t.Fatalf("准备目标表失败: %d", code)
+	}
+
+	code, rep := do(t, ts, http.MethodPost, "/api/v1/migrate/run", map[string]any{
+		"source": src, "target": dst, "table": "r", "batch_size": 2,
+	}, true)
+	if code != http.StatusOK {
+		t.Fatalf("搬运失败: %d %v", code, rep)
+	}
+	if rows, _ := rep["rows"].(float64); rows != 3 {
+		t.Fatalf("搬了 %v 行，期望 3", rep["rows"])
+	}
+	if rep["verified"] != true {
+		t.Fatalf("应当做过校验：%v", rep)
+	}
+	if rep["keyset_ok"] != true {
+		t.Fatalf("有主键的表应当 keyset_ok=true：%v", rep)
+	}
+
+	// 目标库读出来必须是三行（不是只信报告）。
+	code, out := do(t, ts, http.MethodPost, "/api/v1/connections/"+dst+"/exec",
+		map[string]any{"sql": "SELECT COUNT(*) AS n FROM r"}, true)
+	if code != http.StatusOK {
+		t.Fatalf("查询目标失败: %d", code)
+	}
+	results, _ := out["results"].([]any)
+	if len(results) != 1 {
+		t.Fatalf("结果异常: %v", out)
+	}
+	first, _ := results[0].(map[string]any)
+	rowsOut, _ := first["rows"].([]any)
+	if len(rowsOut) != 1 {
+		t.Fatalf("目标表读不到行：%v", first)
+	}
+	row, _ := rowsOut[0].([]any)
+	if len(row) != 1 {
+		t.Fatalf("聚合结果异常：%v", rowsOut[0])
+	}
+	// 只信报告不行，必须从目标库里读出来。
+	if n, ok := row[0].(float64); !ok || n != 3 {
+		t.Fatalf("目标表行数 = %v，期望 3", row[0])
+	}
+}

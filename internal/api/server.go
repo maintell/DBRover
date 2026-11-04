@@ -182,6 +182,7 @@ func (s *Server) routes() []route {
 		{http.MethodPost, "/api/v1/compare", false, s.handleCompare},
 		{http.MethodPost, "/api/v1/migrate/plan", false, s.handleMigratePlan},
 		{http.MethodPost, "/api/v1/migrate/change", false, s.handleMigrateChange},
+		{http.MethodPost, "/api/v1/migrate/run", false, s.handleMigrateRun},
 		{http.MethodPost, "/api/v1/connections/{id}/fk/precheck", false, s.handleFKPrecheck},
 		{http.MethodPost, "/api/v1/changes/{pid}/apply", false, s.handleChangeApply},
 		{http.MethodPost, "/api/v1/connections/{id}/query", false, s.handleQuery},
@@ -2023,4 +2024,62 @@ func (s *Server) handleMigrateChange(w http.ResponseWriter, r *http.Request) {
 	s.plans[plan.ID] = &storedPlan{plan: plan, exec: dst.exec, exp: plan.ExpiresAt}
 	s.mu.Unlock()
 	writeJSON(w, http.StatusCreated, plan)
+}
+
+// migrateRunRequest 是数据搬运的请求体。
+type migrateRunRequest struct {
+	Source string `json:"source"`
+	Target string `json:"target"`
+	Table  string `json:"table"`
+	// TargetTable 省略时与 Table 相同。
+	TargetTable string `json:"target_table"`
+	// BatchSize 默认 1000。
+	BatchSize int `json:"batch_size"`
+	// MaxRows > 0 时只搬这么多行（演练）。
+	MaxRows int `json:"max_rows"`
+}
+
+// handleMigrateRun 搬数据并校验（目标表必须已存在）。
+//
+// 结构由 /migrate/change + /changes/{id}/apply 建好之后再调这里。检查点续跑
+// 暂时只做服务层与 CLI（HTTP 侧没有可靠的本地路径语义），这里不接 Resume。
+func (s *Server) handleMigrateRun(w http.ResponseWriter, r *http.Request) {
+	var req migrateRunRequest
+	if err := decode(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, "REQUEST_INVALID", "internal", err.Error(), "", false)
+		return
+	}
+	if req.Source == "" || req.Target == "" || req.Table == "" {
+		writeError(w, http.StatusBadRequest, "REQUEST_INVALID", "internal",
+			"需要 source、target、table", "", false)
+		return
+	}
+
+	s.mu.RLock()
+	src, sok := s.conns[req.Source]
+	dst, tok := s.conns[req.Target]
+	s.mu.RUnlock()
+	if !sok || !tok {
+		writeError(w, http.StatusNotFound, "CONNECTION_NOT_FOUND", "connection",
+			"源或目标连接不存在", "", false)
+		return
+	}
+	if src.exec == nil || dst.exec == nil {
+		writeError(w, http.StatusBadRequest, "CAPABILITY_UNSUPPORTED", "internal",
+			"迁移只支持关系型连接", "", false)
+		return
+	}
+
+	rep, err := service.MigrateTable(r.Context(), src.exec, dst.exec, req.Table, req.TargetTable,
+		service.MigrateExecOptions{BatchSize: req.BatchSize, MaxRows: req.MaxRows})
+	if errors.Is(err, service.ErrMigrateVerify) {
+		writeError(w, http.StatusConflict, "MIGRATE_VERIFY_FAILED", "internal",
+			err.Error(), "目标数据与源不一致：请核对后清空目标表重搬，不要直接使用这份数据", false)
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "MIGRATE_RUN_FAILED", "internal", err.Error(), "", false)
+		return
+	}
+	writeJSON(w, http.StatusOK, rep)
 }
