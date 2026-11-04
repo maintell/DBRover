@@ -46,11 +46,17 @@ type BackupObject struct {
 
 // BackupHeader 是容器的头部。
 type BackupHeader struct {
-	FormatVersion int            `json:"format_version"`
-	CreatedAt     string         `json:"created_at"`
-	Engine        string         `json:"engine"`
-	Catalog       string         `json:"catalog,omitempty"`
-	Objects       []BackupObject `json:"objects"`
+	FormatVersion int    `json:"format_version"`
+	CreatedAt     string `json:"created_at"`
+	Engine        string `json:"engine"`
+	Catalog       string `json:"catalog,omitempty"`
+	// SourceID 是备份来源的身份串（由调用方提供：sqlite 用绝对路径、网络引擎用
+	// host:port/库名）。恢复时用它挡住「往源库上恢复」这种误操作。
+	//
+	// 它不来自驱动，所以只能防手滑，不能当安全边界——写在这里是为了让下一个人
+	// 别把它当成认证手段（docs/08 §3.1 第 2 条只要求「同名库」这一层）。
+	SourceID string         `json:"source_id,omitempty"`
+	Objects  []BackupObject `json:"objects"`
 }
 
 // BackupRequest 是一次备份请求。
@@ -59,6 +65,8 @@ type BackupRequest struct {
 	Tables []string
 	// Resume 表示接着上次未完成的备份继续（只看 BackupToFile）。
 	Resume bool
+	// SourceID 写进容器头，用于恢复时识别源库（见 BackupHeader.SourceID）。
+	SourceID string
 
 	// afterSection 是测试用的失败注入点：每写完一张表调用一次，返回错误即中断。
 	// 用它模拟「中途被 kill」，比真的杀进程稳定，且能精确控制断在第几张表。
@@ -340,6 +348,7 @@ func (e *Executor) backupPlan(ctx context.Context, req BackupRequest) ([]string,
 		FormatVersion: backupFormatVersion,
 		CreatedAt:     time.Now().UTC().Format(time.RFC3339),
 		Engine:        string(e.conn.Engine()),
+		SourceID:      req.SourceID,
 	}
 	for _, name := range tables {
 		header.Objects = append(header.Objects, BackupObject{Kind: string(model.KindTable), Name: name})
@@ -352,6 +361,9 @@ type RestoreRequest struct {
 	// AllowExisting 允许覆盖目标库里已存在的同名对象。默认 false：
 	// 「恢复到已有对象的库」必须由人显式同意（docs/08 §3.1 硬性约束）。
 	AllowExisting bool
+	// SourceID 是目标库的身份串。与容器头一致时拒绝——「禁止恢复到源库」
+	// 是 docs/08 §3.1 的第 2 条硬性约束。
+	SourceID string
 }
 
 // RestoreObject 是报告里的一个对象。
@@ -385,6 +397,10 @@ func (e *Executor) Restore(ctx context.Context, r io.Reader, req RestoreRequest)
 	header, sections, err := readBackupContainer(r)
 	if err != nil {
 		return nil, err
+	}
+	if header.SourceID != "" && req.SourceID != "" && header.SourceID == req.SourceID {
+		return nil, fmt.Errorf("%w：这是该备份的源库（%s），禁止恢复到源库",
+			ErrRestoreTarget, header.SourceID)
 	}
 	if header.Engine != string(e.conn.Engine()) {
 		return nil, fmt.Errorf("%w：容器来自 %s，当前连接是 %s（v1 只支持同引擎恢复）",

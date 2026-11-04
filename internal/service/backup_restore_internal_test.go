@@ -131,3 +131,39 @@ func TestRestoreRejectsOtherEngine(t *testing.T) {
 		t.Fatalf("跨引擎应明确拒绝并提到同引擎，实际 %v", err)
 	}
 }
+
+// TestRestoreRefusesSource 覆盖 docs/08 §3.1 第 2 条：禁止恢复到源库。
+//
+// 身份串由调用方给出，所以这条只能防手滑；测试同时确认「不同身份可以恢复」，
+// 否则这道理查会变成谁也恢复不了。
+func TestRestoreRefusesSource(t *testing.T) {
+	ctx := context.Background()
+	src := openBackupTestDB(t)
+	srcEx := NewExecutor(src, model.EnvTest, model.AccessReadWrite, nil)
+	defer srcEx.Close()
+
+	var buf bytes.Buffer
+	if _, err := srcEx.Backup(ctx, BackupRequest{SourceID: "sqlite:/data/src.db"}, &buf); err != nil {
+		t.Fatalf("Backup: %v", err)
+	}
+	h, err := InspectBackup(bytes.NewReader(buf.Bytes()))
+	if err != nil {
+		t.Fatalf("InspectBackup: %v", err)
+	}
+	if h.SourceID != "sqlite:/data/src.db" {
+		t.Fatalf("头部没记住源库身份：%q", h.SourceID)
+	}
+
+	dst := openEmptySQLite(t)
+	dstEx := NewExecutor(dst, model.EnvTest, model.AccessReadWrite, nil)
+	defer dstEx.Close()
+	_, err = dstEx.Restore(ctx, bytes.NewReader(buf.Bytes()), RestoreRequest{SourceID: "sqlite:/data/src.db"})
+	if !errors.Is(err, ErrRestoreTarget) || !strings.Contains(err.Error(), "源库") {
+		t.Fatalf("恢复到源库应被拒并说明，实际 %v", err)
+	}
+
+	// 换一个身份就能恢复。
+	if _, err := dstEx.Restore(ctx, bytes.NewReader(buf.Bytes()), RestoreRequest{SourceID: "sqlite:/data/dst.db"}); err != nil {
+		t.Fatalf("目标不是源库时应当允许：%v", err)
+	}
+}

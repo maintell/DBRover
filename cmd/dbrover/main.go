@@ -696,7 +696,10 @@ func cmdBackup(args []string) error {
 
 		ex := service.NewExecutor(conn, env, mode, nil)
 		defer ex.Close()
-		h, err := ex.BackupToFile(context.Background(), service.BackupRequest{Resume: *resume}, *out)
+		h, err := ex.BackupToFile(context.Background(), service.BackupRequest{
+			Resume:   *resume,
+			SourceID: cf.sourceID(),
+		}, *out)
 		if err != nil {
 			// 没有检查点时错误本身已经说清「需整库重跑」，再加一句「可续跑」
 			// 只会自相矛盾——那种情况下根本续不了。
@@ -747,7 +750,10 @@ func cmdRestore(args []string) error {
 	ex := service.NewExecutor(conn, env, mode, nil)
 	defer ex.Close()
 
-	rep, err := ex.Restore(context.Background(), f, service.RestoreRequest{AllowExisting: *allowExisting})
+	rep, err := ex.Restore(context.Background(), f, service.RestoreRequest{
+		AllowExisting: *allowExisting,
+		SourceID:      cf.sourceID(),
+	})
 	if err != nil {
 		return err
 	}
@@ -756,4 +762,27 @@ func cmdRestore(args []string) error {
 		fmt.Printf("  %-40s %d 行\n", o.Name, o.Rows)
 	}
 	return nil
+}
+
+// sourceID 是备份/恢复用来识别「是不是同一个库」的字符串。
+//
+// sqlite 用绝对路径，网络引擎用 host:port/库名。它由调用方给出、驱动不参与，
+// 因此只能挡住「往源库上恢复」这类手滑，不是安全边界（见 docs/08 §3.1）。
+func (c *connFlags) sourceID() string {
+	if c.engine == "sqlite" {
+		if abs, err := filepath.Abs(c.db); err == nil {
+			return "sqlite:" + abs
+		}
+		return "sqlite:" + c.db
+	}
+	port := c.port
+	if port == 0 {
+		switch c.engine {
+		case "mysql":
+			port = 3306
+		case "postgres", "pg":
+			port = 5432
+		}
+	}
+	return c.engine + "://" + c.host + ":" + strconv.Itoa(port) + "/" + c.db
 }
