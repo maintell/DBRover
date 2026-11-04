@@ -36,6 +36,14 @@ func (d impl) Split(script string) ([]Statement, error) {
 	var prev *Token
 	blockMode := false
 
+	// CREATE TRIGGER ... BEGIN <语句>; ... END; 是另一种「体内分号不算分隔符」：
+	// SQLite 的触发器体必然带内部分号，MySQL 不写 DELIMITER 时也一样。
+	// 靠 CASE ... END 的嵌套计数避免把 CASE 的 END 当成体的结束——触发器体里
+	// 完全可以写 CASE 表达式。
+	inTrigger := false
+	bodyDepth := 0 // 0 表示还没进 BEGIN
+	caseDepth := 0
+
 	flushTo := func(end int) {
 		if s, ok := makeStatement(script, cur, end, len(out)); ok {
 			out = append(out, s)
@@ -59,18 +67,36 @@ func (d impl) Split(script string) ([]Statement, error) {
 
 		if prev == nil {
 			blockMode = syn.LineSeparatorSlash && (t.IsKw("BEGIN") || t.IsKw("DECLARE"))
+			inTrigger, bodyDepth, caseDepth = startsWithCreateTrigger(toks, i), 0, 0
+		}
+
+		if inTrigger {
+			switch {
+			case t.IsKw("BEGIN") && bodyDepth == 0:
+				bodyDepth = 1
+			case bodyDepth > 0 && t.IsKw("CASE"):
+				caseDepth++
+			case bodyDepth > 0 && t.IsKw("END"):
+				if caseDepth > 0 {
+					caseDepth--
+				} else {
+					bodyDepth = 0
+				}
+			}
 		}
 
 		if syn.LineSeparatorGO && t.IsKw("GO") && aloneOnLine(script, t, true) {
 			flushTo(t.Pos)
 			cur = lineEnd(script, t.End)
 			prev, blockMode = nil, false
+			inTrigger, bodyDepth, caseDepth = false, 0, 0
 			continue
 		}
 		if syn.LineSeparatorSlash && t.Kind == TokOp && t.Text == "/" && aloneOnLine(script, t, false) {
 			flushTo(t.Pos)
 			cur = lineEnd(script, t.End)
 			prev, blockMode = nil, false
+			inTrigger, bodyDepth, caseDepth = false, 0, 0
 			continue
 		}
 
@@ -79,10 +105,16 @@ func (d impl) Split(script string) ([]Statement, error) {
 				prev = &toks[i]
 				continue
 			}
+			// 触发器体内的分号属于体，不是语句结束。
+			if inTrigger && bodyDepth > 0 {
+				prev = &toks[i]
+				continue
+			}
 			flushTo(t.Pos)
 			cur = end
 			i += consumed - 1
 			prev, blockMode = nil, false
+			inTrigger, bodyDepth, caseDepth = false, 0, 0
 			continue
 		}
 		prev = &toks[i]
@@ -96,6 +128,20 @@ func (d impl) Split(script string) ([]Statement, error) {
 	flushTo(len(script))
 
 	return out, nil
+}
+
+// startsWithCreateTrigger 判断从 toks[i] 起的语句是不是 CREATE [TEMP] TRIGGER。
+//
+// 只用于决定「体内的分号算不算分隔符」，不做完整解析。
+func startsWithCreateTrigger(toks []Token, i int) bool {
+	if i >= len(toks) || !toks[i].IsKw("CREATE") {
+		return false
+	}
+	j := i + 1
+	if j < len(toks) && (toks[j].IsKw("TEMP") || toks[j].IsKw("TEMPORARY")) {
+		j++
+	}
+	return j < len(toks) && toks[j].IsKw("TRIGGER")
 }
 
 func makeStatement(script string, from, to, index int) (Statement, bool) {

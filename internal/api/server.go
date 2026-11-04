@@ -570,7 +570,18 @@ func (s *Server) handleTables(w http.ResponseWriter, r *http.Request) {
 			"这是一个 key-value 连接，没有表的概念", "改用 GET /api/v1/connections/{id}/kv/keys", false)
 		return
 	}
-	objs, err := drv.Meta().Objects(r.Context(), "", "", model.KindTable, model.KindView)
+	// 对象树列什么，由能力声明决定：说了支持触发器/序列却不出现在树上，
+	// 等于把「查得到」这件事藏起来（docs/04 §3.2）。
+	kinds := []model.ObjectKind{model.KindTable, model.KindView}
+	if caps := drv.Capabilities(); caps.Triggers || caps.Sequences {
+		if caps.Triggers {
+			kinds = append(kinds, model.KindTrigger)
+		}
+		if caps.Sequences {
+			kinds = append(kinds, model.KindSequence)
+		}
+	}
+	objs, err := drv.Meta().Objects(r.Context(), "", "", kinds...)
 	if err != nil {
 		writeError(w, http.StatusBadGateway, "DB_METADATA_FAILED", "connection", err.Error(), "", true)
 		return

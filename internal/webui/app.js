@@ -469,8 +469,18 @@ async function loadTables() {
     }
     for (const t of items) {
       const b = document.createElement('button');
-      b.textContent = t.name;
-      b.onclick = () => browseTable(t.name);
+      const kind = t.kind || 'table';
+      // 触发器与序列不是「能查数据的表」：点开只会得到一条必然失败的
+      // SELECT。摆出来是为了让人知道它们存在，点击留给后续的定义视图。
+      const browsable = kind === 'table' || kind === 'view';
+      if (browsable) {
+        b.textContent = t.name;
+        b.onclick = () => browseTable(t.name);
+      } else {
+        b.textContent = t.name + ' · ' + (kind === 'trigger' ? '触发器' : '序列');
+        b.disabled = true;
+        b.title = '这个对象没有可浏览的数据行';
+      }
       $('tables').appendChild(b);
     }
   } catch (e) {
