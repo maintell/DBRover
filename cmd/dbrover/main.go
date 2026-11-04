@@ -58,6 +58,8 @@ func main() {
 		err = cmdTunnel(os.Args[2:])
 	case "secret":
 		err = cmdSecret(os.Args[2:])
+	case "backup":
+		err = cmdBackup(os.Args[2:])
 	default:
 		fmt.Fprintf(os.Stderr, "未知命令: %s\n\n", os.Args[1])
 		usage()
@@ -85,6 +87,7 @@ func usage() {
   dbrover serve  [-addr 127.0.0.1:7788] [-token <token>] [-allow-remote] [-open] [-audit <path>] [-audit-anchor <path>]
   dbrover tunnel -via user@hop1:22[,user@hop2:22] -to host:port (-password-stdin | -key <path>)
   dbrover secret (set|clear|status) [-service dbrover/agent] [-account api-key]  # 口令从 stdin 读
+  dbrover backup (create|inspect) [-db <file> ...] [-out <文件.dbr>]  # 容器 v1：未加密、无续跑
 
 退出码:
   0  成功
@@ -643,4 +646,68 @@ func firstLine(s string) string {
 		s = s[:60] + "…"
 	}
 	return s
+}
+
+// cmdBackup 是备份容器工具：create 写、inspect 看。
+//
+// v1 只有这两个子命令：容器里每段就是该表的 sql 脚本（建表 + INSERT），
+// 同引擎可回放。续跑、加密、恢复演练都还没做（docs/08 §7）。
+func cmdBackup(args []string) error {
+	if len(args) == 0 {
+		return errors.New("用法: dbrover backup create|inspect ...")
+	}
+	switch args[0] {
+	case "inspect":
+		if len(args) < 2 {
+			return errors.New("用法: dbrover backup inspect <文件.dbr>")
+		}
+		f, err := os.Open(args[1])
+		if err != nil {
+			return err
+		}
+		defer func() { _ = f.Close() }()
+		h, err := service.InspectBackup(f)
+		if err != nil {
+			return err
+		}
+		fmt.Print(service.BackupSummary(h))
+		return nil
+
+	case "create":
+		fs := flag.NewFlagSet("backup create", flag.ExitOnError)
+		var cf connFlags
+		cf.bind(fs)
+		out := fs.String("out", "", "输出文件（.dbr）")
+		if err := fs.Parse(args[1:]); err != nil {
+			return err
+		}
+		if strings.TrimSpace(*out) == "" {
+			return errors.New("需要 -out <文件.dbr>")
+		}
+		conn, env, mode, err := cf.open()
+		if err != nil {
+			return err
+		}
+		defer func() { _ = conn.Close() }()
+
+		f, err := os.Create(*out)
+		if err != nil {
+			return err
+		}
+		ex := service.NewExecutor(conn, env, mode, nil)
+		defer ex.Close()
+		h, err := ex.Backup(context.Background(), service.BackupRequest{}, f)
+		closeErr := f.Close()
+		if err != nil {
+			return err
+		}
+		if closeErr != nil {
+			return closeErr
+		}
+		fmt.Printf("已写入 %s：%d 个对象（%s）\n", *out, len(h.Objects), h.Engine)
+		return nil
+
+	default:
+		return fmt.Errorf("未知的 backup 子命令 %q（可用 create / inspect）", args[0])
+	}
 }
