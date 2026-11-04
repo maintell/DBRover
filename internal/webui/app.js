@@ -334,6 +334,9 @@ async function loadIdentity(id) {
     const caps = h.capabilities || {};
     state.current.capabilities = caps;
     $('btn-explain').hidden = !caps.explain;
+    // 序列只有 PG 有（MySQL 用 AUTO_INCREMENT、SQLite 用 AUTOINCREMENT），
+    // 没这个能力的连接上不摆这个按钮。
+    if ($('btn-new-seq')) $('btn-new-seq').hidden = !caps.sequences;
     const ident = h.identity || {};
     const host = ident.hostname || '?';
     const fp = (ident.fingerprint || '').slice(0, 8);
@@ -2814,6 +2817,7 @@ $('btn-compare').onclick = () => showCompare();
 $('btn-agent').onclick = () => showAgent();
 $('btn-new-table').onclick = () => showCreateTable();
 $('btn-new-view').onclick = () => showCreateView();
+$('btn-new-seq').onclick = () => showCreateSequence();
 $('btn-forget').onclick = () => {
   forgetToken();
   location.reload();
@@ -3199,5 +3203,53 @@ async function showCreateView() {
   }
   if (!(await confirmPlan(plan))) return;
   // 建完刷新对象树：视图要能立刻在左侧看到，否则用户会以为没建成。
+  await applyPlan(plan.id, undefined, loadTables);
+}
+
+// showCreateSequence 建一个序列：名字必填，其余参数留空就走引擎默认。
+//
+// 数字字段用「留空 = 不指定」而不是 0：0 是合法步长以外的非法值，也是合法
+// 起始值，拿 0 当「没填」会把两者混在一起。
+async function showCreateSequence() {
+  if (!state.current) {
+    showNotice('请先建立连接。', 'warn');
+    return;
+  }
+  const ok = await dialog(
+    '新建序列',
+    '<label class="field">序列名</label>' +
+      '<input id="s-name" style="width:100%" autocomplete="off" spellcheck="false">' +
+      '<div class="toolbar">' +
+      '<label class="field">起始</label><input id="s-start" class="narrow" placeholder="100" autocomplete="off">' +
+      '<label class="field">步长</label><input id="s-inc" class="narrow" placeholder="1" autocomplete="off">' +
+      '<label class="field">最小</label><input id="s-min" class="narrow" placeholder="默认" autocomplete="off">' +
+      '<label class="field">最大</label><input id="s-max" class="narrow" placeholder="默认" autocomplete="off">' +
+      '<label class="inline"><input type="checkbox" id="s-cycle"> 循环</label>' +
+      '</div>' +
+      '<p>数字留空表示交给引擎默认；步长不能为 0。</p>',
+    '生成预案');
+  if (!ok) return;
+  const num = (id) => {
+    const v = ($(id) && $(id).value || '').trim();
+    if (v === '') return undefined;
+    const n = Number(v);
+    return Number.isFinite(n) ? n : undefined;
+  };
+  const seq = { name: ($('s-name').value || '').trim() };
+  for (const [key, id] of [['start', 's-start'], ['increment', 's-inc'], ['min', 's-min'], ['max', 's-max']]) {
+    const n = num(id);
+    if (n !== undefined) seq[key] = n;
+  }
+  const cyc = $('s-cycle');
+  if (cyc && cyc.checked) seq.cycle = true;
+
+  let plan;
+  try {
+    plan = await postSchemaPlan({ action: 'create_sequence', sequence: seq }, false);
+  } catch (e) {
+    showNotice(e.message + (e.hint ? '（' + e.hint + '）' : ''), 'error');
+    return;
+  }
+  if (!(await confirmPlan(plan))) return;
   await applyPlan(plan.id, undefined, loadTables);
 }

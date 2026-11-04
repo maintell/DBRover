@@ -25,6 +25,8 @@ func TestColumnActionsOfferNullableAndDefault(t *testing.T) {
 		{"按能力位决定摆不摆", "capabilities.add_check"},
 		{"新建视图入口", "async function showCreateView("},
 		{"新建视图的按钮绑定", "$('btn-new-view').onclick"},
+		{"新建序列入口", "async function showCreateSequence("},
+		{"新建序列按能力位隐藏", "btn-new-seq"},
 	} {
 		if !strings.Contains(src, want.needle) {
 			t.Errorf("app.js 里缺少「%s」：%q", want.name, want.needle)

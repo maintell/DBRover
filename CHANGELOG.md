@@ -120,6 +120,7 @@
 - **修一个「服务层全绿、界面点了才炸」的洞**：`schemaPlanRequest` 少了 `check` 与 `view` 两个字段，而 `decode` 用 `DisallowUnknownFields`，于是 `add_check` / `create_view` 在 HTTP 上根本不可达（返回 `json: unknown field "view"`）。服务层测试直接调 `BuildDDLPlan`，一路绿；界面点了才发现。现在补上字段并新增 `TestSchemaPlanAcceptsCheckAndView`：`create_view` 必须返回带 `CREATE VIEW` 的预案、`add_check` 在 SQLite 上必须报「CHECK 加不上」而不是「字段不认识」——后者正是这类漏字段的唯一特征。内置浏览器复验：错误从 `json: unknown field` 变成「视图名 "" 只能用字母、数字、下划线」，说明请求真的到了服务层。
 - **新增请求字段门禁**：`TestRequestStructsCoverServiceFields` 用反射逐对比较「服务层结构」与「api 请求结构」的 json 字段，缺一个就红。它锁的是刚刚连栽两轮的那类洞——`decode` 用 `DisallowUnknownFields`，请求体里出现 api 结构没声明的字段会直接 400，而服务层测试直接调 service 所以一路绿。刻意不对外暴露的字段写进 allowlist 并说明理由（`connection_id`：连接只由 URL 路径决定，否则客户端能把一次写操作指向另一条连接）。变异验证：把 `check`/`view` 的 json 标签改名即红。
 - **再加一道「界面动作名」门禁**：`TestUIActionsExistInService` 从 `service/ddl.go` 的动作常量反推白名单，扫描 `app.js` 里所有 `action: '...'`，对不上就红。这类错在运行时只表现为一句含糊的业务错误（或干脆没反应），而界面代码里就是一行字符串——变异验证：把 `create_view` 改成 `create_viewx`，用例立刻报「界面发起的 action 没有对应常量」。
+- **结构设计器补上「新建序列」**（PG）：`action` 为 `create_sequence`（`sequence:{name,start,increment,min,max,cycle}`），渲染 `CREATE SEQUENCE …`、回滚 `DROP SEQUENCE`。数字参数用**指针**而不是零值——`INCREMENT 0` 是非法值，必须能与「没填」区分开。参数先校验再判引擎能力（步长 0、最小值大于最大值、起始值越界都在我们这一侧拒掉，而不是把一句引擎报错甩给用户）。**只有声明了 `Sequences` 的引擎才摆这个按钮**（PG；MySQL 用 AUTO_INCREMENT、SQLite 用 AUTOINCREMENT），界面上按能力位隐藏。真机 PG 17：`START WITH 100` / `INCREMENT BY 5` 建出来、`nextval` 可用、回滚后报不存在。
 
 ### 安全
 

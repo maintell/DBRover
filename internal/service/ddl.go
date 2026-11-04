@@ -55,6 +55,8 @@ const (
 	DDLAddCheck DDLAction = "add_check"
 	// DDLCreateView 建一个视图。视图只存查询定义，不复制数据。
 	DDLCreateView DDLAction = "create_view"
+	// DDLCreateSequence 建一个序列（目前只有 PostgreSQL 支持）。
+	DDLCreateSequence DDLAction = "create_sequence"
 	// DDLRaw 是「我已经有 DDL，只想让它经过这道门」：语句由用户写，
 	// 工具不做语义解析，只负责分级、审批、审计与竞态保护。
 	DDLRaw DDLAction = "raw"
@@ -151,6 +153,8 @@ type DDLRequest struct {
 	Check CheckSpec `json:"check"`
 	// View 用于 create_view。
 	View ViewSpec `json:"view"`
+	// Sequence 用于 create_sequence。
+	Sequence SequenceSpec `json:"sequence"`
 	// RawSQL 用于 raw：一条手写的 DDL 语句。
 	RawSQL string `json:"sql"`
 }
@@ -169,6 +173,18 @@ type ViewSpec struct {
 	Name string `json:"name"`
 	// Query 是 SELECT / WITH 主体（不含 CREATE VIEW 与分号）。
 	Query string `json:"query"`
+}
+
+// SequenceSpec 是一个序列定义。零值指针表示「不指定，由引擎取默认」。
+//
+// 用指针而不是 int64 零值：INCREMENT 0 是非法值，必须能与我们「没填」区分开。
+type SequenceSpec struct {
+	Name      string `json:"name"`
+	Start     *int64 `json:"start,omitempty"`
+	Increment *int64 `json:"increment,omitempty"`
+	Min       *int64 `json:"min,omitempty"`
+	Max       *int64 `json:"max,omitempty"`
+	Cycle     *bool  `json:"cycle,omitempty"`
 }
 
 // constraintNamePattern 限定约束名：字母或下划线开头，其后字母数字下划线。
@@ -417,6 +433,10 @@ func (e *Executor) BuildDDLPlan(ctx context.Context, req DDLRequest) (*ChangePla
 	// 建视图同理：它没有「现有表结构」可读，也不需要表定义哈希。
 	if req.Action == DDLCreateView {
 		return e.buildCreateViewPlan(ctx, req)
+	}
+	// 建序列也一样：它不是改某张表。
+	if req.Action == DDLCreateSequence {
+		return e.buildCreateSequencePlan(ctx, req)
 	}
 	// 手写 DDL 也不依赖「我要改的那张表」：它可能建表、也可能改别的东西。
 	if req.Action == DDLRaw {
@@ -1349,6 +1369,66 @@ func (e *Executor) buildCreateViewPlan(ctx context.Context, req DDLRequest) (*Ch
 		AffectedRows: 0,
 	}
 	plan.Notes = append(plan.Notes, "视图只存查询定义，不复制数据；删除视图不影响底层表")
+	e.finishDDLPlan(plan)
+	return plan, nil
+}
+
+// buildCreateSequencePlan 生成建序列预案。
+//
+// 序列没有「现有表结构」可读，也不需要表定义哈希；能出错的只有参数与重名。
+func (e *Executor) buildCreateSequencePlan(ctx context.Context, req DDLRequest) (*ChangePlan, error) {
+	spec := req.Sequence
+	name := strings.TrimSpace(spec.Name)
+	if !constraintNamePattern.MatchString(name) {
+		return nil, fmt.Errorf("%w: 序列名 %q 只能用字母、数字、下划线，且以字母或下划线开头",
+			ErrInvalidDDL, spec.Name)
+	}
+	if spec.Increment != nil && *spec.Increment == 0 {
+		return nil, fmt.Errorf("%w: 步长不能为 0", ErrInvalidDDL)
+	}
+	if spec.Min != nil && spec.Max != nil && *spec.Min > *spec.Max {
+		return nil, fmt.Errorf("%w: 最小值 %d 大于最大值 %d", ErrInvalidDDL, *spec.Min, *spec.Max)
+	}
+	if spec.Start != nil {
+		if spec.Min != nil && *spec.Start < *spec.Min {
+			return nil, fmt.Errorf("%w: 起始值 %d 小于最小值 %d", ErrInvalidDDL, *spec.Start, *spec.Min)
+		}
+		if spec.Max != nil && *spec.Start > *spec.Max {
+			return nil, fmt.Errorf("%w: 起始值 %d 大于最大值 %d", ErrInvalidDDL, *spec.Start, *spec.Max)
+		}
+	}
+	// 参数校验放在能力判断之前：步长为 0 这类错在哪台引擎上都不成立，
+	// 先说「该引擎没有序列」会把人的注意力引偏。
+	if !e.conn.Capabilities().Sequences {
+		return nil, fmt.Errorf("%w: %s 没有独立的序列对象（MySQL 用 AUTO_INCREMENT、SQLite 用 AUTOINCREMENT）",
+			ErrInvalidDDL, e.conn.Engine())
+	}
+	if objs, oerr := e.conn.Meta().Objects(ctx, req.Table.Catalog, req.Table.Schema, model.KindSequence); oerr == nil {
+		for _, o := range objs {
+			if strings.EqualFold(o.Name, name) {
+				return nil, fmt.Errorf("%w: 序列 %q 已存在", ErrInvalidDDL, name)
+			}
+		}
+	}
+	quoted := e.dialect.QuoteQualified(schemaOf(req.Table, e.cfgSchema()), name)
+	plan := &ChangePlan{
+		ID: "ddl-" + newID(),
+		Table: model.ObjectRef{
+			Kind: model.KindSequence, Name: name, Schema: req.Table.Schema, Catalog: req.Table.Catalog,
+		},
+		CreatedAt: time.Now(),
+		ExpiresAt: time.Now().Add(planTTL),
+		Statements: []PlanStatement{{
+			SQL: e.dialect.CreateSequenceSQL(quoted, dialect.SequenceOptions{
+				Increment: spec.Increment, Min: spec.Min, Max: spec.Max, Start: spec.Start, Cycle: spec.Cycle,
+			}), ExpectRows: -1,
+		}},
+		Rollback: []PlanStatement{{
+			SQL: e.dialect.DropSequenceSQL(quoted), ExpectRows: -1,
+		}},
+		AffectedRows: 0,
+	}
+	plan.Notes = append(plan.Notes, "序列不存业务数据，删它会打断依赖它的默认值（如 nextval）")
 	e.finishDDLPlan(plan)
 	return plan, nil
 }

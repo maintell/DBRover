@@ -7,6 +7,7 @@ package dialect
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"strconv"
 	"strings"
 
 	"github.com/maintell/DBRover/internal/model"
@@ -105,6 +106,12 @@ type Dialect interface {
 	// 没法用一条语句表达执行计划（需要先开开关或查另一张表）。
 	// 刻意不渲染 EXPLAIN ANALYZE：那会真的把语句跑一遍。
 	ExplainSQL(sqlText string) (string, bool)
+
+	// CreateSequenceSQL 渲染建序列语句；opts 里为零值的项不写子句（交给引擎默认）。
+	CreateSequenceSQL(name string, opts SequenceOptions) string
+
+	// DropSequenceSQL 渲染删序列语句。
+	DropSequenceSQL(name string) string
 
 	// CreateViewSQL 渲染建视图语句。name 应当是已引用好的限定名，
 	// query 是已过校验的 SELECT / WITH 主体（不含分号）。
@@ -304,6 +311,50 @@ func (d impl) ExplainSQL(sqlText string) (string, bool) {
 	default:
 		return "", false
 	}
+}
+
+// SequenceOptions 是建序列的可选项。零值字段表示「不指定，由引擎取默认」，
+// 所以它们都是指针：`INCREMENT 0` 这种非法值要能被区分出来，而不是当成「没填」。
+type SequenceOptions struct {
+	Increment *int64
+	Min       *int64
+	Max       *int64
+	Start     *int64
+	Cycle     *bool
+}
+
+// CreateSequenceSQL 见接口注释。
+//
+// 只按 PostgreSQL 的写法生成：三种已实现引擎里只有 PG 支持序列（MySQL 用
+// AUTO_INCREMENT、SQLite 用 AUTOINCREMENT），调用方应先看 Capabilities().Sequences。
+// MSSQL / Oracle 的写法接近但未真机验证，接的时候再按 ADR-0005 方言化。
+func (d impl) CreateSequenceSQL(name string, opts SequenceOptions) string {
+	parts := []string{"CREATE SEQUENCE", name}
+	if opts.Increment != nil {
+		parts = append(parts, "INCREMENT BY", strconv.FormatInt(*opts.Increment, 10))
+	}
+	if opts.Min != nil {
+		parts = append(parts, "MINVALUE", strconv.FormatInt(*opts.Min, 10))
+	}
+	if opts.Max != nil {
+		parts = append(parts, "MAXVALUE", strconv.FormatInt(*opts.Max, 10))
+	}
+	if opts.Start != nil {
+		parts = append(parts, "START WITH", strconv.FormatInt(*opts.Start, 10))
+	}
+	if opts.Cycle != nil {
+		if *opts.Cycle {
+			parts = append(parts, "CYCLE")
+		} else {
+			parts = append(parts, "NO CYCLE")
+		}
+	}
+	return strings.Join(parts, " ")
+}
+
+// DropSequenceSQL 见接口注释。
+func (d impl) DropSequenceSQL(name string) string {
+	return "DROP SEQUENCE " + name
 }
 
 // CreateViewSQL 见接口注释。
