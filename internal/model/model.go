@@ -252,6 +252,12 @@ type Capabilities struct {
 	// 默认值。SQLite 两者都不支持（只能重建表），据此拒绝而不是生成必然失败的语句。
 	AlterColumnNullability bool `json:"alter_column_nullability"`
 	AlterColumnDefault     bool `json:"alter_column_default"`
+	// AddCheck 表示引擎的 CHECK 约束是**真的会被强制**的。
+	//
+	// MySQL 5.7 会解析 CHECK 但静默忽略（8.0.16 起才真正强制），SQLite 只能在
+	// 建表时写 CHECK、加不上。这两种情况都必须声明 false，否则我们就是在
+	// 「看起来建好了、约束不存在」的假成功上报平安。
+	AddCheck bool `json:"add_check"`
 	// IndexValidity 表示 DescribeTable 会给出 Index.Valid（目前只有 PostgreSQL）。
 	// 套件据此要求「声明了就真给」，避免字段写完没人查、上层拿到一片 nil。
 	IndexValidity    bool `json:"index_validity"`

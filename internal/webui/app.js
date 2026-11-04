@@ -1575,6 +1575,24 @@ function renderSchema(out) {
     '<button id="ix-add" class="primary">建索引</button>';
   wrap.appendChild(ixForm);
 
+  // 检查约束：只在真会强制它的引擎上出现（PG）。MySQL 5.7 会解析 CHECK 但静默
+  // 忽略、SQLite 只能在建表时写——摆一个按了不生效的按钮比不摆更糟。
+  if (state.current && state.current.capabilities && state.current.capabilities.add_check) {
+    const ckHead = document.createElement('div');
+    ckHead.className = 'head';
+    ckHead.textContent = '检查约束';
+    wrap.appendChild(ckHead);
+
+    const ckForm = document.createElement('div');
+    ckForm.className = 'toolbar';
+    ckForm.innerHTML =
+      '<input id="ck-name" class="narrow" placeholder="约束名，例如 ck_age" autocomplete="off" spellcheck="false">' +
+      '<input id="ck-expr" class="narrow" placeholder="表达式，例如 age >= 0" autocomplete="off" spellcheck="false">' +
+      '<button id="ck-add" class="primary">加约束</button>';
+    wrap.appendChild(ckForm);
+    $('ck-add').onclick = () => planAddCheck();
+  }
+
   const idxs = out.indexes || [];
   if (!idxs.length) {
     const none = document.createElement('div');
@@ -1980,6 +1998,29 @@ function startRetype(tr, col) {
     }
     if (ev.key === 'Escape') refreshSchema();
   };
+}
+
+// planAddCheck 加一条检查约束。
+//
+// 不复用 fetchSchemaPlan：后者的请求体只有 column 一个字段，而约束要带
+// check:{name, expression}，硬塞进 column 会让服务端读不到。
+async function planAddCheck() {
+  const name = $('ck-name').value.trim();
+  const expression = $('ck-expr').value.trim();
+  if (!name || !expression) {
+    showNotice('约束名与表达式都要填。', 'warn');
+    return;
+  }
+  let plan;
+  try {
+    plan = await postSchemaPlan({ action: 'add_check', check: { name, expression } }, false);
+  } catch (e) {
+    // 有违规行时服务端会说清多少行，原文展示
+    showNotice(e.message + (e.hint ? '（' + e.hint + '）' : ''), 'error');
+    return;
+  }
+  if (!(await confirmPlan(plan))) return;
+  await applyPlan(plan.id, undefined, refreshSchema);
 }
 
 // planColumnChange 是「列级改动的三件套」：取预案 → 确认 → 执行。

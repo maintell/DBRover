@@ -23,6 +23,9 @@ var ErrSchemaChanged = errors.New("表定义已变化，请重新生成结构变
 // ErrInvalidDDL 表示结构变更参数不合法（列名 / 类型 / 默认值）。
 var ErrInvalidDDL = errors.New("结构变更参数不合法")
 
+// ErrCheckViolated 表示存量行不满足这条检查约束。
+var ErrCheckViolated = errors.New("存量行不满足检查约束")
+
 // ErrNullableBlocked 表示列里还有 NULL，不能改成 NOT NULL。
 //
 // 单独一个错误码，是因为「引擎拒绝」与「我们自己先看见了」不是一回事：
@@ -48,6 +51,8 @@ const (
 	DDLSetNullable DDLAction = "set_nullable"
 	// DDLSetDefault 改一列的默认值（SET / DROP DEFAULT）。只影响之后的写入。
 	DDLSetDefault DDLAction = "set_default"
+	// DDLAddCheck 加一条检查约束。加之前先数一遍不满足表达式的行。
+	DDLAddCheck DDLAction = "add_check"
 	// DDLRaw 是「我已经有 DDL，只想让它经过这道门」：语句由用户写，
 	// 工具不做语义解析，只负责分级、审批、审计与竞态保护。
 	DDLRaw DDLAction = "raw"
@@ -139,9 +144,27 @@ type DDLRequest struct {
 	Index IndexSpec `json:"index"`
 	// ForeignKey 用于 add_foreign_key。
 	ForeignKey ForeignKeySpec `json:"foreign_key"`
+	// Check 用于 add_check。名字必须显式给：匿名约束在 PG 里会由引擎起名，
+	// 回滚时就找不回它是哪一条了。
+	Check CheckSpec `json:"check"`
 	// RawSQL 用于 raw：一条手写的 DDL 语句。
 	RawSQL string `json:"sql"`
 }
+
+// CheckSpec 是一条检查约束。
+type CheckSpec struct {
+	Name string `json:"name"`
+	// Expression 是布尔表达式原文，例如 age >= 0 AND age < 200。
+	//
+	// 它会被拼进 DDL，所以只允许「不像注入」的字符：见 normalizeCheckExpression。
+	Expression string `json:"expression"`
+}
+
+// constraintNamePattern 限定约束名：字母或下划线开头，其后字母数字下划线。
+//
+// 比列名更严：约束名要出现在 ALTER TABLE ... ADD CONSTRAINT 与回滚语句里，
+// 宽松一点就得靠 QuoteIdent 兜住各种怪字符，而约束名本来就没有必要长成那样。
+var constraintNamePattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]{0,63}$`)
 
 // typePattern 限定类型声明的字符集。
 //
@@ -274,26 +297,42 @@ func (e *Executor) columnDefinitionFromColumn(c model.Column) string {
 // 「未知」必须与 0 分开：删列、改非空都靠这个数告诉用户影响面，
 // 拿 0 假装「没有数据」会让最危险的操作看起来最安全。
 func (e *Executor) countWhere(ctx context.Context, table, where string) int64 {
-	sess, err := e.conn.Acquire(ctx)
+	n, err := e.countWhereErr(ctx, table, where)
 	if err != nil {
 		return -1
+	}
+	return n
+}
+
+// countWhereErr 同上，但把「查不出来」的原因带回去。
+//
+// 加检查约束时需要区分「0 行不满足」和「根本查不出来」：前者可以放行，
+// 后者只能交给引擎并在预案里说明——把两者混成 -1 会让人以为已经预检过。
+func (e *Executor) countWhereErr(ctx context.Context, table, where string) (int64, error) {
+	sess, err := e.conn.Acquire(ctx)
+	if err != nil {
+		return 0, err
 	}
 	defer func() { _ = sess.Close() }()
 
 	cur, err := sess.Query(ctx, "SELECT COUNT(*) FROM "+table+" WHERE "+where, nil, driver.QueryOptions{})
 	if err != nil {
-		return -1
+		return 0, err
 	}
 	defer func() { _ = cur.Close() }()
 
 	rows, _, err := cur.Next(ctx)
-	if err != nil || len(rows) != 1 || len(rows[0]) == 0 {
-		return -1
+	if err != nil {
+		return 0, err
 	}
-	if n, ok := toInt64(rows[0][0]); ok {
-		return n
+	if len(rows) != 1 || len(rows[0]) == 0 {
+		return 0, fmt.Errorf("COUNT 返回了意外形状")
 	}
-	return -1
+	n, ok := toInt64(rows[0][0])
+	if !ok {
+		return 0, fmt.Errorf("COUNT 结果不是整数")
+	}
+	return n, nil
 }
 
 // countNonNull 数出某列的非空行数，用于告知「删这一列会丢多少数据」。
@@ -304,6 +343,53 @@ func (e *Executor) countNonNull(ctx context.Context, table, column string) int64
 // countNulls 数出某列的空行数，用于「能不能改成 NOT NULL」的预检。
 func (e *Executor) countNulls(ctx context.Context, table, column string) int64 {
 	return e.countWhere(ctx, table, e.dialect.QuoteIdent(column)+" IS NULL")
+}
+
+// checkUnsupportedReason 给出「为什么这个引擎不能加检查约束」的一句话。
+//
+// 写清楚是因为这条最容易被误解成我们的偷懒：MySQL 5.7 接受 CHECK 语法、
+// SHOW CREATE TABLE 里也能看到它，但**插入违反约束的行照样成功**。
+func checkUnsupportedReason(eng model.Engine) string {
+	switch eng {
+	case model.EngineMySQL, model.EngineMariaDB:
+		return "MySQL 5.7 会解析 CHECK 但静默忽略，8.0.16 起才真正强制"
+	case model.EngineSQLite:
+		return "SQLite 只能在建表时写 CHECK，ALTER TABLE 加不上"
+	}
+	return "该引擎没有声明支持检查约束"
+}
+
+// normalizeCheckExpression 校验并整理一条检查约束表达式。
+//
+// 表达式是要拼进 DDL 的 SQL 片段，这是我们唯一无法参数化的地方（约束不能带
+// 占位符），所以只能按「不像注入」来卡：
+//   - 分号：会把一条语句变成两条，执行门会切成两条并在第二段失败，报错完全
+//     指不到这里；
+//   - 行注释与块注释：能把后面的内容整段吃掉，包括我们补上的右括号；
+//   - 控制字符：没有正当用途，只会让错误信息变成乱码。
+//
+// 不做的：不去解析表达式语法。约束的合法性最终由引擎判定，我们只保证它不会
+// 「跑出本条语句之外」。
+func normalizeCheckExpression(expr string) (string, error) {
+	expr = strings.TrimSpace(expr)
+	if expr == "" {
+		return "", fmt.Errorf("%w: 检查表达式不能为空", ErrInvalidDDL)
+	}
+	if len(expr) > 1000 {
+		return "", fmt.Errorf("%w: 检查表达式过长（>1000 字符）", ErrInvalidDDL)
+	}
+	if strings.ContainsAny(expr, ";") {
+		return "", fmt.Errorf("%w: 检查表达式里不能有分号（会把一条语句变成两条）", ErrInvalidDDL)
+	}
+	if strings.Contains(expr, "--") || strings.Contains(expr, "/*") || strings.Contains(expr, "*/") {
+		return "", fmt.Errorf("%w: 检查表达式里不能有注释符", ErrInvalidDDL)
+	}
+	for _, r := range expr {
+		if r < 0x20 {
+			return "", fmt.Errorf("%w: 检查表达式里有控制字符", ErrInvalidDDL)
+		}
+	}
+	return expr, nil
 }
 
 // BuildDDLPlan 生成一次结构变更的预案。
@@ -346,6 +432,14 @@ func (e *Executor) BuildDDLPlan(ctx context.Context, req DDLRequest) (*ChangePla
 		if cerr != nil {
 			return nil, cerr
 		}
+	case DDLAddCheck:
+		// 约束名与表达式在这里就校验，别等到拼语句时才发现。
+		name := strings.TrimSpace(req.Check.Name)
+		if !constraintNamePattern.MatchString(name) {
+			return nil, fmt.Errorf("%w: 约束名 %q 只能用字母、数字、下划线，且以字母或下划线开头（回滚要用它）",
+				ErrInvalidDDL, req.Check.Name)
+		}
+		spec = ColumnSpec{Name: name}
 	case DDLSetNullable, DDLSetDefault:
 		// 这两个动作只动列的一两个属性，不需要（也不该要求）重报类型。
 		name, nerr := normalizeColumnName(req.Column.Name)
@@ -537,6 +631,41 @@ func (e *Executor) BuildDDLPlan(ctx context.Context, req DDLRequest) (*ChangePla
 		}
 		plan.AffectedRows = 0
 		plan.Notes = append(plan.Notes, "改默认值只影响之后的写入，不会回填已有行")
+
+	case DDLAddCheck:
+		// 先校验表达式再看引擎能力：参数本身有错时，这句话在哪台引擎上都不成立，
+		// 说「该引擎不支持」会把人的注意力引到错的方向。
+		expr, xerr := normalizeCheckExpression(req.Check.Expression)
+		if xerr != nil {
+			return nil, xerr
+		}
+		if !e.conn.Capabilities().AddCheck {
+			return nil, fmt.Errorf("%w: %s 加检查约束不可靠——%s",
+				ErrInvalidDDL, e.conn.Engine(), checkUnsupportedReason(e.conn.Engine()))
+		}
+		for _, c := range td.Checks {
+			if strings.EqualFold(c.Name, spec.Name) {
+				return nil, fmt.Errorf("%w: 约束 %q 已存在", ErrInvalidDDL, c.Name)
+			}
+		}
+		// 加约束不改数据，但引擎会全表校验；先把「有多少行过不了」数出来。
+		// 否则用户拿到的是引擎的一句 "check constraint is violated by some row"，
+		// 既不知道多少行、也不知道是哪几行。
+		bad, cerr := e.countWhereErr(ctx, table, "NOT ("+expr+")")
+		if cerr == nil && bad > 0 {
+			return nil, fmt.Errorf("%w：有 %d 行不满足 %s，先修数据再加约束",
+				ErrCheckViolated, bad, expr)
+		}
+		if cerr != nil {
+			// 查不出来就说查不出来：让用户以为预检过了，等于把问题推迟到引擎报错。
+			plan.Notes = append(plan.Notes, "无法预检存量行（"+cerr.Error()+"），交由引擎校验")
+		}
+		fwd := e.dialect.AddCheckSQL(table, spec.Name, expr)
+		back := e.dialect.DropCheckSQL(table, spec.Name)
+		plan.Statements = []PlanStatement{{SQL: fwd, ExpectRows: -1}}
+		plan.Rollback = []PlanStatement{{SQL: back, ExpectRows: -1}}
+		plan.AffectedRows = 0
+		plan.Notes = append(plan.Notes, "加约束不改数据，但引擎会全表校验一遍：大表上可能锁住写入较久")
 
 	case DDLCreateIndex:
 		if !e.conn.Capabilities().Indexes {

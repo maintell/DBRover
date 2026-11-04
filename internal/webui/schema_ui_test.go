@@ -21,6 +21,8 @@ func TestColumnActionsOfferNullableAndDefault(t *testing.T) {
 		{"改默认值入口", "'set_default'"},
 		{"默认值只收字面量的说明", "只接受字面量"},
 		{"三件套复用", "async function planColumnChange("},
+		{"加检查约束入口", "async function planAddCheck("},
+		{"按能力位决定摆不摆", "capabilities.add_check"},
 	} {
 		if !strings.Contains(src, want.needle) {
 			t.Errorf("app.js 里缺少「%s」：%q", want.name, want.needle)

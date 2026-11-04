@@ -57,6 +57,8 @@ func (c *Connector) Capabilities() model.Capabilities {
 		// ALTER TABLE ... ALTER COLUMN 能直接改可空性与默认值。
 		AlterColumnNullability: true,
 		AlterColumnDefault:     true,
+		// CHECK 约束真会被强制（真机验证：插入违反约束的行被拒）。
+		AddCheck: true,
 		// indisvalid 查得到：无效索引（失败的 CREATE INDEX CONCURRENTLY 会留下）
 		// 照样出现在清单里，只看「有几个索引」发现不了。
 		IndexValidity:    true,

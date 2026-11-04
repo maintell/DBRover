@@ -76,6 +76,16 @@ type Dialect interface {
 	// SetDefaultSQL 渲染 SET / DROP DEFAULT。defaultText 为空表示 DROP DEFAULT。
 	SetDefaultSQL(table, column, defaultText string) ([]string, bool)
 
+	// AddCheckSQL 渲染加检查约束语句。expression 是已过白名单的表达式原文。
+	//
+	// 只在真正强制 CHECK 的引擎上调用：MySQL 5.7 会**解析但静默忽略** CHECK，
+	// 建完看起来成功、约束根本不生效，比报错更糟。
+	AddCheckSQL(table, name, expression string) string
+
+	// DropCheckSQL 渲染删检查约束语句。MySQL 用 DROP CHECK，PostgreSQL 用
+	// DROP CONSTRAINT —— 同一件事两个名字。
+	DropCheckSQL(table, name string) string
+
 	// CreateIndexSQL 渲染建索引语句。columns 只给列名，引用由方言负责。
 	CreateIndexSQL(table, name string, columns []string, unique bool) string
 
@@ -221,6 +231,19 @@ func (d impl) SetNullabilitySQL(table, column, typeName, defaultText string, nul
 		verb = "DROP NOT NULL"
 	}
 	return []string{"ALTER TABLE " + table + " ALTER COLUMN " + d.QuoteIdent(column) + " " + verb}, true
+}
+
+// AddCheckSQL 见接口注释。
+func (d impl) AddCheckSQL(table, name, expression string) string {
+	return "ALTER TABLE " + table + " ADD CONSTRAINT " + d.QuoteIdent(name) + " CHECK (" + expression + ")"
+}
+
+// DropCheckSQL 见接口注释。
+func (d impl) DropCheckSQL(table, name string) string {
+	if d.engine == model.EngineMySQL || d.engine == model.EngineMariaDB {
+		return "ALTER TABLE " + table + " DROP CHECK " + d.QuoteIdent(name)
+	}
+	return "ALTER TABLE " + table + " DROP CONSTRAINT " + d.QuoteIdent(name)
 }
 
 // SetDefaultSQL 见接口注释。
