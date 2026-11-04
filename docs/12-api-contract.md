@@ -68,6 +68,8 @@ Content-Type: application/x-ndjson
 
 当前代码只实现了下表中的这一部分。**未列出的端点仍未实现**，不要按本文其余章节假设它们可用。这张表与 `internal/api/server.go` 的路由表由 `TestSpecMatchesRoutes` 双向强制——任一侧多一条，测试就失败。
 
+**请求体字段也受门禁**：服务层结构（`service.DDLRequest` 等）里的每个 json 字段，api 的请求结构都必须能接住——`decode` 用 `DisallowUnknownFields`，接不住的字段会让请求以 `json: unknown field` 被拒。`TestRequestStructsCoverServiceFields` 逐对比较这两侧；刻意不对外暴露的字段要写进该用例的 allowlist 并说明理由（例如 `connection_id`：连接只由 URL 路径决定，否则客户端能把一次写操作指向另一条连接）。
+
 | 方法 | 路径 | 说明 |
 |---|---|---|
 | `GET` | `/api/v1/health` | 存活探测，**不需要 token** |
