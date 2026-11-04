@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/maintell/DBRover/internal/driver"
 	"github.com/maintell/DBRover/internal/model"
 )
 
@@ -351,4 +352,92 @@ func testIndexValidityHonest(t *testing.T, cfg Config) {
 			t.Errorf("没有 IndexValidity 能力，索引 %s 不该给出 Valid=%v", ix.Name, *ix.Valid)
 		}
 	}
+}
+
+// testRoutineListing 验证例程这条链路：列得出来、取得到定义、删掉之后立刻消失
+// （证明是实时查询而不是缓存），以及**定义能回放**。
+//
+// 回放这一条是关键：拼出来的语句如果回放不了，「查看定义」就只是一段好看的文字。
+// 顺带也验证了切分器认得 `BEGIN … END` 体——套件的钩子建的就是带体的过程。
+func testRoutineListing(t *testing.T, cfg Config) {
+	if cfg.Procedure == nil {
+		t.Skip("这个引擎没有提供建例程的钩子")
+	}
+	ctx := context.Background()
+	c, err := cfg.New(false)
+	if err != nil {
+		t.Fatalf("连接: %v", err)
+	}
+	defer func() { _ = c.Close() }()
+
+	if !c.Capabilities().Routines {
+		t.Fatal("能力位说不支持例程，却提供了建例程的钩子：两处必须一致")
+	}
+
+	s, err := c.Acquire(ctx)
+	if err != nil {
+		t.Fatalf("Acquire: %v", err)
+	}
+	defer func() { _ = s.Close() }()
+
+	name, expect, err := cfg.Procedure(ctx, s)
+	if err != nil {
+		t.Fatalf("建例程: %v", err)
+	}
+	if cfg.DropProcedure != nil {
+		// 最后兜底删掉（包括回放重建出来的那个）；defer 后注册先执行，
+		// 所以它跑在 s.Close 之前。
+		defer func() { _ = cfg.DropProcedure(context.Background(), s, name) }()
+	}
+
+	ref := routineRef(t, c, name, true)
+	ddl, err := c.Meta().DDL(ctx, ref)
+	if err != nil {
+		t.Fatalf("DDL(%s): %v", name, err)
+	}
+	if up := strings.ToUpper(ddl); !strings.Contains(up, "CREATE") || !strings.Contains(up, "PROCEDURE") {
+		t.Fatalf("例程定义不像 CREATE PROCEDURE：%q", ddl)
+	}
+	for _, frag := range expect {
+		if !strings.Contains(strings.ToUpper(ddl), strings.ToUpper(frag)) {
+			t.Fatalf("定义里没有 %q：%q", frag, ddl)
+		}
+	}
+
+	// 删掉后必须立刻消失。
+	if err := cfg.DropProcedure(ctx, s, name); err != nil {
+		t.Fatalf("删例程: %v", err)
+	}
+	routineRef(t, c, name, false)
+
+	// 用取到的定义重建：回放不了就说明定义不完整。
+	if _, err := s.Execute(ctx, ddl, nil); err != nil {
+		t.Fatalf("回放取到的定义失败: %v\n%s", err, ddl)
+	}
+	routineRef(t, c, name, true)
+}
+
+// routineRef 在例程列表里找（或确认找不到）某个名字。
+func routineRef(t *testing.T, c driver.Connector, name string, want bool) model.ObjectRef {
+	t.Helper()
+	objs, err := c.Meta().Objects(context.Background(), "", "", model.KindRoutine)
+	if err != nil {
+		t.Fatalf("Objects(KindRoutine): %v", err)
+	}
+	for _, o := range objs {
+		if o.Name != name {
+			continue
+		}
+		if !want {
+			t.Fatalf("例程 %s 已被删除，却还在列表里：%+v", name, objs)
+		}
+		if o.Kind != model.KindRoutine {
+			t.Errorf("Kind = %q，期望 routine", o.Kind)
+		}
+		return o
+	}
+	if want {
+		t.Fatalf("例程 %s 没出现在列表里：%+v", name, objs)
+	}
+	return model.ObjectRef{}
 }

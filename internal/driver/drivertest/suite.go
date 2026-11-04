@@ -50,6 +50,16 @@ type Config struct {
 	// 此时 TypeListing 跳过。
 	Type     func(ctx context.Context, s driver.Session, name string, values []string) error
 	DropType func(ctx context.Context, s driver.Session, name string) error
+
+	// Procedure 建一个例程（存储过程），返回名字与「定义里必须出现的片段」。
+	// nil 表示这个引擎没有例程（或测试环境不提供建的手段），此时 RoutineListing 跳过。
+	//
+	// 与 Sequence 同理：期望片段必须由「建它的那一方」给出，否则「取到的定义 vs
+	// 回放后的定义」是自证——少拼一个子句，两边都少，比较照样相等。
+	Procedure func(ctx context.Context, s driver.Session) (name string, expect []string, err error)
+
+	// DropProcedure 删除例程，供 RoutineListing 做「删掉再用取到的定义重建」的验证。
+	DropProcedure func(ctx context.Context, s driver.Session, name string) error
 }
 
 func (c Config) binaryType() string {
@@ -84,6 +94,8 @@ func Run(t *testing.T, cfg Config) {
 	t.Run("SequenceListing", func(t *testing.T) { testSequenceListing(t, cfg) })
 	// 用户类型（枚举 / 域）：能力位说支持就必须真列得出来。
 	t.Run("TypeListing", func(t *testing.T) { testTypeListing(t, cfg) })
+	// 例程：不但要列得出来、取得到定义，定义还得能回放。
+	t.Run("RoutineListing", func(t *testing.T) { testRoutineListing(t, cfg) })
 	// 检索契约写的是「名称 + 注释」，注释这一半必须有真库验证。
 	t.Run("SearchMatchesComments", func(t *testing.T) { testSearchComments(t, cfg) })
 	// 索引有效性：声明了就必须真给（PG 的 indisvalid）。

@@ -47,7 +47,9 @@ func (c *Connector) Capabilities() model.Capabilities {
 		Schemas:           true, // catalog + schema 两层真实存在
 		Views:             true,
 		MaterializedViews: true,
-		Routines:          false,
+		// 例程走 pg_proc（prokind 为 f/p），已接进 Objects；扩展自带的函数不算
+		// 「你的对象」，靠 pg_depend 的 deptype='e' 排除。
+		Routines: true,
 		// 触发器走 pg_trigger 单独查，已排除 tgisinternal（外键的内部触发器）。
 		Triggers: true,
 		// 序列就是 pg_class 里 relkind='S' 的对象，已接进 Objects。

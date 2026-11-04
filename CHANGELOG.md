@@ -135,6 +135,8 @@
 
 - **修掉一条「假绿」的真机用例**：`TestDDLCreateSequenceOnRealPG` 把引擎过滤写成 `if tgt.name != "pg" { t.Skip(...) }` 放在循环里，而 `rowsTargets` 把 MySQL 排在前面——`t.Skip` 会终止整条用例，于是**配了两台库时 PG 那段从来没跑过**，只在「只配 PG」时才真的执行。改成 `continue`，并补一次「两台库都在场」的运行记录：`TestDDLCreateSequenceOnRealPG/pg` 正常执行并通过。这类写法在别处可能还有，判据是「跳过整条用例」而不是「跳过这个引擎」。
 
+- **例程能列、能看定义**（`Objects(KindRoutine)`）：MySQL 走 `information_schema.ROUTINES`，定义取 `SHOW CREATE PROCEDURE` / `SHOW CREATE FUNCTION`（先查一次 `ROUTINE_TYPE`，两者结果列名不同）；PostgreSQL 走 `pg_proc` 的 `prokind IN ('f','p')`，定义取 `pg_get_functiondef`，并排除聚合、窗口函数与**扩展自带的成员**（`pg_depend` 的 `deptype='e'`）——不排除的话，装完扩展就会列出上百个别人的函数，把「我建的过程在哪」淹掉。SQLite 没有例程，能力位保持 `false`。**PG 的重载**要单独说：一个名字下可以有多条，列表按名字去重、定义只显示第一条并在开头注明共几条，把几条拼在一起会让人以为那是**一条**可回放的语句。对象树按能力位把它们摆成「有定义没数据」的对象，点击走 `?kind=routine`。`drivertest` 新增 `RoutineListing`（第 19 项）走完整链路：建一个带 `BEGIN … END` 体的过程 → 列出来 → 取定义 → 删掉后**立刻**消失（挡住缓存）→ 用取到的定义**回放**（回放不了就说明定义不完整）→ 又能列出来；MySQL 5.7 与 PG 17 真机通过。变异验证：把 PG 的提前返回改回只带 `triggers`，用例立即红——这已经是同一个提前返回分支第二次吞掉新结果（上次是用户类型）。
+
 ### 安全
 
 - **大整数不再静默丢精度**：`BIGINT` 超过 2^53 时，界面保持字符串、服务端按列类型还原；客户端若把它写成 JSON 数字，直接 `400 NUMBER_PRECISION_LOSS` 并提示改用字符串，而不是把丢了低位的值写进库。此前界面 `coerce()` 用 `Number()` 转换整数列，编辑 `9223372036854775807` 会变成 `...5808`。

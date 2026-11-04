@@ -46,7 +46,8 @@ func (c *Connector) Capabilities() model.Capabilities {
 		Schemas:           false, // database 即 schema，UI 只展示一层
 		Views:             true,
 		MaterializedViews: false,
-		Routines:          false, // 例程管理未实现
+		// 例程（过程 / 函数）走 information_schema.ROUTINES，已接进 Objects。
+		Routines: true,
 		// 触发器走 information_schema.TRIGGERS 单独查（见 metadata.go triggerRefs）。
 		Triggers:         true,
 		Sequences:        false,

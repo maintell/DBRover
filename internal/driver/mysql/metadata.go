@@ -162,9 +162,17 @@ func (c *Connector) Objects(ctx context.Context, catalog, schema string, kinds .
 			return nil, err
 		}
 	}
-	// 只点名了触发器：不必再查表。
+	// 例程（存储过程 / 函数）也不在 information_schema.TABLES 里。
+	var routines []model.ObjectRef
+	if wantsKind(kinds, model.KindRoutine) {
+		if routines, err = c.routineRefs(ctx, db); err != nil {
+			return nil, err
+		}
+	}
+	// 只点名了「不在 TABLES 里的对象」时不必再查表，但它们的结果必须带出去——
+	// 早先这里只返回 triggers，加例程之后会被这个提前返回静默丢掉。
 	if len(kinds) > 0 && !wantsTables(kinds) {
-		return triggers, nil
+		return append(triggers, routines...), nil
 	}
 
 	q := `SELECT TABLE_NAME, TABLE_TYPE, COALESCE(TABLE_COMMENT,''),
@@ -209,7 +217,7 @@ func (c *Connector) Objects(ctx context.Context, catalog, schema string, kinds .
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
-	return append(out, triggers...), nil
+	return append(append(out, triggers...), routines...), nil
 }
 
 // wantsKind 判断调用方是否点名了某类对象（kinds 为空表示「全都要」）。
@@ -497,6 +505,17 @@ func (c *Connector) DDL(ctx context.Context, ref model.ObjectRef) (string, error
 			"SQL Original Statement", ref.Name)
 	}
 
+	if ref.Kind == model.KindRoutine {
+		// 过程与函数要分别用 SHOW CREATE PROCEDURE / FUNCTION，结果列名也不同
+		// （Create Procedure / Create Function），所以先查一次类型。
+		typ, terr := c.routineType(ctx, db, ref.Name)
+		if terr != nil {
+			return "", terr
+		}
+		return c.showCreate(ctx, "SHOW CREATE "+typ+" "+quoteIdent(db)+"."+quoteIdent(ref.Name),
+			"Create "+typ, ref.Name)
+	}
+
 	q := "SHOW CREATE TABLE " + quoteIdent(db) + "." + quoteIdent(ref.Name)
 	var name, ddl string
 	if err := h.QueryRowContext(ctx, q).Scan(&name, &ddl); err != nil {
@@ -729,6 +748,60 @@ func (c *Connector) Blockers(ctx context.Context, threshold time.Duration) ([]mo
 		})
 	}
 	return out, nil
+}
+
+// routineRefs 列出本库的例程（存储过程与函数）。
+//
+// 它们不在 information_schema.TABLES 里，只有 ROUTINES 能查。两者同名不会冲突
+// （MySQL 的过程与函数共用命名空间，同一库下名字唯一），所以只取名字就够定位。
+func (c *Connector) routineRefs(ctx context.Context, db string) ([]model.ObjectRef, error) {
+	h, err := c.handle()
+	if err != nil {
+		return nil, err
+	}
+	rows, err := h.QueryContext(ctx,
+		`SELECT ROUTINE_NAME FROM information_schema.ROUTINES
+		  WHERE ROUTINE_SCHEMA = ? ORDER BY ROUTINE_NAME`, db)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	var out []model.ObjectRef
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			return nil, err
+		}
+		out = append(out, model.ObjectRef{
+			Kind: model.KindRoutine, Catalog: db, Schema: db, Name: name,
+		})
+	}
+	return out, rows.Err()
+}
+
+// routineType 返回例程是 PROCEDURE 还是 FUNCTION。
+//
+// SHOW CREATE 要按类型分开写，而对象树上只存了名字——不查这一步就只能猜，
+// 猜错会得到一句「对象不存在」，看起来像对象被删了。
+func (c *Connector) routineType(ctx context.Context, db, name string) (string, error) {
+	h, err := c.handle()
+	if err != nil {
+		return "", err
+	}
+	var typ string
+	err = h.QueryRowContext(ctx,
+		`SELECT ROUTINE_TYPE FROM information_schema.ROUTINES
+		  WHERE ROUTINE_SCHEMA = ? AND ROUTINE_NAME = ?`, db, name).Scan(&typ)
+	if err == sql.ErrNoRows {
+		return "", fmt.Errorf("mysql: 例程不存在: %s", name)
+	}
+	if err != nil {
+		return "", err
+	}
+	if typ != "PROCEDURE" && typ != "FUNCTION" {
+		return "", fmt.Errorf("mysql: 不认识的例程类型 %q（%s）", typ, name)
+	}
+	return typ, nil
 }
 
 // refCatalog 返回连接配置里的库名；空串表示不限库。

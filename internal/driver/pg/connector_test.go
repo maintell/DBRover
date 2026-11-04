@@ -164,6 +164,17 @@ func factory(t *testing.T, tgt testTarget) drivertest.Config {
 			_, err := s.Execute(ctx, "DROP TYPE "+name, nil)
 			return err
 		},
+		Procedure: func(ctx context.Context, s driver.Session) (string, []string, error) {
+			const name = "proc_probe"
+			_, err := s.Execute(ctx,
+				"CREATE PROCEDURE "+name+"() LANGUAGE plpgsql AS $dbv$ BEGIN NULL; END $dbv$", nil)
+			return name, []string{name, "BEGIN"}, err
+		},
+		DropProcedure: func(ctx context.Context, s driver.Session, name string) error {
+			// PostgreSQL 的 DROP PROCEDURE 必须带签名，不带就只是语法错。
+			_, err := s.Execute(ctx, "DROP PROCEDURE IF EXISTS "+name+"()", nil)
+			return err
+		},
 		Comment: func(ctx context.Context, s driver.Session, table, text string) error {
 			_, err := s.Execute(ctx, "COMMENT ON TABLE "+table+" IS '"+text+"'", nil)
 			return err

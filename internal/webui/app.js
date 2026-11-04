@@ -483,7 +483,7 @@ async function loadTables() {
         b.onclick = () => browseTable(t.name);
       } else {
         // 触发器与序列都没有数据行，但都有定义：点开看原文。
-        const label = { trigger: '触发器', sequence: '序列', type: '类型' }[kind] || kind;
+        const label = { trigger: '触发器', sequence: '序列', type: '类型', routine: '例程' }[kind] || kind;
         b.textContent = t.name + ' · ' + label;
         b.title = '查看' + label + '定义';
         b.onclick = () => showObjectDDL(kind, t.name);

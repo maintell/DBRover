@@ -136,6 +136,17 @@ func factory(t *testing.T, tgt testTarget) drivertest.Config {
 				"CREATE TRIGGER "+name+" BEFORE INSERT ON "+table+" FOR EACH ROW SET @dbrover_trg = 1", nil)
 			return name, err
 		},
+		Procedure: func(ctx context.Context, s driver.Session) (string, []string, error) {
+			const name = "proc_probe"
+			// 带 BEGIN … END 体：顺带验证切分器不会把体内的分号切开。
+			_, err := s.Execute(ctx,
+				"CREATE PROCEDURE "+name+"() BEGIN SELECT 1; END", nil)
+			return name, []string{name, "SELECT 1"}, err
+		},
+		DropProcedure: func(ctx context.Context, s driver.Session, name string) error {
+			_, err := s.Execute(ctx, "DROP PROCEDURE IF EXISTS "+name, nil)
+			return err
+		},
 		Comment: func(ctx context.Context, s driver.Session, table, text string) error {
 			_, err := s.Execute(ctx, "ALTER TABLE "+table+" COMMENT = '"+text+"'", nil)
 			return err

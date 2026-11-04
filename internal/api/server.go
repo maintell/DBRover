@@ -591,6 +591,10 @@ func (s *Server) handleTables(w http.ResponseWriter, r *http.Request) {
 	if caps.UserTypes {
 		kinds = append(kinds, model.KindType)
 	}
+	// 例程（存储过程 / 函数）同理。
+	if caps.Routines {
+		kinds = append(kinds, model.KindRoutine)
+	}
 	objs, err := drv.Meta().Objects(r.Context(), "", "", kinds...)
 	if err != nil {
 		writeError(w, http.StatusBadGateway, "DB_METADATA_FAILED", "connection", err.Error(), "", true)
@@ -910,14 +914,17 @@ func (s *Server) handleTableSchema(w http.ResponseWriter, r *http.Request) {
 		kind = model.KindSequence
 	case "type":
 		kind = model.KindType
+	case "routine":
+		kind = model.KindRoutine
 	default:
 		writeError(w, http.StatusBadRequest, "REQUEST_INVALID", "internal",
-			"kind 只支持 table / view / trigger / sequence / type", "", false)
+			"kind 只支持 table / view / trigger / sequence / type / routine", "", false)
 		return
 	}
 	ref := model.ObjectRef{Kind: kind, Name: r.PathValue("name"), Schema: r.URL.Query().Get("schema")}
 
-	if kind == model.KindTrigger || kind == model.KindSequence || kind == model.KindType {
+	if kind == model.KindTrigger || kind == model.KindSequence || kind == model.KindType ||
+		kind == model.KindRoutine {
 		ddlText, derr := e.exec.TableDDL(r.Context(), ref)
 		if errors.Is(derr, driver.ErrObjectNotFound) {
 			writeError(w, http.StatusNotFound, "OBJECT_NOT_FOUND", "resource",

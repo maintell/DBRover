@@ -169,6 +169,13 @@ func (c *Connector) Objects(ctx context.Context, catalog, schema string, kinds .
 			return nil, err
 		}
 	}
+	// 例程在 pg_proc，同样不在 pg_class。
+	var routines []model.ObjectRef
+	if wantsKind(kinds, model.KindRoutine) {
+		if routines, err = c.routineRefs(ctx, schema); err != nil {
+			return nil, err
+		}
+	}
 
 	q := `SELECT c.relname, c.relkind
 	        FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
@@ -189,11 +196,11 @@ func (c *Connector) Objects(ctx context.Context, catalog, schema string, kinds .
 				relkinds = append(relkinds, "S")
 			}
 		}
-		// 只点名了「不在 pg_class 里的对象」（触发器 / 用户类型）时没有 relkind 可查，
-		// 但这两类的结果必须照样带出去——早先这里只返回 triggers，加类型时就会
-		// 静默丢掉它们。
+		// 只点名了「不在 pg_class 里的对象」（触发器 / 用户类型 / 例程）时没有
+		// relkind 可查，但这几类的结果必须照样带出去——早先这里只返回 triggers，
+		// 加类型时就会静默丢掉它们，加例程时同样会。
 		if len(relkinds) == 0 {
-			return append(triggers, types...), nil
+			return append(append(triggers, types...), routines...), nil
 		}
 	}
 
@@ -223,7 +230,7 @@ func (c *Connector) Objects(ctx context.Context, catalog, schema string, kinds .
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
-	return append(append(out, triggers...), types...), nil
+	return append(append(append(out, triggers...), types...), routines...), nil
 }
 
 // wantsKind 判断调用方是否点名了某类对象（kinds 为空表示「全都要」）。
@@ -540,6 +547,11 @@ func (c *Connector) DDL(ctx context.Context, ref model.ObjectRef) (string, error
 	// 用户类型：枚举从 pg_enum 拼回 CREATE TYPE；域连约束一起还原。
 	if ref.Kind == model.KindType {
 		return c.userTypeDDL(ctx, h, schema, ref.Name)
+	}
+
+	// 例程：pg_get_functiondef 给出完整 CREATE（函数与过程都认）。
+	if ref.Kind == model.KindRoutine {
+		return c.routineDDL(ctx, h, schema, ref.Name)
 	}
 	// 触发器：pg_get_triggerdef 给出 CREATE TRIGGER 的原文（不含尾分号）。
 	if ref.Kind == model.KindTrigger {
@@ -950,6 +962,79 @@ func (c *Connector) userTypeDDL(ctx context.Context, h *sql.DB, schema, name str
 	}
 	b.WriteString(";")
 	return b.String(), nil
+}
+
+// routineRefs 列出用户 schema 下的例程（普通函数与存储过程）。
+//
+// 排除三类：聚合（prokind='a'）、窗口函数（'w'）、以及**扩展自带的成员**
+// （pg_depend 里 deptype='e'）。最后一条最要紧：装过 plpgsql 之外的扩展之后，
+// 不排除就会列出上百个别人的函数，把「我自己建的过程在哪」淹掉。
+//
+// 同一名字的多个重载在这里合成一行（对象树只认名字）；定义视图会说明这一点。
+func (c *Connector) routineRefs(ctx context.Context, schema string) ([]model.ObjectRef, error) {
+	h, err := c.handle()
+	if err != nil {
+		return nil, err
+	}
+	rows, err := h.QueryContext(ctx, `
+		SELECT DISTINCT p.proname
+		  FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
+		 WHERE n.nspname = $1 AND p.prokind IN ('f','p')
+		   AND NOT EXISTS (
+		     SELECT 1 FROM pg_depend d WHERE d.objid = p.oid AND d.deptype = 'e'
+		   )
+		 ORDER BY p.proname`, schema)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	var out []model.ObjectRef
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			return nil, err
+		}
+		out = append(out, model.ObjectRef{
+			Kind: model.KindRoutine, Catalog: c.config().Catalog, Schema: schema, Name: name,
+		})
+	}
+	return out, rows.Err()
+}
+
+// routineDDL 取例程定义。
+//
+// PostgreSQL 一个名字下可以有多个重载，pg_get_functiondef 要按 oid 取。有重载时
+// 只给第一个并在开头说明——把几条拼起来会让人以为那是**一条**可回放的语句。
+func (c *Connector) routineDDL(ctx context.Context, h *sql.DB, schema, name string) (string, error) {
+	rows, err := h.QueryContext(ctx,
+		`SELECT pg_get_functiondef(p.oid)
+		   FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
+		  WHERE n.nspname = $1 AND p.proname = $2 AND p.prokind IN ('f','p')
+		  ORDER BY p.oid`, schema, name)
+	if err != nil {
+		return "", err
+	}
+	defer func() { _ = rows.Close() }()
+	var defs []string
+	for rows.Next() {
+		var def string
+		if err := rows.Scan(&def); err != nil {
+			return "", err
+		}
+		defs = append(defs, def)
+	}
+	if err := rows.Err(); err != nil {
+		return "", err
+	}
+	switch len(defs) {
+	case 0:
+		return "", fmt.Errorf("pg: 例程不存在: %s", name)
+	case 1:
+		return defs[0], nil
+	default:
+		return fmt.Sprintf("-- %s 有 %d 个重载，这里只显示第一个；其余请在 SQL 工作区按完整签名查看\n%s",
+			name, len(defs), defs[0]), nil
+	}
 }
 
 // enumLabels 按声明顺序取枚举标签，并转义成 SQL 字面量。

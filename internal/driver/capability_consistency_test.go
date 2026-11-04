@@ -80,13 +80,12 @@ func TestSequenceCapabilityIsHonest(t *testing.T) {
 
 // TestUserTypesCapabilityIsHonest 是「别让能力位先说话」的绊线。
 //
-// UserTypes 目前没有任何引擎真的列得出来：PG 的 pg_type 还没接进
-// Objects(KindType)，MySQL 与 SQLite 也没有独立的用户类型概念。能力位说 true
-// 而对象树里永远没有类型节点，会让「为什么看不到我的枚举」变成一个查不出结论
-// 的问题。
+// 这张表被钉住过一次：PG 一直声明 UserTypes=true，而 Objects(KindType) 里根本
+// 没有分支——能力位说 true、对象树里永远没有类型节点，会让「为什么看不到我的
+// 枚举」变成一个查不出结论的问题。
 //
-// 要把它翻成 true，顺序是：先实现 Objects(KindType) → 加一条 drivertest 用例
-// （建一个真类型再列出来）→ 再回来改这张表。
+// 翻 true 的顺序是固定的：先实现 Objects(KindType) → 加一条 drivertest 用例
+// （建一个真类型再列出来）→ 再回来改这张表。PG 走完了这三步。
 func TestUserTypesCapabilityIsHonest(t *testing.T) {
 	want := map[model.Engine]bool{
 		model.EngineSQLite:   false, // 没有用户类型
@@ -100,6 +99,29 @@ func TestUserTypesCapabilityIsHonest(t *testing.T) {
 		}
 		if got := c.Capabilities().UserTypes; got != exp {
 			t.Errorf("%s: Capabilities.UserTypes = %v，期望 %v（先实现 Objects(KindType) 再翻）", c.Engine(), got, exp)
+		}
+	}
+}
+
+// TestRoutineCapabilityIsHonest 钉住「例程列表」这句话的真值。
+//
+// 这条是同一个坑的第三次复用：能够列出来才算 true。MySQL 走
+// information_schema.ROUTINES、PG 走 pg_proc（排除聚合、窗口函数与扩展成员），
+// 两者都由 drivertest 的 RoutineListing 用真过程验证——建一个 → 列出来 →
+// 取定义 → 删掉后消失 → 用定义回放。SQLite 没有例程，保持 false。
+func TestRoutineCapabilityIsHonest(t *testing.T) {
+	want := map[model.Engine]bool{
+		model.EngineSQLite:   false, // 没有存储过程 / 函数
+		model.EngineMySQL:    true,  // information_schema.ROUTINES
+		model.EnginePostgres: true,  // pg_proc 的 prokind f/p
+	}
+	for _, c := range []driver.Connector{sqlite.New(), mysql.New(), pg.New()} {
+		exp, ok := want[c.Engine()]
+		if !ok {
+			t.Fatalf("新增引擎 %s 没写进这张表：例程能力要有明确预期", c.Engine())
+		}
+		if got := c.Capabilities().Routines; got != exp {
+			t.Errorf("%s: Capabilities.Routines = %v，期望 %v（先实现 Objects(KindRoutine) 再翻）", c.Engine(), got, exp)
 		}
 	}
 }
