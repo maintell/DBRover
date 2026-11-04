@@ -45,6 +45,11 @@ type Config struct {
 	// Comment 给表写一段注释。nil 表示这个引擎没有注释（SQLite），此时
 	// SearchMatchesComments 跳过。
 	Comment func(ctx context.Context, s driver.Session, table, text string) error
+
+	// Type 建一个用户类型（枚举），DropType 删它。nil 表示这个引擎没有用户类型，
+	// 此时 TypeListing 跳过。
+	Type     func(ctx context.Context, s driver.Session, name string, values []string) error
+	DropType func(ctx context.Context, s driver.Session, name string) error
 }
 
 func (c Config) binaryType() string {
@@ -77,6 +82,8 @@ func Run(t *testing.T, cfg Config) {
 	// 对象类型列表：能力位说支持，就必须真的列得出来（docs/04 §3.2）。
 	t.Run("TriggerListing", func(t *testing.T) { testTriggerListing(t, cfg) })
 	t.Run("SequenceListing", func(t *testing.T) { testSequenceListing(t, cfg) })
+	// 用户类型（枚举 / 域）：能力位说支持就必须真列得出来。
+	t.Run("TypeListing", func(t *testing.T) { testTypeListing(t, cfg) })
 	// 检索契约写的是「名称 + 注释」，注释这一半必须有真库验证。
 	t.Run("SearchMatchesComments", func(t *testing.T) { testSearchComments(t, cfg) })
 	// 索引有效性：声明了就必须真给（PG 的 indisvalid）。
@@ -570,5 +577,42 @@ func testDDLRoundTrip(t *testing.T, cfg Config) {
 		if !origIdx[strings.Join(ix.Columns, ",")] {
 			t.Errorf("回放后出现原表没有的索引: %s(%v)", ix.Name, ix.Columns)
 		}
+	}
+}
+
+// testTypeListing 用引擎自己的钩子建一个真类型，再断言它能被列出来。
+//
+// 为什么必须真建：EnumPG 声明 UserTypes 之后，对象树里能不能看到类型全靠
+// Objects(KindType) 这一条查询。只断言「不报错」在实现完全没写时也能过。
+func testTypeListing(t *testing.T, cfg Config) {
+	if cfg.Type == nil {
+		t.Skip("这个引擎没有用户类型（或没有建类型的手段）")
+	}
+	ctx := context.Background()
+	c := open(t, cfg, false)
+	defer func() { _ = c.Close() }()
+	s := session(t, c)
+	defer func() { _ = s.Close() }()
+
+	const name = "dbv_type_probe"
+	if err := cfg.Type(ctx, s, name, []string{"alpha", "beta"}); err != nil {
+		t.Fatalf("建类型: %v", err)
+	}
+	if cfg.DropType != nil {
+		defer func() { _ = cfg.DropType(context.Background(), s, name) }()
+	}
+
+	objs, err := c.Meta().Objects(ctx, "", "", model.KindType)
+	if err != nil {
+		t.Fatalf("列类型: %v", err)
+	}
+	found := false
+	for _, o := range objs {
+		if o.Kind == model.KindType && o.Name == name {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("刚建的类型没被列出来：%+v", objs)
 	}
 }

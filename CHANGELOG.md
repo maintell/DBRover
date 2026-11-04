@@ -129,6 +129,7 @@
 - **界面能力位双向冒烟**（补验）：同一份前端代码分别在 SQLite 与 PostgreSQL 连接上打开——SQLite 的结构页出现「触发器」区、没有「检查约束」，顶栏没有「新建序列」，新建视图对话框没有「物化视图」勾选；PG 反过来：有「检查约束」、没有「触发器」区，顶栏有「新建序列」，新建视图里「物化视图」勾选带「要 REFRESH 才更新」的说明。四块新 UI 此前只有源码门禁与后端真机用例，这条把「界面到底摆没摆、摆错了没」补上了。
 - **切分器认得存储过程体**（`docs/05` 验收 3 补上一半）：`CREATE PROCEDURE / FUNCTION / TRIGGER … BEGIN … END` 体内的分号不再当分隔符。这条以前只对触发器成立，而 `DELIMITER` 是 mysql 客户端语法、驱动不认——所以通过我们发一条存储过程必然被切成三截、第一截就语法错。现在认 `CREATE [OR REPLACE] [TEMP|TEMPORARY] TRIGGER|PROCEDURE|FUNCTION|EVENT`，并把 `BEGIN` 改成**累加计数**：存储过程里嵌套 `BEGIN … END` 很常见，只记「进没进块」会让内层 `END` 提前收尾。**真机**：MySQL 5.7 上三段体的存储过程算一条语句、`CALL` 后两行数据都在；PG 17 上 dollar-quoted 函数算一条、`rt_f(21)` 返回 42。**踩到一个测试写法坑**：把引擎过滤写在 `rowsTargets` 循环外层会让整条用例被跳过（连该跑的那条也不跑），必须写进子用例里。
 - **用户类型的能力位是假的**（修）：PostgreSQL 一直声明 `UserTypes: true`，但 `Objects(KindType)` 根本没有这个分支——`pg_type` 一次都没查过。能力位说 true 而对象树里永远没有类型节点，会让「为什么看不到我的枚举」变成一个查不出结论的问题（这正是 `docs/04` 自己写的「声明 true 却返回空列表，比不支持更误导」）。现在 PG 改成 `false` 并写明要翻回去的顺序（先实现列表、再加 `drivertest` 用例），新增 `TestUserTypesCapabilityIsHonest` 按引擎列出预期值，翻错即红。**顺带**：这个 bit 目前没有任何消费方（界面与服务都没读它），所以这次改动不影响任何可见行为——但下一个人要接类型设计器时，不会再被一个假 true 带偏。
+- **用户类型真的能列了**（把上一条的「先声明 false」补完）：PostgreSQL 的 `Objects(KindType)` 现在查 `pg_type` 的 `typtype IN ('e','d')`（枚举与域），按 schema 过滤而不是猜名字前缀；`drivertest` 新增 `TypeListing`——用各驱动自己的钩子建一个真枚举再列出来（只断言「不报错」在实现没写时也能过）。能力位随之翻回 `true`，`TestUserTypesCapabilityIsHonest` 的预期值同步更新。**顺手修掉一个会把新结果静默丢掉的分支**：`Objects` 在「只点名了不在 pg_class 里的对象」时会提前返回，原来只带 `triggers`，加了类型之后它会被这个早退吞掉——第一次跑 `TypeListing` 得到空列表，就是这个原因。真机：PG 17 上建 `dbv_type_probe` 枚举 → 列出来 → 删掉，套件 18 项全过。
 
 ### 安全
 

@@ -151,6 +151,19 @@ func factory(t *testing.T, tgt testTarget) drivertest.Config {
 			_, err := s.Execute(ctx, "DROP SEQUENCE "+name, nil)
 			return err
 		},
+		Type: func(ctx context.Context, s driver.Session, name string, values []string) error {
+			quoted := make([]string, len(values))
+			for i, v := range values {
+				quoted[i] = "'" + v + "'"
+			}
+			_, err := s.Execute(ctx,
+				"CREATE TYPE "+name+" AS ENUM ("+strings.Join(quoted, ", ")+")", nil)
+			return err
+		},
+		DropType: func(ctx context.Context, s driver.Session, name string) error {
+			_, err := s.Execute(ctx, "DROP TYPE "+name, nil)
+			return err
+		},
 		Comment: func(ctx context.Context, s driver.Session, table, text string) error {
 			_, err := s.Execute(ctx, "COMMENT ON TABLE "+table+" IS '"+text+"'", nil)
 			return err

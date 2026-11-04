@@ -91,7 +91,7 @@ func TestUserTypesCapabilityIsHonest(t *testing.T) {
 	want := map[model.Engine]bool{
 		model.EngineSQLite:   false, // 没有用户类型
 		model.EngineMySQL:    false, // ENUM 是列类型，不是独立对象
-		model.EnginePostgres: false, // pg_type 能查，但还没接进 Objects
+		model.EnginePostgres: true,  // pg_type 的枚举与域，已接进 Objects
 	}
 	for _, c := range []driver.Connector{sqlite.New(), mysql.New(), pg.New()} {
 		exp, ok := want[c.Engine()]

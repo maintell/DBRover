@@ -162,6 +162,13 @@ func (c *Connector) Objects(ctx context.Context, catalog, schema string, kinds .
 			return nil, err
 		}
 	}
+	// 用户类型也不在 pg_class：枚举与域在 pg_type。单独查一次，理由同触发器。
+	var types []model.ObjectRef
+	if wantsKind(kinds, model.KindType) {
+		if types, err = c.typeRefs(ctx, schema); err != nil {
+			return nil, err
+		}
+	}
 
 	q := `SELECT c.relname, c.relkind
 	        FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
@@ -182,8 +189,11 @@ func (c *Connector) Objects(ctx context.Context, catalog, schema string, kinds .
 				relkinds = append(relkinds, "S")
 			}
 		}
+		// 只点名了「不在 pg_class 里的对象」（触发器 / 用户类型）时没有 relkind 可查，
+		// 但这两类的结果必须照样带出去——早先这里只返回 triggers，加类型时就会
+		// 静默丢掉它们。
 		if len(relkinds) == 0 {
-			return triggers, nil
+			return append(triggers, types...), nil
 		}
 	}
 
@@ -213,7 +223,7 @@ func (c *Connector) Objects(ctx context.Context, catalog, schema string, kinds .
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
-	return append(out, triggers...), nil
+	return append(append(out, triggers...), types...), nil
 }
 
 // wantsKind 判断调用方是否点名了某类对象（kinds 为空表示「全都要」）。
@@ -841,6 +851,38 @@ func (c *Connector) Blockers(ctx context.Context, threshold time.Duration) ([]mo
 		}
 		out = append(out, model.Blocker{
 			Kind: kind, Session: fmt.Sprintf("pid %d", pid), Detail: detail, Seconds: secs2,
+		})
+	}
+	return out, rows.Err()
+}
+
+// typeRefs 列出用户类型：枚举（typtype='e'）与域（'d'）。
+//
+// 排除系统类型靠 schema 过滤（只查用户 schema），不靠名字前缀猜；另外跳过
+// 数组类型（typarray 那条记录本身也是 pg_type 里的行，名字以 _ 开头，
+// typtype 是 'b'，本来就不会命中 'e'/'d'，这里不再额外处理）。
+func (c *Connector) typeRefs(ctx context.Context, schema string) ([]model.ObjectRef, error) {
+	h, err := c.handle()
+	if err != nil {
+		return nil, err
+	}
+	rows, err := h.QueryContext(ctx, `
+		SELECT t.typname
+		  FROM pg_type t JOIN pg_namespace n ON n.oid = t.typnamespace
+		 WHERE n.nspname = $1 AND t.typtype IN ('e','d')
+		 ORDER BY t.typname`, schema)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	var out []model.ObjectRef
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			return nil, err
+		}
+		out = append(out, model.ObjectRef{
+			Kind: model.KindType, Catalog: c.config().Catalog, Schema: schema, Name: name,
 		})
 	}
 	return out, rows.Err()
