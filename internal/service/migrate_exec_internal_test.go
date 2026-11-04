@@ -9,6 +9,8 @@ import (
 	"testing"
 
 	"github.com/maintell/DBRover/internal/driver"
+	"github.com/maintell/DBRover/internal/driver/mysql"
+	"github.com/maintell/DBRover/internal/driver/pg"
 	"github.com/maintell/DBRover/internal/driver/sqlite"
 	"github.com/maintell/DBRover/internal/model"
 )
@@ -194,4 +196,107 @@ func TestMigrateResumeNeedsCheckpoint(t *testing.T) {
 	if !errors.Is(err, ErrMigrateNoCheckpoint) {
 		t.Fatalf("缺检查点应返回 ErrMigrateNoCheckpoint，实际 %v", err)
 	}
+}
+
+// TestMigrateCrossEngine 是真机跨引擎验证：MySQL 5.7 → PostgreSQL 17。
+//
+// 类型路径是「跨引擎 → 一律 review → 人工给 decisions」，这里显式给出目标类型，
+// 然后走完整的建表 + 搬运 + 校验。它验证的是整条链路，不是某一个函数。
+func TestMigrateCrossEngine(t *testing.T) {
+	myDSN := os.Getenv("DBRover_TEST_MYSQL")
+	pgDSN := os.Getenv("DBRover_TEST_PG")
+	if myDSN == "" || pgDSN == "" {
+		t.Skip("需要 DBRover_TEST_MYSQL 与 DBRover_TEST_PG")
+	}
+	ctx := context.Background()
+	myConn := openReal(t, "mysql", myDSN)
+	pgConn := openReal(t, "pg", pgDSN)
+	defer func() { _ = myConn.Close() }()
+	defer func() { _ = pgConn.Close() }()
+	myEx := NewExecutor(myConn, model.EnvTest, model.AccessReadWrite, nil)
+	pgEx := NewExecutor(pgConn, model.EnvTest, model.AccessReadWrite, nil)
+	defer myEx.Close()
+	defer pgEx.Close()
+
+	// 源表：MySQL 上建好并灌数据。
+	for _, q := range []string{
+		"DROP TABLE IF EXISTS mig_src",
+		"CREATE TABLE mig_src (id INT PRIMARY KEY, v VARCHAR(32))",
+		"INSERT INTO mig_src (id, v) VALUES (1,'a'), (2,'b'), (3,'it''s ok')",
+	} {
+		if out, err := myEx.Execute(ctx, Request{SQL: q, Approval: true, Actor: "human:test"}); err != nil || out.Err != nil {
+			t.Fatalf("准备 MySQL（%s）: err=%v out=%+v", q, err, out)
+		}
+	}
+	t.Cleanup(func() {
+		_, _ = myEx.Execute(context.Background(), Request{SQL: "DROP TABLE IF EXISTS mig_src", Approval: true})
+	})
+
+	// 目标表：按跨引擎预检 + 人工决策生成 DDL。
+	plan, ddlText, err := PlanMigrationBetween(ctx, myEx, pgEx, "mig_src", "mig_src", map[string]string{
+		"id": "integer", "v": "varchar(32)",
+	})
+	if err != nil {
+		t.Fatalf("预检: %v（plan=%+v）", err, plan)
+	}
+	if !strings.Contains(ddlText, "PRIMARY KEY") {
+		t.Fatalf("跨引擎 DDL 应带主键：\n%s", ddlText)
+	}
+	for _, q := range []string{"DROP TABLE IF EXISTS mig_src", ddlText} {
+		if out, err := pgEx.Execute(ctx, Request{SQL: q, Approval: true, Actor: "human:test"}); err != nil || out.Err != nil {
+			t.Fatalf("建目标表（%s）: err=%v out=%+v", q, err, out)
+		}
+	}
+	t.Cleanup(func() {
+		_, _ = pgEx.Execute(context.Background(), Request{SQL: "DROP TABLE IF EXISTS mig_src", Approval: true})
+	})
+
+	rep, err := MigrateTable(ctx, myEx, pgEx, "mig_src", "mig_src", MigrateExecOptions{BatchSize: 2})
+	if err != nil {
+		t.Fatalf("跨引擎搬运: %v", err)
+	}
+	if rep.Rows != 3 || !rep.Verified {
+		t.Fatalf("搬运结果不符：%+v", rep)
+	}
+	if rep.SourceDigest != rep.TargetDigest {
+		t.Fatalf("跨引擎摘要不一致：%s vs %s", rep.SourceDigest, rep.TargetDigest)
+	}
+}
+
+// openReal 按 DSN 打开一个真实引擎的连接器（user:pass@host:port）。
+func openReal(t *testing.T, engine, dsn string) driver.Connector {
+	t.Helper()
+	at := strings.LastIndex(dsn, "@")
+	if at <= 0 {
+		t.Fatalf("DSN 格式应为 user:pass@host:port，实际 %q", dsn)
+	}
+	cred, addr := dsn[:at], dsn[at+1:]
+	parts := strings.SplitN(cred, ":", 2)
+	if len(parts) != 2 {
+		t.Fatalf("凭据部分非法: %q", cred)
+	}
+	colon := strings.LastIndex(addr, ":")
+	if colon <= 0 {
+		t.Fatalf("地址部分缺少端口: %q", addr)
+	}
+	port := 0
+	for _, ch := range addr[colon+1:] {
+		port = port*10 + int(ch-'0')
+	}
+	var c driver.Connector
+	switch engine {
+	case "mysql":
+		c = mysql.New()
+	case "pg":
+		c = pg.New()
+	default:
+		t.Fatalf("未知引擎 %q", engine)
+	}
+	if err := c.Open(context.Background(), driver.ConnectConfig{
+		Host: addr[:colon], Port: port, User: parts[0], Password: parts[1],
+		Catalog: "dbrover_test", AccessMode: model.AccessReadWrite, Environment: model.EnvTest,
+	}); err != nil {
+		t.Fatalf("打开 %s: %v", engine, err)
+	}
+	return c
 }
