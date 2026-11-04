@@ -1,6 +1,6 @@
 # ADR-0011 · 迁移数据搬运：主键键集续跑、全量哈希校验、流式批插
 
-- 状态：**已采纳（实现待做）**
+- 状态：**已采纳（部分实现）**：行规范化编码与整表摘要已落地（`internal/service/migrate_hash.go`，`TestCanonicalValue` / `TestTableDigest`）；键集搬运与检查点未做
 - 日期：2026-11-05
 - 影响面：`internal/service/migrate_exec.go`（新增）、`docs/08 §4`
 
