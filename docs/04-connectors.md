@@ -171,7 +171,7 @@ if m, ok := conn.(driver.MonitorProvider); ok && conn.Capabilities().SessionMgmt
 | 例程源码 | ● | ● | ● | ●（可能被 wrap） | ◐ | ○ | ◐ JS | ○ |
 | 对象 DDL 还原 | `pg_get_*def` | `SHOW CREATE` | 自拼（无原生） | `DBMS_METADATA` | 自拼 | 自拼 | 自拼 | 自拼 |
 
-> **对象类型覆盖**：视图与触发器三个引擎都支持（触发器分别走 `sqlite_master` / `information_schema.TRIGGERS` / `pg_trigger`，PG 需排除 `tgisinternal`，否则每个外键都会冒出两条内部触发器）；序列只有 PostgreSQL 做了（`pg_class.relkind='S'`），MySQL 与例程都还没接。**界面**：`/tables` 按能力声明把这些对象一起返回。触发器与序列在对象树里都可点开看定义（`?kind=trigger` / `?kind=sequence`）：触发器用 `SHOW CREATE TRIGGER` / `pg_get_triggerdef`，序列因为 PostgreSQL 没有「取定义」的内置函数，由 `pg_sequences` 拼回 `CREATE SEQUENCE`（起始值、步长、上下界、缓存、循环都要带，否则重建出来的是另一个序列）。两者都不会被当成「能查数据的表」——对它们执行 `SELECT *` 只会得到一条必然失败的语句。没做的类型能力位一律为 `false`——声明 `true` 却返回空列表，会被读成「这个库没有该对象」，比「不支持」更误导。
+> **对象类型覆盖**：视图与触发器三个引擎都支持（触发器分别走 `sqlite_master` / `information_schema.TRIGGERS` / `pg_trigger`，PG 需排除 `tgisinternal`，否则每个外键都会冒出两条内部触发器）；序列只有 PostgreSQL 做了（`pg_class.relkind='S'`），MySQL 与例程都还没接。**界面**：`/tables` 按能力声明把这些对象一起返回。触发器与序列在对象树里都可点开看定义（`?kind=trigger` / `?kind=sequence`）：触发器用 `SHOW CREATE TRIGGER` / `pg_get_triggerdef`，序列因为 PostgreSQL 没有「取定义」的内置函数，由 `pg_sequences` 拼回 `CREATE SEQUENCE`（起始值、步长、上下界、缓存、循环都要带，否则重建出来的是另一个序列）。两者都不会被当成「能查数据的表」——对它们执行 `SELECT *` 只会得到一条必然失败的语句。没做的类型能力位一律为 `false`——声明 `true` 却返回空列表，会被读成「这个库没有该对象」，比「不支持」更误导。**用户类型**（枚举 / 域）就属于这一类：PostgreSQL 的 `pg_type` 查得到，但还没接进 `Objects(KindType)`，所以 PG 的 `UserTypes` 已改成 `false`，由 `TestUserTypesCapabilityIsHonest` 钉住；要翻回 `true`，顺序是先实现 `Objects(KindType)`、再加一条 `drivertest` 用例（建一个真类型再列出来）。
 >
 > **MSSQL 与 SQLite 没有「一键取 DDL」**，必须由驱动自己拼装。这是两个容易低估工作量的实现点，需专门写测试（拼出的 DDL 能被回放到新库并产生等价结构）。
 

@@ -77,3 +77,29 @@ func TestSequenceCapabilityIsHonest(t *testing.T) {
 		}
 	}
 }
+
+// TestUserTypesCapabilityIsHonest 是「别让能力位先说话」的绊线。
+//
+// UserTypes 目前没有任何引擎真的列得出来：PG 的 pg_type 还没接进
+// Objects(KindType)，MySQL 与 SQLite 也没有独立的用户类型概念。能力位说 true
+// 而对象树里永远没有类型节点，会让「为什么看不到我的枚举」变成一个查不出结论
+// 的问题。
+//
+// 要把它翻成 true，顺序是：先实现 Objects(KindType) → 加一条 drivertest 用例
+// （建一个真类型再列出来）→ 再回来改这张表。
+func TestUserTypesCapabilityIsHonest(t *testing.T) {
+	want := map[model.Engine]bool{
+		model.EngineSQLite:   false, // 没有用户类型
+		model.EngineMySQL:    false, // ENUM 是列类型，不是独立对象
+		model.EnginePostgres: false, // pg_type 能查，但还没接进 Objects
+	}
+	for _, c := range []driver.Connector{sqlite.New(), mysql.New(), pg.New()} {
+		exp, ok := want[c.Engine()]
+		if !ok {
+			t.Fatalf("新增引擎 %s 没写进这张表：用户类型能力要有明确预期", c.Engine())
+		}
+		if got := c.Capabilities().UserTypes; got != exp {
+			t.Errorf("%s: Capabilities.UserTypes = %v，期望 %v（先实现 Objects(KindType) 再翻）", c.Engine(), got, exp)
+		}
+	}
+}

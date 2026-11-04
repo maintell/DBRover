@@ -52,7 +52,10 @@ func (c *Connector) Capabilities() model.Capabilities {
 		Triggers: true,
 		// 序列就是 pg_class 里 relkind='S' 的对象，已接进 Objects。
 		Sequences: true,
-		UserTypes: true,
+		// 用户类型（枚举 / 域）**没接进 Objects**：pg_type 一次没查过。
+		// 能力位说 true 而列不出来，会让「对象树里为什么没有类型」变成一个查不出
+		// 结论的问题——先按实际实现声明 false，做类型设计器时一起接。
+		UserTypes: false,
 		Indexes:   true,
 		// ALTER TABLE ... ALTER COLUMN 能直接改可空性与默认值。
 		AlterColumnNullability: true,
