@@ -1,9 +1,11 @@
 package service
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 
+	"github.com/maintell/DBRover/internal/driver/dialect"
 	"github.com/maintell/DBRover/internal/model"
 )
 
@@ -207,4 +209,60 @@ func firstNonEmpty(vals ...string) string {
 		}
 	}
 	return ""
+}
+
+// ErrMigrateNeedsDecision 表示还有列没拿到人工决定的目标类型。
+var ErrMigrateNeedsDecision = errors.New("迁移：仍有列需要人工决定目标类型")
+
+// BuildMigrationDDL 把预检结论渲染成目标端的 CREATE TABLE 语句。
+//
+// 规则：**review 与 blocked 的列必须在 decisions 里给出目标类型**，否则直接报错
+// 并点名——「默认放行」正是迁移里最危险的失败方式。ok 的列用预检给出的类型。
+//
+// 只生成单表结构：索引、外键、默认值都不在这里（它们要按目标端能力逐个决定）。
+func BuildMigrationDDL(dstEngine model.Engine, table string, src *model.TableDetail, plan *MigratePlan, decisions map[string]string) (string, error) {
+	if src == nil || plan == nil {
+		return "", errors.New("迁移：缺少源结构或预检结论")
+	}
+	byName := map[string]ColumnVerdict{}
+	for _, v := range plan.Columns {
+		byName[strings.ToLower(v.Column)] = v
+	}
+
+	d := dialect.For(dstEngine)
+	var cols []string
+	var missing []string
+	for _, sc := range src.Columns {
+		v, okVerdict := byName[strings.ToLower(sc.Name)]
+		if !okVerdict {
+			missing = append(missing, sc.Name+"（预检里没有结论）")
+			continue
+		}
+		tedType := strings.TrimSpace(decisions[sc.Name])
+		if tedType == "" {
+			if v.Status != MigrateOK {
+				missing = append(missing, fmt.Sprintf("%s（%s）", sc.Name, v.Status))
+				continue
+			}
+			tedType = strings.TrimSpace(v.Target)
+			if tedType == "" {
+				tedType = strings.TrimSpace(sc.Type.Raw)
+			}
+		}
+		if !typePattern.MatchString(tedType) {
+			return "", fmt.Errorf("迁移：列 %s 的目标类型 %q 不合法（只允许类型名与长度/精度）", sc.Name, tedType)
+		}
+		spec := d.QuoteIdent(sc.Name) + " " + tedType
+		if !sc.Nullable {
+			spec += " NOT NULL"
+		}
+		cols = append(cols, spec)
+	}
+	if len(missing) > 0 {
+		return "", fmt.Errorf("%w：%s", ErrMigrateNeedsDecision, strings.Join(missing, "、"))
+	}
+	if len(cols) == 0 {
+		return "", errors.New("迁移：源表没有列")
+	}
+	return "CREATE TABLE " + d.QuoteIdent(table) + " (\n  " + strings.Join(cols, ",\n  ") + "\n)", nil
 }

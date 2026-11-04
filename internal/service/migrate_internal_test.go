@@ -1,6 +1,7 @@
 package service
 
 import (
+	"errors"
 	"strings"
 	"testing"
 
@@ -157,3 +158,44 @@ func TestPlanMigrationTargetOnlyColumn(t *testing.T) {
 }
 
 func ptr(c model.Column) *model.Column { return &c }
+
+// TestBuildMigrationDDL 钉住三件事：ok 列自动用预检类型、review/blocked 列必须
+// 有人工决策、决策里的类型要过白名单。
+func TestBuildMigrationDDL(t *testing.T) {
+	src := &model.TableDetail{Columns: []model.Column{
+		{Name: "id", Type: model.ColumnType{Raw: "int", Kind: model.TypeInteger}, Nullable: false},
+		{Name: "flag", Type: model.ColumnType{Raw: "tinyint(1)", Kind: model.TypeInteger}, Nullable: true},
+	}}
+	plan := PlanMigration(src, nil, model.EngineMySQL, model.EnginePostgres)
+
+	// 只给了 id 的决策，flag 还缺：必须报错并点名。
+	_, err := BuildMigrationDDL(model.EnginePostgres, "t", src, plan, map[string]string{"id": "integer"})
+	if !errors.Is(err, ErrMigrateNeedsDecision) {
+		t.Fatalf("缺决策应返回 ErrMigrateNeedsDecision，实际 %v", err)
+	}
+	if !strings.Contains(err.Error(), "flag") {
+		t.Errorf("错误里要点名 flag，实际 %q", err.Error())
+	}
+
+	// 补齐后应当渲染出目标端 DDL。
+	ddlText, err := BuildMigrationDDL(model.EnginePostgres, "t", src, plan, map[string]string{
+		"id": "integer", "flag": "boolean",
+	})
+	if err != nil {
+		t.Fatalf("BuildMigrationDDL: %v", err)
+	}
+	if !strings.Contains(ddlText, `"id" integer NOT NULL`) {
+		t.Errorf("DDL 应保留 NOT NULL 并引用标识符：\n%s", ddlText)
+	}
+	if !strings.Contains(ddlText, `"flag" boolean`) {
+		t.Errorf("DDL 应使用人工决策的类型：\n%s", ddlText)
+	}
+
+	// 决策里的类型要过白名单：带分号的直接拒绝。
+	_, err = BuildMigrationDDL(model.EnginePostgres, "t", src, plan, map[string]string{
+		"id": "integer", "flag": "boolean; DROP TABLE x",
+	})
+	if err == nil || !strings.Contains(err.Error(), "不合法") {
+		t.Fatalf("非法类型应被拒，实际 %v", err)
+	}
+}
