@@ -453,7 +453,7 @@ type Provider interface {
 
 **已实现补充**：流式输出（`?stream=1` 走 NDJSON，步骤到一条画一条）与会话导出（`GET /agent/conversations/{id}/export`，含每轮的问题、结论、步骤与用量，**不含工具结果全文**——那里面可能有业务数据）。
 
-**未实现**：「查看全部 N 步」的分页、沉淀为 Runbook、中止按钮、结论数字到某一步的「来源」链接。
+**未实现**：「查看全部 N 步」的分页、沉淀为 Runbook、结论数字到某一步的「来源」链接。**中止**：接口已做（`POST /agent/conversations/{id}/abort`，运行时会以 `ErrAborted` 收尾并让被中止的 `messages` 返回 200 + 「已按请求中止」），界面上还没有那个按钮。
 
 **必须做到的**
 

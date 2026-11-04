@@ -9,6 +9,7 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/maintell/DBRover/internal/api"
 )
@@ -400,5 +401,198 @@ func TestAgentExport(t *testing.T) {
 	// 导出必须能被序列化成一段干净的 JSON（供人存盘复核）。
 	if _, err := json.Marshal(body); err != nil {
 		t.Errorf("导出不可序列化: %v", err)
+	}
+}
+
+// TestAgentToolsCatalog 验证「这个 Agent 能做什么」有独立出口。
+//
+// 刻意不调用 SetAgentConfig、也不建连接：工具契约是静态的。界面上「会做什么」
+// 不该依赖「现在有没有连上库」——否则一个干净实例永远显示空清单，用户只能翻文档。
+func TestAgentToolsCatalog(t *testing.T) {
+	_, ts, _ := newServer(t)
+
+	code, body := do(t, ts, http.MethodGet, "/api/v1/agent/tools", nil, true)
+	if code != http.StatusOK {
+		t.Fatalf("工具清单 = %d %v", code, body)
+	}
+	tools, _ := body["tools"].([]any)
+	if len(tools) != 14 {
+		t.Fatalf("工具数 = %d，期望 14（docs/11 §3.2）", len(tools))
+	}
+	if n, _ := body["count"].(float64); int(n) != len(tools) {
+		t.Errorf("count=%v 与清单长度 %d 不一致", body["count"], len(tools))
+	}
+
+	prev := ""
+	for _, item := range tools {
+		m, _ := item.(map[string]any)
+		name, _ := m["name"].(string)
+		if name == "" || m["description"] == "" {
+			t.Errorf("工具缺名称或说明：%v", m)
+			continue
+		}
+		if prev != "" && name <= prev {
+			t.Errorf("清单要按名字排序（%s 出现在 %s 之后）：map 顺序随机会让这个端点每次响应都不同", name, prev)
+		}
+		prev = name
+
+		params, _ := json.Marshal(m["parameters"])
+		if !json.Valid(params) || len(params) < 2 {
+			t.Errorf("工具 %s 的参数 schema 不是合法 JSON：%s", name, params)
+		}
+		// docs/11 验收 5：工具参数里不该出现「连接」这个概念，
+		// 模型才无从把操作指向另一条连接。
+		if strings.Contains(strings.ToLower(string(params)), "connection") {
+			t.Errorf("工具 %s 的参数里出现了连接概念：%s", name, params)
+		}
+	}
+}
+
+// TestAgentConversationDetail 验证会话详情能查到元信息与已有记录。
+func TestAgentConversationDetail(t *testing.T) {
+	s, ts, dir := newServer(t)
+	fake := &fakeModel{script: []string{textReply("没什么可说的")}}
+	model := httptest.NewServer(fake.handler(t))
+	defer model.Close()
+	s.SetAgentConfig(api.AgentConfig{BaseURL: model.URL, Model: "fake"})
+
+	connID := createConn(t, ts, dir, "test", "read-write")
+	_, body := do(t, ts, http.MethodPost, "/api/v1/agent/conversations",
+		map[string]any{"connection_id": connID, "mode": "read-only"}, true)
+	convID, _ := body["id"].(string)
+	if convID == "" {
+		t.Fatal("没有返回会话 id")
+	}
+
+	code, body := do(t, ts, http.MethodGet, "/api/v1/agent/conversations/"+convID, nil, true)
+	if code != http.StatusOK {
+		t.Fatalf("详情 = %d %v", code, body)
+	}
+	if body["connection_id"] != connID || body["mode"] != "read-only" {
+		t.Errorf("元信息不对：%v", body)
+	}
+	if body["running"] != false {
+		t.Errorf("没在跑时应为 running=false，实际 %v", body["running"])
+	}
+	tr, _ := body["transcript"].(map[string]any)
+	if turns, _ := tr["turns"].([]any); len(turns) != 0 {
+		t.Errorf("新会话不该有记录：%v", turns)
+	}
+
+	if code, b := do(t, ts, http.MethodPost, "/api/v1/agent/conversations/"+convID+"/messages",
+		map[string]any{"content": "说点什么"}, true); code != http.StatusOK {
+		t.Fatalf("发消息失败: %d %v", code, b)
+	}
+
+	code, body = do(t, ts, http.MethodGet, "/api/v1/agent/conversations/"+convID, nil, true)
+	if code != http.StatusOK {
+		t.Fatalf("详情 = %d %v", code, body)
+	}
+	tr, _ = body["transcript"].(map[string]any)
+	turns, _ := tr["turns"].([]any)
+	if len(turns) != 1 {
+		t.Fatalf("记录轮数 = %d，期望 1：%v", len(turns), tr)
+	}
+	turn, _ := turns[0].(map[string]any)
+	if turn["question"] != "说点什么" {
+		t.Errorf("记录里应带原问题：%v", turn)
+	}
+}
+
+// TestAgentAbort 验证中止是一条真的取消，不是改个状态位。
+//
+// 假模型故意卡住不返回：这一轮只有在 ctx 被取消时才会结束。于是这个用例同时
+// 证明了三件事——abort 真的传到了运行中的请求、messages 的响应是 200（不是
+// 502「模型服务不可用」），以及停止原因写的是「中止」而不是「超时」。
+func TestAgentAbort(t *testing.T) {
+	s, ts, dir := newServer(t)
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	model := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case <-entered:
+		default:
+			close(entered)
+		}
+		// 这里只负责「卡住不回应」。不用 r.Context().Done() 当放行条件：
+		// 本机实测裸 net/http 客户端取消后服务端 ctx 数秒内都不触发（平台行为），
+		// 用它做判据会让测试永远红，而且红得毫无信息。
+		<-release
+	}))
+	defer model.Close()
+	// 兜底放行：即便取消没传到这条连接，测试也不该卡在 Close 上——
+	// 卡住只会把「取消没生效」伪装成超时，看不出真正的问题。
+	defer close(release)
+	s.SetAgentConfig(api.AgentConfig{BaseURL: model.URL, Model: "fake"})
+
+	connID := createConn(t, ts, dir, "test", "read-write")
+	_, body := do(t, ts, http.MethodPost, "/api/v1/agent/conversations",
+		map[string]any{"connection_id": connID, "mode": "read-only"}, true)
+	convID, _ := body["id"].(string)
+
+	// 还没开始跑：必须明确回 409，而不是假装停掉了什么。
+	code, body := do(t, ts, http.MethodPost, "/api/v1/agent/conversations/"+convID+"/abort", nil, true)
+	if code != http.StatusConflict {
+		t.Fatalf("空闲时中止 = %d %v，期望 409", code, body)
+	}
+	if er, _ := body["error"].(map[string]any); er["code"] != "CONVERSATION_IDLE" {
+		t.Errorf("错误码 = %v", er["code"])
+	}
+
+	// 这一轮会在模型调用里卡住；用裸 http 在后台发，避免在子 goroutine 里碰 t。
+	type msgResult struct {
+		code int
+		body map[string]any
+		err  error
+	}
+	msgCh := make(chan msgResult, 1)
+	go func() {
+		req, err := http.NewRequest(http.MethodPost, ts.URL+"/api/v1/agent/conversations/"+convID+"/messages",
+			strings.NewReader(`{"content":"问点什么"}`))
+		if err != nil {
+			msgCh <- msgResult{err: err}
+			return
+		}
+		req.Header.Set("X-DBRover-Token", testToken)
+		req.Header.Set("Content-Type", "application/json")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			msgCh <- msgResult{err: err}
+			return
+		}
+		defer func() { _ = resp.Body.Close() }()
+		var b map[string]any
+		_ = json.NewDecoder(resp.Body).Decode(&b)
+		msgCh <- msgResult{code: resp.StatusCode, body: b}
+	}()
+
+	<-entered
+	code, body = do(t, ts, http.MethodPost, "/api/v1/agent/conversations/"+convID+"/abort", nil, true)
+	if code != http.StatusOK || body["aborted"] != true {
+		t.Fatalf("中止 = %d %v", code, body)
+	}
+
+	// 中止要真的让那一轮尽快收尾：卡住只会让界面一直转圈。
+	var res msgResult
+	select {
+	case res = <-msgCh:
+	case <-time.After(2 * time.Second):
+		t.Fatal("中止后 2 秒内这一轮仍未返回：取消没有生效")
+	}
+	if res.err != nil {
+		t.Fatalf("messages 请求失败: %v", res.err)
+	}
+	if res.code != http.StatusOK {
+		t.Fatalf("被中止的一轮应返回 200（结论与步骤要带回去），实际 %d: %v", res.code, res.body)
+	}
+	msg, _ := res.body["stop_message"].(string)
+	if !strings.Contains(msg, "中止") {
+		t.Errorf("停止原因要说清是「中止」，实际 %q（写成超时会让用户以为自己没点成功）", msg)
+	}
+
+	// 结束之后 running 要复位，否则界面会一直显示「运行中」。
+	code, body = do(t, ts, http.MethodGet, "/api/v1/agent/conversations/"+convID, nil, true)
+	if code != http.StatusOK || body["running"] != false {
+		t.Errorf("中止后 running 应为 false：%d %v", code, body)
 	}
 }

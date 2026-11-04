@@ -20,6 +20,10 @@ var (
 	ErrLoopDetected = errors.New("agent: 检测到重复调用同一工具与参数")
 	ErrToolFailures = errors.New("agent: 同一工具连续失败次数过多")
 	ErrDuration     = errors.New("agent: 超过单轮时间上限")
+	// ErrAborted 表示「人按了停止」。它必须与超时分开：都是 ctx 取消，但
+	// 「你点了停止」和「跑太久被掐断」给用户的结论完全不同，混成一句会让人
+	// 以为自己没点成功，或者以为程序坏了。
+	ErrAborted = errors.New("agent: 已被用户中止")
 )
 
 // ErrNoToolCalling 表示模型不支持工具调用，不能进入 Agent 模式。
@@ -361,6 +365,9 @@ func (r *Runtime) ask(ctx context.Context, question string, emit func(Event)) (*
 		if err := ctx.Err(); err != nil {
 			res.Stopped = stopReason(err)
 			r.commit(msgs, res)
+			if errors.Is(err, context.Canceled) {
+				return res, ErrAborted
+			}
 			return res, ErrDuration
 		}
 
@@ -371,6 +378,13 @@ func (r *Runtime) ask(ctx context.Context, question string, emit func(Event)) (*
 		})
 		if err != nil {
 			r.commit(msgs, res)
+			// 取消是在一次网络往返里发生的：ctx 已取消时这里收到的必然是一个
+			// 「请求被中断」类错误。把它当模型服务故障报 502，用户点了停止却看到
+			// 「服务不可用」——所以先看 ctx。
+			if ctx.Err() != nil {
+				res.Stopped = stopReason(ctx.Err())
+				return res, ErrAborted
+			}
 			return res, fmt.Errorf("agent: 模型调用失败: %w", err)
 		}
 		res.Usage.PromptTokens += resp.Usage.PromptTokens

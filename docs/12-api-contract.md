@@ -316,12 +316,12 @@ POST /connections
 |---|---|---|
 | `GET` | `/agent/status` | 模型服务是否可用（不返回 key） | ✅ |
 | `POST` | `/agent/conversations` | 新建会话（绑定连接 + 模式） | ✅ |
-| `GET` | `/agent/conversations/{id}` | 会话详情 | ⛔ |
+| `GET` | `/agent/conversations/{id}` | 会话详情：元信息（连接、模式、provider、创建/最近使用、`running`）+ 已有记录（`transcript`，与 export 同形状，不含工具结果全文） | ✅ |
 | `POST` | `/agent/conversations/{id}/messages` | 发送消息 | ✅ 同步返回；`?stream=1` 改 NDJSON 流（step / answer / done / result / error） |
 | `POST` | `/agent/conversations/{id}/approvals/{aid}` | 批准/拒绝（`aid` 为预案 ID） | ✅ |
-| `POST` | `/agent/conversations/{id}/abort` | 中止 | ⛔ |
+| `POST` | `/agent/conversations/{id}/abort` | 中止正在跑的一轮：返回 `200 {aborted:true}` 表示**取消已发出**（这一轮在下一个模型调用或工具边界收尾，被中止的 `messages` 请求会带 `stop_message` 返回 200）；没有在跑的一轮时返回 `409 CONVERSATION_IDLE`，不假装停掉了什么 | ✅ |
 | `GET` | `/agent/conversations/{id}/export` | 导出（含全部步骤） | ✅ |
-| `GET` | `/agent/tools` | 工具清单与 schema | ⛔（运行时有 `Tools()`，但还没端点） |
+| `GET` | `/agent/tools` | 工具清单与 schema（名称、说明、参数 schema、风险与是否写），**不需要连接也不需要模型配置**，按名字排序（顺序稳定才能做快照比对） | ✅ |
 | `GET/POST` | `/agent/providers` | Provider 配置 | ⛔（现在走环境变量，见 `docs/11 §8.3`） |
 
 `messages` 的响应形状（未流式时）：

@@ -960,12 +960,37 @@
         "responses": { "200": { "description": "ok" } }
       }
     },
+    "/api/v1/agent/tools": {
+      "get": {
+        "summary": "Agent 工具清单（名称、说明、参数 schema、风险等级）",
+        "responses": { "200": { "description": "ok" } }
+      }
+    },
     "/api/v1/agent/conversations": {
       "post": {
         "summary": "新建 Agent 会话（绑定连接与权限模式）",
         "responses": {
           "201": { "description": "created" },
           "400": { "description": "未配置模型服务，或连接/模式不合法" }
+        }
+      }
+    },
+    "/api/v1/agent/conversations/{id}": {
+      "get": {
+        "summary": "会话详情（元信息 + 已有记录，不含工具结果全文）",
+        "responses": {
+          "200": { "description": "ok（running 表示当前是否有一轮在跑）" },
+          "404": { "description": "会话不存在或已过期" }
+        }
+      }
+    },
+    "/api/v1/agent/conversations/{id}/abort": {
+      "post": {
+        "summary": "请求中止正在跑的一轮（取消已发出，这一轮在下一个边界收尾）",
+        "responses": {
+          "200": { "description": "取消已发出" },
+          "404": { "description": "会话不存在或已过期" },
+          "409": { "description": "这个会话当前没有在跑的一轮" }
         }
       }
     },

@@ -57,6 +57,11 @@ type agentConv struct {
 	created  time.Time
 	lastUsed time.Time
 	mu       sync.Mutex
+
+	// runMu 只保护 cancel / running，刻意与 mu 分开：mu 在 Ask 的整轮里都是被持有的，
+	// 中止请求若去抢 mu，就得等这一轮自己结束——那时中止已经毫无意义。
+	runMu  sync.Mutex
+	cancel context.CancelFunc
 }
 
 // agentConvTTL 是空闲会话的保留时长。会话里存着未执行的预案，留太久是负担。
@@ -78,6 +83,40 @@ func (s *Server) purgeAgentConvs(now time.Time) {
 			delete(s.agentConvs, id)
 		}
 	}
+}
+
+// beginRun 记录这一轮的取消函数，返回的函数在结束时清空。
+func (c *agentConv) beginRun(cancel context.CancelFunc) func() {
+	c.runMu.Lock()
+	c.cancel = cancel
+	c.runMu.Unlock()
+	return func() {
+		c.runMu.Lock()
+		c.cancel = nil
+		c.runMu.Unlock()
+	}
+}
+
+// Abort 取消正在跑的那一轮；没有在跑时返回 false。
+//
+// 返回 false 不是错误：界面可能点了两次，或者这一轮刚好结束。把「没停到」
+// 和「停到了」分开报，才能避免界面显示一个假的「已停止」。
+func (c *agentConv) Abort() bool {
+	c.runMu.Lock()
+	cancel := c.cancel
+	c.runMu.Unlock()
+	if cancel == nil {
+		return false
+	}
+	cancel()
+	return true
+}
+
+// Running 表示当前是否有一轮在跑。
+func (c *agentConv) Running() bool {
+	c.runMu.Lock()
+	defer c.runMu.Unlock()
+	return c.cancel != nil
 }
 
 func (s *Server) agentConvByID(id string) (*agentConv, bool) {
@@ -239,6 +278,9 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request) {
 
 	ctx, cancel := context.WithTimeout(r.Context(), 3*time.Minute)
 	defer cancel()
+	// 登记取消句柄：/abort 靠它真的停下这一轮，而不是只改一个状态位。
+	done := c.beginRun(cancel)
+	defer done()
 
 	// 流式：先把每个步骤写出去，最后再给结论与待批预案。
 	if r.URL.Query().Get("stream") == "1" {
@@ -317,12 +359,13 @@ func (s *Server) handleAgentApproval(w http.ResponseWriter, r *http.Request) {
 
 // softStop 判断错误是不是「有结论但没走完」。
 //
-// 这四种要返回 200：结论与已完成的步骤都要带回去，界面上才能说清「停在哪、为什么停」。
-// 只有模型服务本身不可用才算 502。
+// 这五种要返回 200：结论与已完成的步骤都要带回去，界面上才能说清「停在哪、为什么停」。
+// 只有模型服务本身不可用才算 502——「人点了停止」不是故障。
 func softStop(err error) bool {
 	return errors.Is(err, agent.ErrStepBudget) ||
 		errors.Is(err, agent.ErrLoopDetected) ||
 		errors.Is(err, agent.ErrToolFailures) ||
+		errors.Is(err, agent.ErrAborted) ||
 		errors.Is(err, agent.ErrDuration)
 }
 
@@ -334,6 +377,8 @@ func stopMessage(err error) string {
 		return "检测到重复调用同一工具与参数，已中断"
 	case errors.Is(err, agent.ErrToolFailures):
 		return "同一工具反复失败，已停止重试"
+	case errors.Is(err, agent.ErrAborted):
+		return "已按请求中止；已执行的步骤仍然有效"
 	case errors.Is(err, agent.ErrDuration):
 		return "超过单轮时间上限，已停止"
 	}
@@ -362,6 +407,8 @@ func (s *Server) streamAgentMessage(w http.ResponseWriter, r *http.Request, c *a
 
 	ctx, cancel := context.WithTimeout(r.Context(), 3*time.Minute)
 	defer cancel()
+	done := c.beginRun(cancel)
+	defer done()
 
 	c.mu.Lock()
 	res, err := c.rt.AskStream(ctx, content, func(ev agent.Event) { write(ev) })
@@ -398,4 +445,62 @@ func (s *Server) handleAgentExport(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, c.rt.Export())
+}
+
+// handleAgentTools 列出 Agent 能做什么：名称、说明、参数 schema。
+//
+// 不需要连接也不需要模型配置：工具契约是静态的。这一点很重要——界面上
+// 「这个 Agent 会做什么」不该依赖「现在有没有连上库」，否则一条干净的实例
+// 永远显示空清单，用户只能去读文档。
+func (s *Server) handleAgentTools(w http.ResponseWriter, _ *http.Request) {
+	tools := agent.Catalog()
+	writeJSON(w, http.StatusOK, map[string]any{
+		"tools": tools,
+		"count": len(tools),
+	})
+}
+
+// handleAgentConversation 返回会话元信息 + 既有记录。
+//
+// 记录用 Export 的形状（provider / mode / turns / notes）：它刻意不含工具结果
+// 全文，所以这个端点可以放心给界面轮询，不会把业务数据一遍遍搬来搬去。
+func (s *Server) handleAgentConversation(w http.ResponseWriter, r *http.Request) {
+	c, okConv := s.agentConvByID(r.PathValue("id"))
+	if !okConv {
+		writeError(w, http.StatusNotFound, "CONVERSATION_NOT_FOUND", "internal", "会话不存在或已过期", "重新新建会话", false)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"id":            c.id,
+		"connection_id": c.connID,
+		"mode":          string(c.mode),
+		"provider":      c.provider,
+		"created":       c.created,
+		"last_used":     c.lastUsed,
+		"running":       c.Running(),
+		"transcript":    c.rt.Export(),
+	})
+}
+
+// handleAgentAbort 请求中止正在跑的那一轮。
+//
+// 语义是「取消已发出」，不是「已经停了」：Ask 在下一个模型调用或工具边界看到
+// ctx 取消才收尾，中间可能还差一次网络往返。所以返回 200 + aborted=true 表示
+// 请求已送达，客户端应继续等那条 messages 请求自己返回（它会带上已完成的部分）。
+//
+// 没在跑的时候返回 409：把「什么都没停」明确说出来，界面才不会显示一个假的
+// 「已停止」。
+func (s *Server) handleAgentAbort(w http.ResponseWriter, r *http.Request) {
+	c, okConv := s.agentConvByID(r.PathValue("id"))
+	if !okConv {
+		writeError(w, http.StatusNotFound, "CONVERSATION_NOT_FOUND", "internal", "会话不存在或已过期", "重新新建会话", false)
+		return
+	}
+	if !c.Abort() {
+		writeError(w, http.StatusConflict, "CONVERSATION_IDLE", "internal",
+			"这个会话当前没有在跑的一轮", "无需中止；若界面仍显示运行中，等这一轮自己返回", false)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"aborted": true,
+		"note": "取消已发出：这一轮会在下一个边界收尾，已执行的步骤仍然保留"})
 }

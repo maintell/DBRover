@@ -200,7 +200,10 @@ func (s *Server) routes() []route {
 		{http.MethodPost, "/api/v1/connections/{id}/kv/apply", false, s.handleKVApply},
 		// Agent：会话绑定连接与模式，预案在会话内保管，批准入口只给人用。
 		{http.MethodGet, "/api/v1/agent/status", false, s.handleAgentStatus},
+		{http.MethodGet, "/api/v1/agent/tools", false, s.handleAgentTools},
 		{http.MethodPost, "/api/v1/agent/conversations", false, s.handleAgentConversationCreate},
+		{http.MethodGet, "/api/v1/agent/conversations/{id}", false, s.handleAgentConversation},
+		{http.MethodPost, "/api/v1/agent/conversations/{id}/abort", false, s.handleAgentAbort},
 		{http.MethodPost, "/api/v1/agent/conversations/{id}/messages", false, s.handleAgentMessage},
 		{http.MethodPost, "/api/v1/agent/conversations/{id}/approvals/{pid}", false, s.handleAgentApproval},
 		{http.MethodGet, "/api/v1/agent/conversations/{id}/export", false, s.handleAgentExport},
