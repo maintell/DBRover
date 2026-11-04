@@ -925,7 +925,8 @@ function rollbackNote(plan) {
       lost + '。</p>';
   }
   if (plan.irreversible) {
-    return '<p class="warn">该变更不可逆：回滚语句只能恢复结构，数据不会回来' + lost + '。</p>';
+    // 不可逆用红色：删列丢的是数据，和「需要注意」不是一个量级。
+    return '<p class="danger">该变更不可逆：回滚语句只能恢复结构，数据不会回来' + lost + '。</p>';
   }
   return '<p>已生成回滚语句，可在需要时手动执行。</p>';
 }

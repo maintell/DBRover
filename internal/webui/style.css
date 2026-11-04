@@ -312,6 +312,7 @@ label.inline {
   font-size: 12px;
 }
 .card p.warn { color: var(--warn); }
+.card p.danger { color: var(--danger); }
 
 /* 建表的列行：一行一组输入，删列是行内小按钮。 */
 .col-row {
