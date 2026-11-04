@@ -328,8 +328,8 @@ for each table:
 | 3 | 恢复到已有对象的库被拒绝 | 集成 ✅ 默认拒绝并点名冲突对象（`TestRestoreRefusesNonEmptyTarget`）；`-allow-existing` 可显式覆盖。**与目标的差距**：要求里的「输入目标库名」没做，v1 只用一个布尔开关——挡误操作够用，挡不住「看错目标库」 |
 | 4 | 恢复后演练报告给出对象数/行数/索引状态 | 集成 ⚠️ **大部分**：对象数、行数、索引数、外键数都有；容器头在备份时记下每张表的索引/外键个数，恢复后逐表比对，不一致进 `Mismatches` 并打印警告（`TestRestoreReportsCountMismatch` 造假一份「99 个索引」的容器头验证它真的会报；`TestBackupKeepsIndexes` 验证正常恢复时 `Mismatches` 为空）。**未做**：索引有效性（如 PG 的 `indisvalid`）、抽样内容哈希校验 |
 | 5 | 加密备份用错误口令无法打开且报错明确 | 单测 ✅ `TestRestoreWrongPassphrase`（错误类型 `ErrBackupBadPassphrase`，文案同时说明「口令不对」与「文件可能被改动」——AEAD 分不清这两者）、`TestRestoreNeedsPassphrase`、`TestBackupEncryptedRoundTrip`（加密+压缩的文件里搜不到 `CREATE TABLE` 明文） |
-| 6 | 迁移中断后续跑，目标表行数与源一致且无重复 | 集成（2 万行，中途 kill） |
-| 7 | 迁移校验能发现篡改的 1 行 | 集成（人为改一行） |
+| 6 | 迁移中断后续跑，目标表行数与源一致且无重复 | 集成（2 万行，中途 kill）⚠️ **部分**：键集搬运与每批 1000 行多行 INSERT 已实现（`MigrateTable`），行数与摘要会校验；**检查点落盘与断点续跑未做**——中断后重跑会因主键冲突被拒（这是刻意的，不做 upsert）。`TestMigrateTableWithVerification` 覆盖 2500 行 / 5 批 / 摘要一致 |
+| 7 | 迁移校验能发现篡改的 1 行 | 集成（人为改一行）✅ `TestMigrateVerifyDetectsTamper`：搬完后把目标一行改一个字符，`VerifyMigratedTable` 返回 `ErrMigrateVerify` 并说明摘要不一致。顺带发现一处重复实现——搬运动作与独立复查各写了一份摘要比对，改坏一处测试仍全绿；已抽成唯一的 `compareMigrateDigests`，变异验证（短路该判断）现在会让用例红 |
 | 8 | MySQL `TINYINT(1)` → PG 被标记为冲突需人工确认 | 单测 ✅ `TestPlanMigration/TINYINT(1)_要人确认`——`PlanMigration` 返回 `review` 并说明「可能被当作数值而不是布尔」，同时给出 `boolean` 建议；同类规则还有 unsigned bigint（溢出）、ENUM/SET（建议 text+CHECK）、PG 数组（blocked）、jsonb→MySQL、Oracle DATE/NUMBER、SQLite 一律人工 |
 | 9 | Oracle 空串检测触发阻断 | 单测 ⚠️ **未做**：Oracle 把 `''` 当 NULL，这是数据语义问题，要按实际值判断；迁移的数据搬运还没做，所以没实现 |
 | 10 | 超长字符串预检阻断 | 集成 ⚠️ **部分**：按**声明长度**收窄会阻断（`TestPlanMigration/长度收窄阻断`，报「源长度 64 超过目标上限 32」）；按**实际值**探测未做（要读数据，属于搬运阶段） |
@@ -365,7 +365,7 @@ for each table:
 | 加密 | **已做**：`-passphrase-stdin` 读口令（不从命令行参数读、不落凭据库），PBKDF2-SHA256 210k 迭代 + AES-256-GCM，每段独立 nonce；头保持明文以便列出对象与派生密钥（[ADR-0010](adr/0010-backup-encryption.md)） | 与目标一致；**头是明文的**（能看到表名与时间）；口令丢失无后门 |
 | 续跑 | 表级：每张表完成即写检查点，`-resume` 截断后续跑；完成后删检查点 | 行级续跑不做（需 v2 分块表）；单表失败要重导整表，这一点在 ADR-0009 里写明 |
 | 恢复 | 同引擎、目标非空默认拒绝、禁止恢复到源库（头部记 `source_id`）、全程单事务；报告给对象数与行数 | **未做**：索引/外键状态、跨引擎；`-allow-existing` 只是布尔开关，没有「输入目标库名」那层确认；`source_id` 由调用方给，只能防手滑，不是认证 |
-| 迁移 | **预检 + 建表预案，已接 HTTP**：`/migrate/plan` 只读给结论与 DDL；`/migrate/change` 把 DDL 做成结构预案，执行复用 `/changes/{id}/apply`（审批、审计、竞态保护照旧）。**服务端不接受客户端传来的 DDL**——语句按 decisions 重算并过白名单，否则等于绕过预检 | 未做：数据搬运（**口径已定，见 [ADR-0011](adr/0011-migrate-data-movement.md)**：主键键集续跑、每批 1000 行多行 INSERT、行数 + 全量哈希校验；无主键表不可续跑也不做内容校验）、校验、索引与外键生成、默认值、Oracle 空串探测、按实际值判长度；CLI 入口未做 |
+| 迁移 | **预检 + 建表预案 + 单表搬运与校验**：`MigrateTable` 按主键键集分批搬（每批多行 INSERT，走目标端执行门），搬完比对行数与摘要；`VerifyMigratedTable` 可随时复查。无主键表退化为一次性并明确标注「不可续跑 / 未做内容校验」 | 未做：检查点落盘与断点续跑（验收 6 只到「部分」）、索引/外键/默认值生成、Oracle 空串探测、按实际值判长度；CLI 入口未做 |：`/migrate/plan` 只读给结论与 DDL；`/migrate/change` 把 DDL 做成结构预案，执行复用 `/changes/{id}/apply`（审批、审计、竞态保护照旧）。**服务端不接受客户端传来的 DDL**——语句按 decisions 重算并过白名单，否则等于绕过预检 | 未做：数据搬运（**口径已定，见 [ADR-0011](adr/0011-migrate-data-movement.md)**：主键键集续跑、每批 1000 行多行 INSERT、行数 + 全量哈希校验；无主键表不可续跑也不做内容校验）、校验、索引与外键生成、默认值、Oracle 空串探测、按实际值判长度；CLI 入口未做 |
 
 **为什么先做这一块**：它回答的是「这个备份里到底有什么」，不需要一致性快照、不需要恢复目标校验，却能让后面每一步都不盲跑。
 
