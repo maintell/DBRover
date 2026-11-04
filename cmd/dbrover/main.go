@@ -954,6 +954,36 @@ func cmdMigrate(args []string) error {
 	if err != nil {
 		return err
 	}
+	// 外键在数据搬完之后补建：先建约束会挡住父子插入顺序（ADR-0013）。
+	tables := map[string]bool{}
+	if objs, oerr := dstConn.Meta().Objects(ctx, "", "", model.KindTable); oerr == nil {
+		for _, o := range objs {
+			tables[strings.ToLower(o.Name)] = true
+		}
+	}
+	if derr == nil {
+		fkStmts, fkSkipped := service.BuildMigrationForeignKeyDDL(
+			dstConn.Engine(), dstConn.Capabilities().AddForeignKey, name, srcDetail,
+			func(n string) bool { return tables[strings.ToLower(n)] })
+		for _, stmt := range fkStmts {
+			fp, ferr := dstEx.BuildDDLPlan(ctx, service.DDLRequest{
+				Table:  model.ObjectRef{Kind: model.KindTable, Name: name},
+				Action: service.DDLRaw,
+				RawSQL: stmt,
+			})
+			if ferr != nil {
+				return fmt.Errorf("外键预案（%s）: %w", stmt, ferr)
+			}
+			if out, aerr := dstEx.ApplyChangePlan(ctx, fp, service.Request{Approval: true, Actor: "human:cli"}); aerr != nil || out.Err != nil || out.Blocked {
+				return fmt.Errorf("建外键失败（%s）: err=%v out=%+v", stmt, aerr, out)
+			}
+			fmt.Println("外键已建立：" + stmt)
+		}
+		for _, s := range fkSkipped {
+			fmt.Println("注意：" + s)
+		}
+	}
+
 	fmt.Printf("迁移完成：%d 行 / %d 批，校验=%v\n", rep.Rows, rep.Batches, rep.Verified)
 	if rep.Note != "" {
 		fmt.Println("注意：" + rep.Note)

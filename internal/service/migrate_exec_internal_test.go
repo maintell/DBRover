@@ -300,3 +300,86 @@ func openReal(t *testing.T, engine, dsn string) driver.Connector {
 	}
 	return c
 }
+
+// TestMigrateForeignKeyCrossEngine 验证 ADR-0013 第 4 条：父表先迁、子表后迁，
+// 外键能建出来并真的生效（插孤儿行会被拒）。
+func TestMigrateForeignKeyCrossEngine(t *testing.T) {
+	myDSN := os.Getenv("DBRover_TEST_MYSQL")
+	pgDSN := os.Getenv("DBRover_TEST_PG")
+	if myDSN == "" || pgDSN == "" {
+		t.Skip("需要 DBRover_TEST_MYSQL 与 DBRover_TEST_PG")
+	}
+	ctx := context.Background()
+	myEx := NewExecutor(openReal(t, "mysql", myDSN), model.EnvTest, model.AccessReadWrite, nil)
+	pgEx := NewExecutor(openReal(t, "pg", pgDSN), model.EnvTest, model.AccessReadWrite, nil)
+	defer myEx.Close()
+	defer pgEx.Close()
+
+	for _, q := range []string{
+		"DROP TABLE IF EXISTS mig_child",
+		"DROP TABLE IF EXISTS mig_parent",
+		"CREATE TABLE mig_parent (id INT PRIMARY KEY)",
+		"CREATE TABLE mig_child (id INT PRIMARY KEY, pid INT, CONSTRAINT fk_child_pid FOREIGN KEY (pid) REFERENCES mig_parent(id) ON DELETE CASCADE)",
+		"INSERT INTO mig_parent (id) VALUES (1)",
+		"INSERT INTO mig_child (id, pid) VALUES (10, 1)",
+	} {
+		if out, err := myEx.Execute(ctx, Request{SQL: q, Approval: true}); err != nil || out.Err != nil {
+			t.Fatalf("准备 MySQL（%s）: %v %+v", q, err, out)
+		}
+	}
+	t.Cleanup(func() {
+		_, _ = myEx.Execute(context.Background(), Request{SQL: "DROP TABLE IF EXISTS mig_child", Approval: true})
+		_, _ = myEx.Execute(context.Background(), Request{SQL: "DROP TABLE IF EXISTS mig_parent", Approval: true})
+	})
+	for _, q := range []string{"DROP TABLE IF EXISTS mig_child", "DROP TABLE IF EXISTS mig_parent"} {
+		_, _ = pgEx.Execute(ctx, Request{SQL: q, Approval: true})
+	}
+	t.Cleanup(func() {
+		_, _ = pgEx.Execute(context.Background(), Request{SQL: "DROP TABLE IF EXISTS mig_child", Approval: true})
+		_, _ = pgEx.Execute(context.Background(), Request{SQL: "DROP TABLE IF EXISTS mig_parent", Approval: true})
+	})
+
+	// 父表先迁。
+	if _, ddlText, err := PlanMigrationBetween(ctx, myEx, pgEx, "mig_parent", "", map[string]string{"id": "integer"}); err != nil {
+		t.Fatalf("父表预检: %v", err)
+	} else if out, e := pgEx.Execute(ctx, Request{SQL: ddlText, Approval: true}); e != nil || out.Err != nil {
+		t.Fatalf("建父表: %v %+v", e, out)
+	}
+	if _, err := MigrateTable(ctx, myEx, pgEx, "mig_parent", "", MigrateExecOptions{}); err != nil {
+		t.Fatalf("搬父表: %v", err)
+	}
+
+	// 子表后迁（含外键定义）。
+	if _, ddlText, err := PlanMigrationBetween(ctx, myEx, pgEx, "mig_child", "", map[string]string{
+		"id": "integer", "pid": "integer",
+	}); err != nil {
+		t.Fatalf("子表预检: %v", err)
+	} else if out, e := pgEx.Execute(ctx, Request{SQL: ddlText, Approval: true}); e != nil || out.Err != nil {
+		t.Fatalf("建子表: %v %+v", e, out)
+	}
+	if _, err := MigrateTable(ctx, myEx, pgEx, "mig_child", "", MigrateExecOptions{}); err != nil {
+		t.Fatalf("搬子表: %v", err)
+	}
+
+	// 搬完后补建外键：此时父表已在目标库，应当建成。
+	detail, err := myEx.DescribeTable(ctx, model.ObjectRef{Kind: model.KindTable, Name: "mig_child"})
+	if err != nil {
+		t.Fatalf("读源子表结构: %v", err)
+	}
+	stmts, skipped := BuildMigrationForeignKeyDDL(model.EnginePostgres, true, "mig_child", detail,
+		func(n string) bool { return strings.EqualFold(n, "mig_parent") })
+	if len(skipped) != 0 {
+		t.Fatalf("父表已在目标库，不该跳过：%v", skipped)
+	}
+	if len(stmts) != 1 {
+		t.Fatalf("应当生成 1 条外键语句：%v", stmts)
+	}
+	if out, e := pgEx.Execute(ctx, Request{SQL: stmts[0], Approval: true}); e != nil || out.Err != nil {
+		t.Fatalf("建外键: %v %+v", e, out)
+	}
+
+	// 外键真的生效：插孤儿行必须失败。
+	if out, e := pgEx.Execute(ctx, Request{SQL: "INSERT INTO mig_child (id, pid) VALUES (99, 12345)", Approval: true}); e == nil && (out == nil || out.Err == nil) {
+		t.Fatal("插孤儿行应当被外键拒绝")
+	}
+}

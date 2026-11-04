@@ -384,7 +384,40 @@ func BuildMigrationNotes(src *model.TableDetail) []string {
 		notes = append(notes, "表注释未迁移")
 	}
 	if n := len(src.ForeignKeys); n > 0 {
-		notes = append(notes, fmt.Sprintf("外键未迁移（%d 个），需要人工补", n))
+		notes = append(notes, fmt.Sprintf("外键（%d 个）不随建表创建：数据搬完后按目标库情况补建（见 migrate run 的输出）", n))
 	}
 	return notes
+}
+
+// BuildMigrationForeignKeyDDL 生成补建外键的语句（ADR-0013）。
+//
+// 三条规则：引擎不支持就不建（SQLite）；被引用表不在**目标库**就跳过并点名；
+// 其余按源动作子句原样建。exists 由调用方提供，避免 service 直接连库判断。
+//
+// 为什么放在数据搬完之后：外键会挡住插入顺序。先建约束再搬数据，父子顺序稍错
+// 就会被拒；搬完再补建，顺序问题自然消失。
+func BuildMigrationForeignKeyDDL(dstEngine model.Engine, supportsFK bool, table string,
+	src *model.TableDetail, exists func(name string) bool) (stmts []string, skipped []string) {
+	if src == nil || len(src.ForeignKeys) == 0 {
+		return nil, nil
+	}
+	d := dialect.For(dstEngine)
+	quotedTable := d.QuoteIdent(table)
+	for _, fk := range src.ForeignKeys {
+		name := fk.Name
+		if strings.TrimSpace(name) == "" {
+			name = defaultFKName(table, fk.Columns)
+		}
+		if !supportsFK {
+			skipped = append(skipped, fmt.Sprintf("外键 %s 未建：%s 不支持 ALTER TABLE ADD FOREIGN KEY", name, dstEngine))
+			continue
+		}
+		if fk.RefTable != table && exists != nil && !exists(fk.RefTable) {
+			skipped = append(skipped, fmt.Sprintf("外键 %s 未建：目标库没有表 %s", name, fk.RefTable))
+			continue
+		}
+		stmts = append(stmts, d.AddForeignKeySQL(quotedTable, name, fk.Columns,
+			d.QuoteIdent(fk.RefTable), fk.RefColumns, fk.OnDelete, fk.OnUpdate)+";")
+	}
+	return stmts, skipped
 }

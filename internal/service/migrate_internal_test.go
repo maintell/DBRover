@@ -284,7 +284,49 @@ func TestMigrationConstraintsAndDefaults(t *testing.T) {
 	if !strings.Contains(notes, "列注释未迁移") || !strings.Contains(notes, "表注释未迁移") {
 		t.Errorf("notes 要提到注释：%s", notes)
 	}
-	if !strings.Contains(notes, "外键未迁移") {
-		t.Errorf("notes 要提到外键：%s", notes)
+	if !strings.Contains(notes, "外键") || !strings.Contains(notes, "补建") {
+		t.Errorf("notes 要说明外键是搬完后补建：%s", notes)
+	}
+}
+
+// TestBuildMigrationForeignKeyDDL 对应 ADR-0013 的三条规则。
+func TestBuildMigrationForeignKeyDDL(t *testing.T) {
+	src := &model.TableDetail{
+		Columns: []model.Column{{Name: "pid", Type: model.ColumnType{Raw: "int", Kind: model.TypeInteger}}},
+		ForeignKeys: []model.ForeignKey{{
+			Name: "fk_child_pid", Columns: []string{"pid"},
+			RefTable: "parent", RefColumns: []string{"id"},
+			OnDelete: "CASCADE",
+		}},
+	}
+
+	// 1) 目标库有父表 → 建，并带动作子句。
+	stmts, skipped := BuildMigrationForeignKeyDDL(model.EnginePostgres, true, "child", src,
+		func(n string) bool { return n == "parent" })
+	if len(stmts) != 1 || len(skipped) != 0 {
+		t.Fatalf("应当生成 1 条语句：stmts=%v skipped=%v", stmts, skipped)
+	}
+	if !strings.Contains(stmts[0], "ON DELETE CASCADE") || !strings.Contains(stmts[0], `REFERENCES "parent"`) {
+		t.Errorf("外键语句不完整：%s", stmts[0])
+	}
+
+	// 2) 目标库没有父表 → 跳过并点名。
+	stmts, skipped = BuildMigrationForeignKeyDDL(model.EnginePostgres, true, "child", src,
+		func(string) bool { return false })
+	if len(stmts) != 0 {
+		t.Fatalf("父表不存在时不该生成语句：%v", stmts)
+	}
+	if len(skipped) != 1 || !strings.Contains(skipped[0], "目标库没有表 parent") {
+		t.Fatalf("跳过理由要点名父表：%v", skipped)
+	}
+
+	// 3) 引擎不支持加外键 → 全部跳过并说明。
+	stmts, skipped = BuildMigrationForeignKeyDDL(model.EngineSQLite, false, "child", src,
+		func(string) bool { return true })
+	if len(stmts) != 0 {
+		t.Fatalf("SQLite 不该生成外键语句：%v", stmts)
+	}
+	if len(skipped) != 1 || !strings.Contains(skipped[0], "不支持") {
+		t.Fatalf("跳过理由要说清引擎不支持：%v", skipped)
 	}
 }
