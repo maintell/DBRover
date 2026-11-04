@@ -39,7 +39,9 @@ docker run -d --name dbrover-pg  -e POSTGRES_PASSWORD=testpass     -e POSTGRES_D
 
 `-Engine` 接受 `mysql` / `postgres`；写 `pg` 会被脚本规范化成 `postgres`（服务端只认规范值，早先直接用 `pg` 会得到 `DB_CONNECT_FAILED: 暂不支持的引擎`）。这条是实际跑脚本时踩出来的，别改成只认 `pg`。
 
-## 最近一次全跑（2026-11-04，HEAD 8461c75）
+## 最近一次全跑（2026-11-05，HEAD 5015d27）
+
+这一轮是**回归全跑**：自上一次（8461c75）之后改了迁移注释、长度预检、导出格式、结构设计器（改可空/改默认值/加检查约束）、Agent 三个端点与慢查询报时，全部 7 个脚本重跑一遍，确认没有牵连。
 
 | 脚本 | 引擎 | 结果 |
 |---|---|---|
