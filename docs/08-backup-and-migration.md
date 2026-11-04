@@ -330,9 +330,9 @@ for each table:
 | 5 | 加密备份用错误口令无法打开且报错明确 | 单测 ✅ `TestRestoreWrongPassphrase`（错误类型 `ErrBackupBadPassphrase`，文案同时说明「口令不对」与「文件可能被改动」——AEAD 分不清这两者）、`TestRestoreNeedsPassphrase`、`TestBackupEncryptedRoundTrip`（加密+压缩的文件里搜不到 `CREATE TABLE` 明文） |
 | 6 | 迁移中断后续跑，目标表行数与源一致且无重复 | 集成（2 万行，中途 kill） |
 | 7 | 迁移校验能发现篡改的 1 行 | 集成（人为改一行） |
-| 8 | MySQL `TINYINT(1)` → PG 被标记为冲突需人工确认 | 单测 |
-| 9 | Oracle 空串检测触发阻断 | 单测 |
-| 10 | 超长字符串预检阻断 | 集成 |
+| 8 | MySQL `TINYINT(1)` → PG 被标记为冲突需人工确认 | 单测 ✅ `TestPlanMigration/TINYINT(1)_要人确认`——`PlanMigration` 返回 `review` 并说明「可能被当作数值而不是布尔」，同时给出 `boolean` 建议；同类规则还有 unsigned bigint（溢出）、ENUM/SET（建议 text+CHECK）、PG 数组（blocked）、jsonb→MySQL、Oracle DATE/NUMBER、SQLite 一律人工 |
+| 9 | Oracle 空串检测触发阻断 | 单测 ⚠️ **未做**：Oracle 把 `''` 当 NULL，这是数据语义问题，要按实际值判断；迁移的数据搬运还没做，所以没实现 |
+| 10 | 超长字符串预检阻断 | 集成 ⚠️ **部分**：按**声明长度**收窄会阻断（`TestPlanMigration/长度收窄阻断`，报「源长度 64 超过目标上限 32」）；按**实际值**探测未做（要读数据，属于搬运阶段） |
 | 11 | 无主键表迁移前明确提示不可续跑 | 手动 |
 | 12 | `Decimal(65,30)` 全量迁移无损 | 类型保真 |
 
@@ -365,7 +365,7 @@ for each table:
 | 加密 | **已做**：`-passphrase-stdin` 读口令（不从命令行参数读、不落凭据库），PBKDF2-SHA256 210k 迭代 + AES-256-GCM，每段独立 nonce；头保持明文以便列出对象与派生密钥（[ADR-0010](adr/0010-backup-encryption.md)） | 与目标一致；**头是明文的**（能看到表名与时间）；口令丢失无后门 |
 | 续跑 | 表级：每张表完成即写检查点，`-resume` 截断后续跑；完成后删检查点 | 行级续跑不做（需 v2 分块表）；单表失败要重导整表，这一点在 ADR-0009 里写明 |
 | 恢复 | 同引擎、目标非空默认拒绝、禁止恢复到源库（头部记 `source_id`）、全程单事务；报告给对象数与行数 | **未做**：索引/外键状态、跨引擎；`-allow-existing` 只是布尔开关，没有「输入目标库名」那层确认；`source_id` 由调用方给，只能防手滑，不是认证 |
-| 迁移 | **没有** | 验收第 6–12 条未做 |
+| 迁移 | **只有预检核心**：`PlanMigration(src, dst, srcEngine, dstEngine)` 逐列给出 ok / review / blocked 与理由（收窄一律阻断、语义漂移一定 review、没规则不许假装安全） | 未做：结构生成、数据搬运（分批/续跑/幂等）、校验、Oracle 空串探测、按实际值判长度；也没有 CLI 入口 |
 
 **为什么先做这一块**：它回答的是「这个备份里到底有什么」，不需要一致性快照、不需要恢复目标校验，却能让后面每一步都不盲跑。
 
