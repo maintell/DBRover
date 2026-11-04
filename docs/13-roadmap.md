@@ -24,7 +24,7 @@
 
 | 里程碑 | 状态 | 说明 |
 |---|---|---|
-| M0 文档基线 | ✅ 完成 | 14 份设计文档 + 8 份 ADR（0001 技术栈 / 0002 Agent 边界 / 0003 Plan-Apply / 0004 环境模型 / 0005 跨引擎差异 / 0006 依赖检查 / 0007 非关系型接口 / 0008 SQL Server 接入） |
+| M0 文档基线 | ✅ 完成 | 14 份设计文档 + 14 份 ADR（0001 技术栈 / 0002 Agent 边界 / 0003 Plan-Apply / 0004 环境模型 / 0005 跨引擎差异 / 0006 依赖检查 / 0007 非关系型接口 / 0008 SQL Server 接入 / 0009 备份续跑粒度 / 0010 备份加密 / 0011 迁移搬数据 / 0012 迁移约束与默认值 / 0013 迁移外键 / 0014 迁移注释） |
 | M1 最小闭环 | 🚧 进行中 | SQLite / MySQL / PostgreSQL 三引擎端到端已通；API、临时前端、CLI 已可用；**SQL Server 未开工，卡在镜像而不是磁盘**：`mcr.microsoft.com` 的 API 可达，但 blob 走 `southeastasia.data.mcr.microsoft.com`，实测约 85 KB/s 且被 `connection reset` 掐断；Docker Hub 直接拒连。决策与实现口径见 ADR-0008，拿到能拉镜像的机器即可开工 |
 | M2 写入与变更安全 | ✅ 基本完成 | 变更集、乐观并发、Plan/Apply、行内编辑、筛选排序、结构设计器、批量修改（含分批与中止）、一键撤销、导出、结构比对、依赖检查 —— 见下表 |
 | M3 AI Agent | 🚧 切片一、二完成 | `internal/agent`：Provider 抽象 + OpenAI 兼容客户端（DeepSeek / 通义 / Moonshot / vLLM / Ollama 走同一套协议，用 `base_url` + `model` 区分）、14 个工具、权限三模式与环境上限、执行循环（步数 / 时长 / 循环检测 / 失败上限）、审批门（预案只由服务端保管，Agent 无法自批）。已接 HTTP（`/agent/status`、`/agent/conversations`、`/messages`（含 `?stream=1` NDJSON）、`/approvals`、`/export`）与界面（步骤时间线、可展开 SQL、审批卡片、会话导出），内置浏览器实测通过。上下文检索已做三路（名称 + 注释 + 结构邻近，最多 40 个对象 / 5 张表列定义），长会话压缩按「配了窗口就按估算 token 的 85%、没配退回字符预算」触发，只压工具结果。评测集（`internal/agent/eval`，14 条录制回放，SQLite/MySQL/PG 三引擎真机全过，CI 门禁）、Windows 凭据库与 `dbrover secret` 都已做。**未做**：向量召回（P1，需先定嵌入模型与索引方案）、macOS/Linux 凭据库、审计外部锚点。不再被「接哪个模型服务」卡住——那是配置项，不是设计决策 |
@@ -37,6 +37,8 @@
 | `docs/05` SQL 工作区 | 12 项 | **11 项通过**；唯一未过：10 执行计划（端点、界面与偏差解析都有，但只有 3/5 引擎——MSSQL/Oracle 缺实例）。其中 1、2 光标语句、3 切分、4 多语句失败保留结果、5、6 翻页与深分页（含 100 万行真机压测）、7、8 精度与 NULL、9 取消（三引擎引擎侧都真停，MySQL 走 `KILL QUERY`）、11 指纹、12 跨库引用拦截（PG 三段名）均通过 |
 | `docs/06` 数据编辑器 | 12 项 | **全部通过** |
 | `docs/07` 结构设计器 | 12 项 | **10 项通过**（1、3、4、5、6、7、8、9、10、11）；两条如实标注：2 只有 3/5（缺 MSSQL/Oracle 无法做 5 引擎 DDL 回放）、11 的 **MDL 探测未做**（`performance_schema.metadata_locks` 需 MySQL 8，5.7 只有 `innodb_trx` / `innodb_lock_waits`）；12 单向（DDL 反解回表单未做，见 `docs/07 §8.2`） |
+
+| `docs/08` 备份与迁移 | 12 项 | **11 项通过**（1–8、10、11、12）；唯一未过：9 Oracle 空串阻断需要 Oracle 实例（与 0008 同一台卡点：镜像拉不下来）。12 是 `TestMigrateDecimalFidelity`（MySQL `DECIMAL(65,30)` → PG `numeric(65,30)`，摘要一致 + `d::text` 逐字读回）。已知未做写在各条里：容器对象条目不含行数/大小、行级续跑明确不做（[ADR-0009](adr/0009-backup-resume-granularity.md)）、恢复报告没有抽样内容哈希（需容器带导出侧摘要） |
 
 M1/M2 已完成并有测试覆盖的部分：
 
