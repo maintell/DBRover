@@ -34,3 +34,26 @@ func TestExplainCapabilityMatchesDialect(t *testing.T) {
 		}
 	}
 }
+
+// TestTriggerCapabilityIsHonest 钉住「触发器列表」这句话的真值。
+//
+// MySQL / PG 曾经声明 Triggers=true，但 Objects(KindTrigger) 里根本没有分支，
+// 结果是返回空列表——用户会把它读成「这张表没有触发器」，而不是「这个工具
+// 还不会查」。能力位只有在真的有实现时才允许是 true；要翻回 true，先实现
+// information_schema.TRIGGERS / pg_trigger 并把本例一起改掉。
+func TestTriggerCapabilityIsHonest(t *testing.T) {
+	want := map[model.Engine]bool{
+		model.EngineSQLite:   true,  // sqlite_master 里查得到，TestListsTriggers 兜着
+		model.EngineMySQL:    false, // information_schema.TRIGGERS 未接
+		model.EnginePostgres: false, // pg_trigger 未接
+	}
+	for _, c := range []driver.Connector{sqlite.New(), mysql.New(), pg.New()} {
+		exp, ok := want[c.Engine()]
+		if !ok {
+			t.Fatalf("新增引擎 %s 没写进这张表：触发器能力要有明确预期", c.Engine())
+		}
+		if got := c.Capabilities().Triggers; got != exp {
+			t.Errorf("%s: Capabilities.Triggers = %v，期望 %v", c.Engine(), got, exp)
+		}
+	}
+}

@@ -165,6 +165,7 @@ if m, ok := conn.(driver.MonitorProvider); ok && conn.Capabilities().SessionMgmt
 | 表/列注释 | ● | ● | ● | ● | ○ | ○ | ○ | ◐ mapping meta |
 | 索引详情 | ● | ● | ● | ● | ● | ○ | ● | ◐ settings |
 | 外键 | ● | ● | ● | ● | ● | ○ | ○ | ○ |
+| 触发器列表 | ○ | ○ | ○ | ○ | ● | ○ | ○ | ○ |
 | 分区 | ● | ● | ● | ● | ○ | ○ | ◐ 分片 | ◐ 分片 |
 | 例程源码 | ● | ● | ● | ●（可能被 wrap） | ◐ | ○ | ◐ JS | ○ |
 | 对象 DDL 还原 | `pg_get_*def` | `SHOW CREATE` | 自拼（无原生） | `DBMS_METADATA` | 自拼 | 自拼 | 自拼 | 自拼 |

@@ -47,18 +47,20 @@ func (c *Connector) Capabilities() model.Capabilities {
 		Views:             true,
 		MaterializedViews: false,
 		Routines:          false, // 例程管理未实现
-		Triggers:          true,
-		Sequences:         false,
-		UserTypes:         false,
-		Indexes:           true,
-		Explain:           true, // EXPLAIN
-		SlowQueryStats:    false,
-		SessionMgmt:       false,
-		KillSession:       false,
-		LockGraph:         false,
-		Backup:            false,
-		BulkLoad:          false,
-		KeysetPagination:  true,
+		// 触发器列表未实现（只有 SQLite 走 sqlite_master 做了）。声明 true 会让
+		// Objects(KindTrigger) 返回空，看起来像「这张表没有触发器」——那是假的。
+		Triggers:         false,
+		Sequences:        false,
+		UserTypes:        false,
+		Indexes:          true,
+		Explain:          true, // EXPLAIN
+		SlowQueryStats:   false,
+		SessionMgmt:      false,
+		KillSession:      false,
+		LockGraph:        false,
+		Backup:           false,
+		BulkLoad:         false,
+		KeysetPagination: true,
 		// MySQL 的 DDL 隐式提交，无法真实回滚。
 		DDLTransactional: false,
 		AlterColumnType:  true,
