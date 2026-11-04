@@ -682,6 +682,7 @@ func cmdBackup(args []string) error {
 		cf.bind(fs)
 		out := fs.String("out", "", "输出文件（.dbr）")
 		resume := fs.Bool("resume", false, "接着上次未完成的备份继续（需要 <文件>.progress）")
+		compress := fs.Bool("compress", false, "对每段做 gzip（文本型 SQL 通常能压到 1/5～1/10）")
 		if err := fs.Parse(args[1:]); err != nil {
 			return err
 		}
@@ -699,6 +700,7 @@ func cmdBackup(args []string) error {
 		h, err := ex.BackupToFile(context.Background(), service.BackupRequest{
 			Resume:   *resume,
 			SourceID: cf.sourceID(),
+			Compress: *compress,
 		}, *out)
 		if err != nil {
 			// 没有检查点时错误本身已经说清「需整库重跑」，再加一句「可续跑」

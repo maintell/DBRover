@@ -2,6 +2,7 @@ package service
 
 import (
 	"bytes"
+	"compress/gzip"
 	"context"
 	"encoding/binary"
 	"encoding/json"
@@ -32,6 +33,10 @@ import (
 const (
 	backupMagic         = "DBROVER\x00"
 	backupFormatVersion = 1
+
+	// flags 位：bit0 加密（v1 不支持）、bit1 压缩（gzip 每段）。
+	backupFlagEncrypted  uint16 = 1 << 0
+	backupFlagCompressed uint16 = 1 << 1
 )
 
 // BackupObject 是容器头部里的一个对象条目。
@@ -63,6 +68,10 @@ type BackupHeader struct {
 	// 别把它当成认证手段（docs/08 §3.1 第 2 条只要求「同名库」这一层）。
 	SourceID string         `json:"source_id,omitempty"`
 	Objects  []BackupObject `json:"objects"`
+
+	// Flags 是二进制头里的 flags 字段（不进 JSON）。读容器时由 InspectBackup
+	// 填好；写入时由 Backup 按请求设置。
+	Flags uint16 `json:"-"`
 }
 
 // BackupRequest 是一次备份请求。
@@ -73,6 +82,8 @@ type BackupRequest struct {
 	Resume bool
 	// SourceID 写进容器头，用于恢复时识别源库（见 BackupHeader.SourceID）。
 	SourceID string
+	// Compress 对每段做 gzip。文本型 SQL 通常能压到原来的 1/5～1/10。
+	Compress bool
 
 	// afterSection 是测试用的失败注入点：每写完一张表调用一次，返回错误即中断。
 	// 用它模拟「中途被 kill」，比真的杀进程稳定，且能精确控制断在第几张表。
@@ -99,7 +110,11 @@ func (e *Executor) Backup(ctx context.Context, req BackupRequest, w io.Writer) (
 	if err := binary.Write(w, binary.LittleEndian, uint16(backupFormatVersion)); err != nil {
 		return nil, err
 	}
-	if err := binary.Write(w, binary.LittleEndian, uint16(0)); err != nil {
+	var flags uint16
+	if req.Compress {
+		flags |= backupFlagCompressed
+	}
+	if err := binary.Write(w, binary.LittleEndian, flags); err != nil {
 		return nil, err
 	}
 	if err := binary.Write(w, binary.LittleEndian, uint32(len(hj))); err != nil {
@@ -114,10 +129,7 @@ func (e *Executor) Backup(ctx context.Context, req BackupRequest, w io.Writer) (
 		if _, err := e.Export(ctx, ExportRequest{Table: name, Format: ExportSQL}, &sec); err != nil {
 			return nil, fmt.Errorf("导出 %s: %w", name, err)
 		}
-		if err := binary.Write(w, binary.LittleEndian, uint32(sec.Len())); err != nil {
-			return nil, err
-		}
-		if _, err := w.Write(sec.Bytes()); err != nil {
+		if err := writeBackupSection(w, sec.Bytes(), req.Compress); err != nil {
 			return nil, err
 		}
 	}
@@ -152,8 +164,11 @@ func InspectBackup(r io.Reader) (*BackupHeader, error) {
 	if ver != backupFormatVersion {
 		return nil, fmt.Errorf("%w: 格式版本 %d，本工具只认 %d", ErrBackupFormat, ver, backupFormatVersion)
 	}
-	if flags != 0 {
-		return nil, fmt.Errorf("%w: v1 不支持加密/压缩的容器", ErrBackupFormat)
+	if flags&backupFlagEncrypted != 0 {
+		return nil, fmt.Errorf("%w: 这是加密容器，v1 不支持解密", ErrBackupFormat)
+	}
+	if flags & ^backupFlagCompressed != 0 {
+		return nil, fmt.Errorf("%w: 未知的容器 flags（0x%02x）", ErrBackupFormat, flags)
 	}
 	if hlen == 0 || hlen > 16<<20 {
 		return nil, fmt.Errorf("%w: header 长度异常（%d）", ErrBackupFormat, hlen)
@@ -166,14 +181,21 @@ func InspectBackup(r io.Reader) (*BackupHeader, error) {
 	if err := json.Unmarshal(raw, &h); err != nil {
 		return nil, fmt.Errorf("%w: header 解析失败: %v", ErrBackupFormat, err)
 	}
+	h.Flags = flags
 	return &h, nil
 }
 
 // BackupSummary 把头部渲染成人看的清单（CLI 与界面共用）。
 func BackupSummary(h *BackupHeader) string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "DBR 备份 v%d · %s · %s · %d 个对象\n",
-		h.FormatVersion, h.Engine, h.CreatedAt, len(h.Objects))
+	packed := ""
+	if h.Flags&backupFlagCompressed != 0 {
+		// 压缩是容器属性，不在 header JSON 里；不说一声，用户会以为文件坏了
+		// 或者怀疑体积对不上。
+		packed = " · 已压缩"
+	}
+	fmt.Fprintf(&b, "DBR 备份 v%d · %s · %s%s · %d 个对象\n",
+		h.FormatVersion, h.Engine, h.CreatedAt, packed, len(h.Objects))
 	for _, o := range h.Objects {
 		fmt.Fprintf(&b, "  %s %s\n", o.Kind, o.Name)
 	}
@@ -254,6 +276,8 @@ func (e *Executor) BackupToFile(ctx context.Context, req BackupRequest, path str
 	done := map[string]bool{}
 	var pos int64
 	if req.Resume {
+		// 先看检查点，再看头部：没有检查点时文件可能压根是空的（新建），
+		// 那时读头会得到「不是有效容器」，而用户真正需要知道的是「需整库重跑」。
 		cps, err := readBackupProgress(backupProgressPath(path))
 		if err != nil {
 			if os.IsNotExist(err) {
@@ -268,6 +292,17 @@ func (e *Executor) BackupToFile(ctx context.Context, req BackupRequest, path str
 		if pos == 0 {
 			return nil, fmt.Errorf("%w：%s（进度文件为空，需整库重跑）", ErrBackupNoCheckpoint, path)
 		}
+		// 有检查点说明文件里已经有头：用它来沿用压缩标志与源库身份，
+		// 否则 -resume 时忘带 -compress 会把同一个文件写成两种格式。
+		if _, err := f.Seek(0, io.SeekStart); err != nil {
+			return nil, err
+		}
+		existing, err := InspectBackup(f)
+		if err != nil {
+			return nil, fmt.Errorf("读取已写入的头部失败（需整库重跑）：%w", err)
+		}
+		header = existing
+
 		if err := f.Truncate(pos); err != nil {
 			return nil, fmt.Errorf("截断到最后一条检查点: %w", err)
 		}
@@ -293,7 +328,14 @@ func (e *Executor) BackupToFile(ctx context.Context, req BackupRequest, path str
 		if err := binary.Write(f, binary.LittleEndian, uint16(backupFormatVersion)); err != nil {
 			return nil, err
 		}
-		if err := binary.Write(f, binary.LittleEndian, uint16(0)); err != nil {
+		var flags uint16
+		if req.Compress {
+			flags |= backupFlagCompressed
+		}
+		header.Flags = flags
+		// 注意：flags 在 header 里是 json:"-"，改它不会影响已序列化的 hj；
+		// 这里必须在 Marshal 之后才能写二进制头，二者是两份独立的事实。
+		if err := binary.Write(f, binary.LittleEndian, flags); err != nil {
 			return nil, err
 		}
 		if err := binary.Write(f, binary.LittleEndian, uint32(len(hj))); err != nil {
@@ -312,10 +354,7 @@ func (e *Executor) BackupToFile(ctx context.Context, req BackupRequest, path str
 		if _, err := e.Export(ctx, ExportRequest{Table: name, Format: ExportSQL}, &sec); err != nil {
 			return nil, fmt.Errorf("导出 %s: %w", name, err)
 		}
-		if err := binary.Write(f, binary.LittleEndian, uint32(sec.Len())); err != nil {
-			return nil, err
-		}
-		if _, err := f.Write(sec.Bytes()); err != nil {
+		if err := writeBackupSection(f, sec.Bytes(), header.Flags&backupFlagCompressed != 0); err != nil {
 			return nil, err
 		}
 		end, err := f.Seek(0, io.SeekCurrent)
@@ -534,23 +573,17 @@ func readBackupContainer(r io.Reader) (*BackupHeader, []string, error) {
 	if err != nil {
 		return nil, nil, err
 	}
+	compressed := h.Flags&backupFlagCompressed != 0
 	var sections []string
 	for {
-		var n uint32
-		if err := binary.Read(r, binary.LittleEndian, &n); err != nil {
+		sec, err := readBackupSection(r, compressed)
+		if err != nil {
 			if errors.Is(err, io.EOF) {
 				break
 			}
-			return nil, nil, fmt.Errorf("%w: 读段长度: %v", ErrBackupFormat, err)
+			return nil, nil, err
 		}
-		if n > 1<<30 {
-			return nil, nil, fmt.Errorf("%w: 段长度异常（%d）", ErrBackupFormat, n)
-		}
-		buf := make([]byte, n)
-		if _, err := io.ReadFull(r, buf); err != nil {
-			return nil, nil, fmt.Errorf("%w: 段内容不完整", ErrBackupFormat)
-		}
-		sections = append(sections, string(buf))
+		sections = append(sections, sec)
 	}
 	return h, sections, nil
 }
@@ -581,4 +614,55 @@ func countValue(v any) int64 {
 		return n
 	}
 	return 0
+}
+
+// writeBackupSection 写一段：u32 长度 + （可选 gzip）内容。
+//
+// 压缩开关记在头的 flags 里，读端据此解压；段本身不带标志，避免同一份文件里
+// 两种形态混用。
+func writeBackupSection(w io.Writer, data []byte, compress bool) error {
+	if compress {
+		var buf bytes.Buffer
+		zw := gzip.NewWriter(&buf)
+		if _, err := zw.Write(data); err != nil {
+			return err
+		}
+		if err := zw.Close(); err != nil {
+			return err
+		}
+		data = buf.Bytes()
+	}
+	if err := binary.Write(w, binary.LittleEndian, uint32(len(data))); err != nil {
+		return err
+	}
+	_, err := w.Write(data)
+	return err
+}
+
+// readBackupSection 读一段，按需解压。
+func readBackupSection(r io.Reader, compressed bool) (string, error) {
+	var n uint32
+	if err := binary.Read(r, binary.LittleEndian, &n); err != nil {
+		return "", err
+	}
+	if n > 1<<30 {
+		return "", fmt.Errorf("%w: 段长度异常（%d）", ErrBackupFormat, n)
+	}
+	buf := make([]byte, n)
+	if _, err := io.ReadFull(r, buf); err != nil {
+		return "", fmt.Errorf("%w: 段内容不完整", ErrBackupFormat)
+	}
+	if !compressed {
+		return string(buf), nil
+	}
+	zr, err := gzip.NewReader(bytes.NewReader(buf))
+	if err != nil {
+		return "", fmt.Errorf("%w: 解压失败: %v", ErrBackupFormat, err)
+	}
+	defer func() { _ = zr.Close() }()
+	out, err := io.ReadAll(zr)
+	if err != nil {
+		return "", fmt.Errorf("%w: 解压失败: %v", ErrBackupFormat, err)
+	}
+	return string(out), nil
 }
