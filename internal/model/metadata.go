@@ -70,6 +70,10 @@ type Index struct {
 	Primary   bool     `json:"primary"`
 	Method    string   `json:"method,omitempty"`
 	Predicate string   `json:"predicate,omitempty"`
+	// Constraint 表示这个索引是约束（UNIQUE / PRIMARY KEY）的实现，而不是用户
+	// 单独建的索引。导出脚本据此决定要不要补 CREATE INDEX：约束已经随建表语句
+	// 一起重建，再补一次会撞名。
+	Constraint bool `json:"constraint,omitempty"`
 }
 
 // ForeignKey 是外键描述。

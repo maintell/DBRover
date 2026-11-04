@@ -130,6 +130,7 @@ func TestSQLExportRoundTripOnRealEngines(t *testing.T) {
 			tgt.prepareTable(t, []string{
 				"DROP TABLE IF EXISTS exp_rt",
 				"CREATE TABLE exp_rt (id INT PRIMARY KEY, s VARCHAR(32), n NUMERIC(10,2))",
+				"CREATE INDEX idx_exp_rt_s ON exp_rt (s)",
 			}, func(ctx context.Context, sess driver.Session) {
 				for _, row := range [][]any{
 					{1, "it's", "1.50"},
@@ -200,6 +201,22 @@ func TestSQLExportRoundTripOnRealEngines(t *testing.T) {
 			if err != nil || len(rows) != 1 {
 				t.Fatalf("回读: err=%v rows=%v", err, rows)
 			}
+			// 索引也要回放出来：MySQL / PG 的建表语句都带索引，SQLite 靠单独补
+			// CREATE INDEX。这里钉住「无论哪条路径，索引都不能丢」。
+			detail, derr := ex.DescribeTable(ctx, model.ObjectRef{Kind: model.KindTable, Name: "exp_rt"})
+			if derr != nil {
+				t.Fatalf("DescribeTable: %v", derr)
+			}
+			hasIndex := false
+			for _, ix := range detail.Indexes {
+				if ix.Name == "idx_exp_rt_s" {
+					hasIndex = true
+				}
+			}
+			if !hasIndex {
+				t.Errorf("回放后缺少索引 idx_exp_rt_s：%+v", detail.Indexes)
+			}
+
 			got := rows[0]
 			// id=1 与 id=3 有 n，id=2 的 s 与 n 都是 NULL。
 			want := []string{"3", "2", "2", "6"}

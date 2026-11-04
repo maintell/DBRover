@@ -139,7 +139,19 @@ func (e *Executor) Export(ctx context.Context, req ExportRequest, w io.Writer) (
 		if derr != nil {
 			return nil, fmt.Errorf("导出需要建表语句：%w", derr)
 		}
-		bw.WriteString(strings.TrimRight(ddl, "; \n") + ";\n\n")
+		bw.WriteString(strings.TrimRight(ddl, "; \n") + ";\n")
+		// SQLite 的建表语句不含独立索引，要单独补；漏了就等于静默丢掉唯一性与
+		// 查询性能。MySQL / PG 的 DDL 已经带上索引，再补会撞名（真机验证过）。
+		// 约束背后的索引一律跳过：它随建表语句一起重建。
+		if !e.dialect.DDLIncludesIndexes() {
+			for _, ix := range td.Indexes {
+				if ix.Primary || ix.Constraint || len(ix.Columns) == 0 {
+					continue
+				}
+				bw.WriteString(e.dialect.CreateIndexSQL(table, ix.Name, ix.Columns, ix.Unique) + ";\n")
+			}
+		}
+		bw.WriteString("\n")
 	}
 
 	switch format {

@@ -92,6 +92,14 @@ type Dialect interface {
 	// Oracle 没有 IF EXISTS 这个写法，只能裸 DROP VIEW——此时对象不存在就该报错。
 	DropViewSQL(name string) string
 
+	// DDLIncludesIndexes 表示这个引擎的「取建表语句」是否已经把索引包含在同一段
+	// 文本里。
+	//
+	// MySQL 的 SHOW CREATE TABLE 自带、PostgreSQL 由驱动把 pg_get_indexdef 追加
+	// 进去；SQLite 只存建表语句。导出脚本要据此决定是否补 CREATE INDEX，否则
+	// 要么丢索引，要么撞名重复创建。
+	DDLIncludesIndexes() bool
+
 	// IndexBuildAdvice 返回「怎么建索引才不锁表」的建议；没有可说的时候返回空串。
 	//
 	// 这不是语句，是提示：PostgreSQL 的 CREATE INDEX CONCURRENTLY 不能在事务里跑，
@@ -284,6 +292,15 @@ func (d impl) DropForeignKeySQL(table, name string) string {
 //
 // 只给建议、不自动生成 CONCURRENTLY：它不能在事务里跑，而本工具的执行门是
 // 单事务的，直接发出去等于每次都失败。
+// DDLIncludesIndexes 见接口注释：只有 SQLite 的建表语句不含独立索引。
+//
+// MySQL 的 SHOW CREATE TABLE 自带索引；PostgreSQL 由驱动在拼 DDL 时把
+// pg_get_indexdef 追加进去（真机上验证过：再补一条会报 relation already exists）。
+// 只有 SQLite 的 sqlite_master.sql 只存建表语句，索引是另一个对象。
+func (d impl) DDLIncludesIndexes() bool {
+	return d.engine != model.EngineSQLite
+}
+
 func (d impl) IndexBuildAdvice(table string, columns []string, unique bool) string {
 	kw := "CREATE INDEX "
 	if unique {

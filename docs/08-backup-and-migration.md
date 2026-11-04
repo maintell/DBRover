@@ -326,7 +326,7 @@ for each table:
 | 1 | 备份容器可被独立工具（CLI `dbrover backup inspect`）打开并列出对象 | 集成 ✅（v1）：容器格式已按 §2.3 落地（magic + version + flags + header JSON + 每段长度前缀），`dbrover backup inspect <文件>` 能列出对象清单；`TestBackupInspect` 用**测试自己实现的解析**读容器（不复用产器的解析函数，否则「写错了但读得懂」也会通过）。⚠️ v1 的对象条目只有 kind/name，不含行数与大小——它们要等表导完才知道，而头在最前面（见下方 v1 口径） |
 | 2 | 备份中途 kill 进程，重启可续跑且不重复 | 集成 ✅ **表级续跑**（[ADR-0009](adr/0009-backup-resume-granularity.md)）：每写完一张表追加检查点到 `<file>.progress`，续跑时截断到最后一条偏移再继续，容器格式不变。`TestBackupResumeAfterFailure`（注入失败→续跑→断言三段且每表只出现一次）、`TestBackupResumeNeedsCheckpoint`（无检查点必须报 `ErrBackupNoCheckpoint` 并说明整库重跑）。**行级续跑明确不做**：需要 v2 分块表，收益不抵复杂度 |
 | 3 | 恢复到已有对象的库被拒绝 | 集成 ✅ 默认拒绝并点名冲突对象（`TestRestoreRefusesNonEmptyTarget`）；`-allow-existing` 可显式覆盖。**与目标的差距**：要求里的「输入目标库名」没做，v1 只用一个布尔开关——挡误操作够用，挡不住「看错目标库」 |
-| 4 | 恢复后演练报告给出对象数/行数/索引状态 | 集成 ⚠️ **部分**：对象数与行数有（`TestRestoreRoundTrip` 断言 3 对象 / 3 行，且目标库真的能查到数据）；**索引状态与外键校验未做**，报告里没有这两项 |
+| 4 | 恢复后演练报告给出对象数/行数/索引状态 | 集成 ⚠️ **部分**：对象数、行数、**索引个数**都有（`TestRestoreRoundTrip` 断言行数、`TestBackupKeepsIndexes` 断言报告里索引数不为零且索引真的可用）；**索引有效性（如 PG 的 `indisvalid`）与外键校验未做** |
 | 5 | 加密备份用错误口令无法打开且报错明确 | 单测 |
 | 6 | 迁移中断后续跑，目标表行数与源一致且无重复 | 集成（2 万行，中途 kill） |
 | 7 | 迁移校验能发现篡改的 1 行 | 集成（人为改一行） |

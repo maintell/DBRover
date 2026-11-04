@@ -759,7 +759,7 @@ func cmdRestore(args []string) error {
 	}
 	fmt.Printf("恢复完成：%d 个对象、%d 行，用时 %d ms\n", len(rep.Objects), rep.Rows, rep.Duration.Milliseconds())
 	for _, o := range rep.Objects {
-		fmt.Printf("  %-40s %d 行\n", o.Name, o.Rows)
+		fmt.Printf("  %-40s %d 行 · %d 个索引\n", o.Name, o.Rows, o.Indexes)
 	}
 	return nil
 }

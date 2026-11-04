@@ -370,6 +370,9 @@ type RestoreRequest struct {
 type RestoreObject struct {
 	Name string `json:"name"`
 	Rows int64  `json:"rows"`
+	// Indexes 是恢复后的索引个数（含主键约束背后的索引）。
+	// 只报数量与存在性：索引的有效性（例如 PG 的 indisvalid）还没查。
+	Indexes int `json:"indexes"`
 }
 
 // RestoreReport 是恢复后的演练报告（docs/08 §3.3 的最小版本）。
@@ -483,7 +486,11 @@ func (e *Executor) Restore(ctx context.Context, r io.Reader, req RestoreRequest)
 			}
 			_ = cur.Close()
 		}
-		rep.Objects = append(rep.Objects, RestoreObject{Name: o.Name, Rows: n})
+		idx := 0
+		if detail, derr := e.DescribeTable(ctx, model.ObjectRef{Kind: model.KindTable, Name: o.Name}); derr == nil {
+			idx = len(detail.Indexes)
+		}
+		rep.Objects = append(rep.Objects, RestoreObject{Name: o.Name, Rows: n, Indexes: idx})
 		rep.Rows += n
 	}
 	rep.Duration = time.Since(started)

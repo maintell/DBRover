@@ -251,6 +251,9 @@ func (c *Connector) loadIndexes(ctx context.Context, h *sql.DB, qual, name strin
 			Name:    r.name,
 			Unique:  r.unique != 0,
 			Primary: r.origin == "pk",
+			// origin == "u" 是 UNIQUE 约束自动建的索引（sqlite_autoindex_*）：
+			// 它随建表语句一起重建，导出时不能再补一条同名 CREATE INDEX。
+			Constraint: r.origin == "u",
 		}
 		crows, err := h.QueryContext(ctx, "PRAGMA "+qual+".index_info("+dialect.For(model.EngineSQLite).QuoteIdent(r.name)+")")
 		if err != nil {
