@@ -120,6 +120,20 @@ func (e *entry) health(ctx context.Context) (*driver.HealthInfo, error) {
 	}
 }
 
+// capabilities 返回这个连接的能力声明。
+//
+// 两类连接器都有 Capabilities()，合在一处取，调用方不必先判断是哪一类。
+func (e *entry) capabilities() model.Capabilities {
+	switch {
+	case e.drv != nil:
+		return e.drv.Capabilities()
+	case e.kv != nil:
+		return e.kv.Capabilities()
+	default:
+		return model.Capabilities{}
+	}
+}
+
 // relational 返回关系型连接器；key-value 连接返回 false。
 //
 // 用它而不是在每个 handler 里判 `e.drv == nil`：把「这条连接是不是关系型」
@@ -538,6 +552,9 @@ func (s *Server) handleConnHealth(w http.ResponseWriter, r *http.Request) {
 		"environment": e.conn.Environment,
 		"identity":    h.Identity,
 		"warnings":    h.Warnings,
+		// 能力声明必须能在界面上拿到，否则「引擎不支持就别摆这个入口」只能靠
+		// 点一次再报错（ADR-0005）。
+		"capabilities": e.capabilities(),
 	})
 }
 

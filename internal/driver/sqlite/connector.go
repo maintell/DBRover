@@ -49,7 +49,7 @@ func (c *Connector) Capabilities() model.Capabilities {
 		Sequences:         false,
 		UserTypes:         false,
 		Indexes:           true,
-		Explain:           false, // EXPLAIN QUERY PLAN 尚未接入
+		Explain:           true, // EXPLAIN QUERY PLAN
 		SlowQueryStats:    false,
 		SessionMgmt:       false,
 		KillSession:       false,

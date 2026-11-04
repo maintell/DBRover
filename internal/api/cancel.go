@@ -45,9 +45,17 @@ func (s *Server) handleExplain(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "CONNECTION_NOT_FOUND", "connection", "连接不存在", "", false)
 		return
 	}
-	if _, okRel := e.relational(); !okRel {
+	drv, okRel := e.relational()
+	if !okRel {
 		writeError(w, http.StatusBadRequest, "CAPABILITY_UNSUPPORTED", "internal",
 			"key-value 连接没有执行计划", "", false)
+		return
+	}
+	// 能力声明是唯一来源：说了不支持就别让请求走到方言层再靠猜（ADR-0005）。
+	if !drv.Capabilities().Explain {
+		writeError(w, http.StatusBadRequest, "EXPLAIN_UNSUPPORTED", "internal",
+			"这个引擎暂不支持用单条语句取执行计划",
+			"SQL Server 需要 SET SHOWPLAN_ALL，Oracle 需要 EXPLAIN PLAN FOR 再查 PLAN_TABLE", false)
 		return
 	}
 	var req explainRequest

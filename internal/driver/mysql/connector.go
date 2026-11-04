@@ -51,7 +51,7 @@ func (c *Connector) Capabilities() model.Capabilities {
 		Sequences:         false,
 		UserTypes:         false,
 		Indexes:           true,
-		Explain:           false,
+		Explain:           true, // EXPLAIN
 		SlowQueryStats:    false,
 		SessionMgmt:       false,
 		KillSession:       false,

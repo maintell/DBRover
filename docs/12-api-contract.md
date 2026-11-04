@@ -75,7 +75,7 @@ Content-Type: application/x-ndjson
 | `POST` | `/api/v1/connections` | 创建并打开连接 |
 | `GET` | `/api/v1/connections` | 连接列表 |
 | `DELETE` | `/api/v1/connections/{id}` | 关闭并移除连接 |
-| `GET` | `/api/v1/connections/{id}/health` | 版本、只读状态、服务器身份 |
+| `GET` | `/api/v1/connections/{id}/health` | 版本、只读状态、服务器身份、**能力声明 `capabilities`**（界面据此决定摆不摆「计划」这类入口；不支持就返回 400 `EXPLAIN_UNSUPPORTED`，不等点一次再报错） |
 | `GET` | `/api/v1/connections/{id}/tables` | 表与视图清单 |
 | `GET` | `/api/v1/connections/{id}/tables/{name}/rows` | 表数据浏览，**键集分页**（`limit`、`after`、`where`、`order`） |
 | `GET` | `/api/v1/connections/{id}/tables/{name}/schema` | 列、索引、外键、主键与建表原文；表不存在 → 404 |

@@ -296,6 +296,8 @@ async function selectConnection(id) {
   const c = state.conns.find((x) => x.id === id);
   if (!c) return;
   state.current = c;
+  // 能力未知时先收起「计划」：等 health 回来再决定摆不摆（ADR-0005）。
+  $('btn-explain').hidden = true;
   envBadge(c.environment);
   // 展示时区必须摆在明面上：同一列数据在两台连接上显示成不同时间是正常的，
   // 但「为什么不一样」得能一眼看到，否则会被当成数据错乱。
@@ -327,6 +329,11 @@ async function loadIdentity(id) {
   const el = $('identity');
   try {
     const h = await api(path(API.health, { id }));
+    // 引擎说不支持执行计划，就不要把这个按钮摆出来——点一次再报错，
+    // 等于把「这个引擎能不能做」的判断推给用户。
+    const caps = h.capabilities || {};
+    state.current.capabilities = caps;
+    $('btn-explain').hidden = !caps.explain;
     const ident = h.identity || {};
     const host = ident.hostname || '?';
     const fp = (ident.fingerprint || '').slice(0, 8);
