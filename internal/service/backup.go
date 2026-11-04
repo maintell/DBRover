@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/maintell/DBRover/internal/driver"
 	"github.com/maintell/DBRover/internal/model"
 )
 
@@ -344,4 +345,189 @@ func (e *Executor) backupPlan(ctx context.Context, req BackupRequest) ([]string,
 		header.Objects = append(header.Objects, BackupObject{Kind: string(model.KindTable), Name: name})
 	}
 	return tables, header, nil
+}
+
+// RestoreRequest 是一次恢复请求。
+type RestoreRequest struct {
+	// AllowExisting 允许覆盖目标库里已存在的同名对象。默认 false：
+	// 「恢复到已有对象的库」必须由人显式同意（docs/08 §3.1 硬性约束）。
+	AllowExisting bool
+}
+
+// RestoreObject 是报告里的一个对象。
+type RestoreObject struct {
+	Name string `json:"name"`
+	Rows int64  `json:"rows"`
+}
+
+// RestoreReport 是恢复后的演练报告（docs/08 §3.3 的最小版本）。
+type RestoreReport struct {
+	Objects  []RestoreObject `json:"objects"`
+	Rows     int64           `json:"rows"`
+	Duration time.Duration   `json:"duration_ms"`
+}
+
+// ErrRestoreTarget 表示目标库不满足恢复前提。
+var ErrRestoreTarget = errors.New("目标库不满足恢复前提")
+
+// Restore 把容器恢复到当前连接。
+//
+// v1 的三条硬约束（都可以在错误里读到原因，不静默降级）：
+//  1. **同引擎**：跨引擎要类型映射与冲突判定，v1 不做；
+//  2. **目标非空默认拒绝**：容器里任一对象名已在目标库存在，就整批不执行，
+//     除非显式 AllowExisting；
+//  3. **单事务**：引擎支持 DDL 事务时全程一个事务，任何一段失败整体回滚。
+//
+// 已知缺口：容器头还没有记录源库身份，所以「禁止恢复到源库同名库」这条目前
+// 只能靠调用方自律（见 docs/08 §7 的 v1 口径）。
+func (e *Executor) Restore(ctx context.Context, r io.Reader, req RestoreRequest) (*RestoreReport, error) {
+	started := time.Now()
+	header, sections, err := readBackupContainer(r)
+	if err != nil {
+		return nil, err
+	}
+	if header.Engine != string(e.conn.Engine()) {
+		return nil, fmt.Errorf("%w：容器来自 %s，当前连接是 %s（v1 只支持同引擎恢复）",
+			ErrRestoreTarget, header.Engine, e.conn.Engine())
+	}
+
+	// 目标非空检查：先看容器要建的对象在目标库里是否已经存在。
+	existing, err := e.conn.Meta().Objects(ctx, "", "", model.KindTable, model.KindView)
+	if err != nil {
+		return nil, fmt.Errorf("列出目标对象: %w", err)
+	}
+	present := map[string]bool{}
+	for _, o := range existing {
+		present[o.Name] = true
+	}
+	var clash []string
+	for _, o := range header.Objects {
+		if present[o.Name] {
+			clash = append(clash, o.Name)
+		}
+	}
+	if len(clash) > 0 && !req.AllowExisting {
+		return nil, fmt.Errorf("%w：目标库里已有同名对象 %s；确认要覆盖请显式允许",
+			ErrRestoreTarget, strings.Join(clash, "、"))
+	}
+
+	sess, err := e.conn.Acquire(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = sess.Close() }()
+
+	inTx := e.conn.Capabilities().DDLTransactional
+	if inTx {
+		if err := sess.Begin(ctx); err != nil {
+			return nil, err
+		}
+	}
+	rollback := func() {
+		if inTx {
+			_ = sess.Rollback(context.Background())
+		}
+	}
+
+	for i, sec := range sections {
+		name := ""
+		if i < len(header.Objects) {
+			name = header.Objects[i].Name
+		}
+		stmts, err := e.dialect.Split(sec)
+		if err != nil {
+			rollback()
+			return nil, fmt.Errorf("切分 %s 的脚本: %w", name, err)
+		}
+		for _, st := range stmts {
+			text := stripSQLComments(st.Text)
+			if text == "" {
+				continue
+			}
+			if _, err := sess.Execute(ctx, text, nil); err != nil {
+				rollback()
+				return nil, fmt.Errorf("恢复 %s 失败：%w", name, err)
+			}
+		}
+	}
+	if inTx {
+		if err := sess.Commit(ctx); err != nil {
+			return nil, err
+		}
+	}
+
+	rep := &RestoreReport{}
+	for _, o := range header.Objects {
+		var n int64
+		cur, err := sess.Query(ctx, "SELECT COUNT(*) FROM "+e.dialect.QuoteIdent(o.Name), nil,
+			driver.QueryOptions{MaxRows: 1})
+		if err == nil {
+			if rows, _, err2 := cur.Next(ctx); err2 == nil && len(rows) == 1 {
+				n = countValue(rows[0][0])
+			}
+			_ = cur.Close()
+		}
+		rep.Objects = append(rep.Objects, RestoreObject{Name: o.Name, Rows: n})
+		rep.Rows += n
+	}
+	rep.Duration = time.Since(started)
+	return rep, nil
+}
+
+// readBackupContainer 读完整个容器（头 + 每段）。
+//
+// v1 一次性读进内存：容器里每段本来就是该表的完整脚本，恢复时也按段执行，
+// 拆成流式读取的收益要到「超大库」才显现，先不为它增加状态机。
+func readBackupContainer(r io.Reader) (*BackupHeader, []string, error) {
+	h, err := InspectBackup(r)
+	if err != nil {
+		return nil, nil, err
+	}
+	var sections []string
+	for {
+		var n uint32
+		if err := binary.Read(r, binary.LittleEndian, &n); err != nil {
+			if errors.Is(err, io.EOF) {
+				break
+			}
+			return nil, nil, fmt.Errorf("%w: 读段长度: %v", ErrBackupFormat, err)
+		}
+		if n > 1<<30 {
+			return nil, nil, fmt.Errorf("%w: 段长度异常（%d）", ErrBackupFormat, n)
+		}
+		buf := make([]byte, n)
+		if _, err := io.ReadFull(r, buf); err != nil {
+			return nil, nil, fmt.Errorf("%w: 段内容不完整", ErrBackupFormat)
+		}
+		sections = append(sections, string(buf))
+	}
+	return h, sections, nil
+}
+
+// stripSQLComments 去掉行注释（脚本头部的说明），空行也一并丢掉。
+func stripSQLComments(text string) string {
+	var keep []string
+	for _, line := range strings.Split(text, "\n") {
+		if strings.HasPrefix(strings.TrimSpace(line), "--") {
+			continue
+		}
+		keep = append(keep, line)
+	}
+	return strings.TrimSpace(strings.Join(keep, "\n"))
+}
+
+func countValue(v any) int64 {
+	switch x := v.(type) {
+	case int64:
+		return x
+	case []byte:
+		var n int64
+		fmt.Sscanf(string(x), "%d", &n)
+		return n
+	case string:
+		var n int64
+		fmt.Sscanf(x, "%d", &n)
+		return n
+	}
+	return 0
 }

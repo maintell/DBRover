@@ -60,6 +60,8 @@ func main() {
 		err = cmdSecret(os.Args[2:])
 	case "backup":
 		err = cmdBackup(os.Args[2:])
+	case "restore":
+		err = cmdRestore(os.Args[2:])
 	default:
 		fmt.Fprintf(os.Stderr, "未知命令: %s\n\n", os.Args[1])
 		usage()
@@ -87,7 +89,8 @@ func usage() {
   dbrover serve  [-addr 127.0.0.1:7788] [-token <token>] [-allow-remote] [-open] [-audit <path>] [-audit-anchor <path>]
   dbrover tunnel -via user@hop1:22[,user@hop2:22] -to host:port (-password-stdin | -key <path>)
   dbrover secret (set|clear|status) [-service dbrover/agent] [-account api-key]  # 口令从 stdin 读
-  dbrover backup (create|inspect) [-db <file> ...] [-out <文件.dbr>]  # 容器 v1：未加密、无续跑
+  dbrover backup (create|inspect) [-db <file> ...] [-out <文件.dbr>] [-resume]  # 容器 v1
+  dbrover restore -file <文件.dbr> -db <file> -env ... -yes [-allow-existing]  # 同引擎恢复
 
 退出码:
   0  成功
@@ -708,4 +711,49 @@ func cmdBackup(args []string) error {
 	default:
 		return fmt.Errorf("未知的 backup 子命令 %q（可用 create / inspect）", args[0])
 	}
+}
+
+// cmdRestore 把 DBR 容器恢复到目标库。
+//
+// 三条硬约束由服务层执行（同引擎、目标非空默认拒绝、单事务），CLI 只负责要求
+// 显式确认——恢复是写操作，不该敲下回车就发生。
+func cmdRestore(args []string) error {
+	fs := flag.NewFlagSet("restore", flag.ExitOnError)
+	var cf connFlags
+	cf.bind(fs)
+	file := fs.String("file", "", "备份文件（.dbr）")
+	allowExisting := fs.Bool("allow-existing", false, "目标库已有同名对象时覆盖")
+	yes := fs.Bool("yes", false, "确认要写目标库")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if strings.TrimSpace(*file) == "" {
+		return errors.New("需要 -file <备份.dbr>")
+	}
+	if !*yes {
+		return errors.New("恢复会写目标库；确认目标无误后加 -yes")
+	}
+	f, err := os.Open(*file)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = f.Close() }()
+
+	conn, env, mode, err := cf.open()
+	if err != nil {
+		return err
+	}
+	defer func() { _ = conn.Close() }()
+	ex := service.NewExecutor(conn, env, mode, nil)
+	defer ex.Close()
+
+	rep, err := ex.Restore(context.Background(), f, service.RestoreRequest{AllowExisting: *allowExisting})
+	if err != nil {
+		return err
+	}
+	fmt.Printf("恢复完成：%d 个对象、%d 行，用时 %d ms\n", len(rep.Objects), rep.Rows, rep.Duration.Milliseconds())
+	for _, o := range rep.Objects {
+		fmt.Printf("  %-40s %d 行\n", o.Name, o.Rows)
+	}
+	return nil
 }
