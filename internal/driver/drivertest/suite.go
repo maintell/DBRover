@@ -61,6 +61,8 @@ func Run(t *testing.T, cfg Config) {
 	t.Run("Health", func(t *testing.T) { testHealth(t, cfg) })
 	t.Run("DDLAndMetadata", func(t *testing.T) { testDDLAndMetadata(t, cfg) })
 	t.Run("TypeFidelity", func(t *testing.T) { testTypeFidelity(t, cfg) })
+	// 中立类型里必须带着声明长度，否则收窄判定形同虚设。
+	t.Run("TypeCarriesDeclaredLength", func(t *testing.T) { testTypeCarriesDeclaredLength(t, cfg) })
 	t.Run("NullVsEmptyString", func(t *testing.T) { testNullVsEmpty(t, cfg) })
 	// 注意：这里只验证「驱动支持键集分页所需的 SQL 形态」。
 	// 产品侧的分页语义（生成 SQL、主键游标、复合键元组比较、无主键拒绝）

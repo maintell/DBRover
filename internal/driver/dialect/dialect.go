@@ -288,6 +288,25 @@ func (d impl) DropForeignKeySQL(table, name string) string {
 	}
 }
 
+// CharLengthExpr 渲染「取该列字符数」的表达式。
+//
+// 同一个意思三个名字：MySQL / PostgreSQL / Oracle 用 CHAR_LENGTH，SQLite 只有
+// LENGTH，SQL Server 用 LEN。放在方言层是因为这是纯语句文本差异（ADR-0005），
+// service 层不该去判断引擎名。
+//
+// 注意 SQL Server 的 LEN 不计尾部空格，用它做「实际长度是否超限」的判据会偏
+// 乐观。SQL Server 连接器还没做，等能真机验证时再改——宁可现在写清，也不要
+// 让别人以为它和其余三个一样。
+func CharLengthExpr(e model.Engine, quoted string) string {
+	switch e {
+	case model.EngineSQLite:
+		return "LENGTH(" + quoted + ")"
+	case model.EngineMSSQL:
+		return "LEN(" + quoted + ")"
+	}
+	return "CHAR_LENGTH(" + quoted + ")"
+}
+
 // IndexBuildAdvice 按引擎给出「怎么建索引才不锁表」的建议。
 //
 // 只给建议、不自动生成 CONCURRENTLY：它不能在事务里跑，而本工具的执行门是

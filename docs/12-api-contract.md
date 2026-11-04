@@ -89,7 +89,7 @@ Content-Type: application/x-ndjson
 | `POST` | `/api/v1/connections/{id}/bulk/plan` | 条件批量修改预案 |
 | `POST` | `/api/v1/connections/{id}/fk/precheck` | 加外键前的孤儿数据预检（只读） |
 | `POST` | `/api/v1/compare` | 两个连接的结构比对（只读） |
-| `POST` | `/api/v1/migrate/plan` | 迁移预检（只读）：逐列 `ok`/`review`/`blocked` + 目标端 DDL；`ready=false` 时 `plan` 仍返回，逐列要求人工决定类型 |
+| `POST` | `/api/v1/migrate/plan` | 迁移预检（只读）：逐列 `ok`/`review`/`blocked` + 目标端 DDL；`ready=false` 时 `plan` 仍返回，逐列要求人工决定类型。`probe=true` 时额外读源表实际最大字符长度（一次全表扫描，不默认开），逐列回 `actual_max_len`，并据此把「声明收窄」的 `blocked` 翻成 `ok`（实际放得下）或继续阻断并写明实际值 |
 | `POST` | `/api/v1/migrate/change` | 把预检的建表语句做成结构预案（不执行）；**不接受客户端 DDL**，语句由服务端重算；执行走 `/changes/{id}/apply` |
 | `POST` | `/api/v1/migrate/run` | 搬运一张表的数据并校验（目标表必须已存在）：行数与摘要不一致返回 409 `MIGRATE_VERIFY_FAILED`；HTTP 侧暂不接检查点续跑 |
 | `POST` | `/api/v1/changes/{pid}/apply` | 执行上述任一预案；`?stream=1` 用 NDJSON 回报分批进度 |

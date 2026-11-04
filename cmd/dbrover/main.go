@@ -856,6 +856,7 @@ func cmdMigrate(args []string) error {
 	batch := fs.Int("batch", 1000, "每批行数")
 	maxRows := fs.Int("max-rows", 0, ">0 时只搬这么多行（演练）")
 	yes := fs.Bool("yes", false, "确认执行（run 需要）")
+	probe := fs.Bool("probe", false, "读源表实际最大字符长度，用它判定「声明收窄」是否真会丢数据（全表扫描）")
 	var sets multiFlag
 	fs.Var(&sets, "set", "人工决定的目标类型，形如 -set col=varchar(64)（可重复）")
 	if err := fs.Parse(args[1:]); err != nil {
@@ -901,8 +902,27 @@ func cmdMigrate(args []string) error {
 	}
 
 	plan, ddlText, perr := service.PlanMigrationBetween(ctx, srcEx, dstEx, *table, *targetTable, decisions)
-	for _, c := range plan.Columns {
-		fmt.Printf("  %-24s %-18s %-8s %s\n", c.Column, c.Source, c.Status, c.Reason)
+	// perr 非 nil 时 plan 可能是 nil：直接 range 会 panic，而这在「表名写错」时
+	// 就会发生——最不该崩的一条路径。
+	if plan != nil {
+		if *probe {
+			probedDDL, recomputed, probeErr := service.ProbeMigrationLengths(ctx, srcEx, dstEx, *table, *targetTable, decisions, plan)
+			if probeErr != nil && !errors.Is(probeErr, service.ErrMigrateNeedsDecision) {
+				return fmt.Errorf("探测实际长度: %w", probeErr)
+			}
+			// 只有真的重算过才替换：没有可探测的列时它是空串，覆盖上去会让
+			// 「plan」什么都不打印。
+			if recomputed {
+				ddlText, perr = probedDDL, probeErr
+			}
+		}
+		for _, c := range plan.Columns {
+			actual := ""
+			if c.ActualMax != nil {
+				actual = fmt.Sprintf("实际 %d", *c.ActualMax)
+			}
+			fmt.Printf("  %-24s %-18s %-8s %-10s %s\n", c.Column, c.Source, c.Status, actual, c.Reason)
+		}
 	}
 	if errors.Is(perr, service.ErrMigrateNeedsDecision) {
 		return perr

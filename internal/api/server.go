@@ -1909,6 +1909,9 @@ type migratePlanRequest struct {
 	TargetTable string `json:"target_table"`
 	// Decisions 是「人工决定的目标类型」：列名 → 类型。
 	Decisions map[string]string `json:"decisions"`
+	// Probe 为 true 时读源表实际最大字符长度，用它判定「声明收窄」是否真会丢数据。
+	// 代价是一次全表扫描，所以不做默认行为。
+	Probe bool `json:"probe"`
 }
 
 // handleMigratePlan 给出迁移预检与目标端 DDL（只读，不执行）。
@@ -1946,6 +1949,17 @@ func (s *Server) handleMigratePlan(w http.ResponseWriter, r *http.Request) {
 	if err != nil && !errors.Is(err, service.ErrMigrateNeedsDecision) {
 		writeError(w, http.StatusBadGateway, "MIGRATE_PLAN_FAILED", "internal", err.Error(), "", true)
 		return
+	}
+	if req.Probe && plan != nil {
+		probedDDL, recomputed, probeErr := service.ProbeMigrationLengths(r.Context(), src.exec, dst.exec,
+			req.Table, req.TargetTable, req.Decisions, plan)
+		if probeErr != nil && !errors.Is(probeErr, service.ErrMigrateNeedsDecision) {
+			writeError(w, http.StatusBadGateway, "MIGRATE_PROBE_FAILED", "internal", probeErr.Error(), "", true)
+			return
+		}
+		if recomputed {
+			ddlText, err = probedDDL, probeErr
+		}
 	}
 	body := map[string]any{
 		"plan":  plan,

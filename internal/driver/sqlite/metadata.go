@@ -56,6 +56,17 @@ func NeutralType(raw string) model.ColumnType {
 	default:
 		ct.Kind = model.TypeDecimal
 	}
+	// SQLite 不做长度检查，但声明里写了 VARCHAR(64) / DECIMAL(9,3) 就是用户对
+	// 形状的意思表示：迁移到会检查长度的目标时必须能看见它，否则「收窄」永远
+	// 判不出来（这正是它从前一律 review 的原因之一）。
+	if a, b, ok := model.TypeArgs(raw); ok {
+		switch ct.Kind {
+		case model.TypeString:
+			ct.MaxLen = a
+		case model.TypeDecimal:
+			ct.Precision, ct.Scale = a, b
+		}
+	}
 	return ct
 }
 

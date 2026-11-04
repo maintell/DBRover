@@ -266,3 +266,42 @@ func testDescribeReportsTableComment(t *testing.T, cfg Config) {
 		t.Fatalf("表注释 = %q，期望 %q（说明 DescribeTable 没取表注释）", detail.Comment, token)
 	}
 }
+
+// testTypeCarriesDeclaredLength 验证中立类型里带着「声明长度/精度」。
+//
+// 为什么必须有这条：`model.ColumnType` 有 MaxLen/Precision/Scale 三个字段，
+// 而三个驱动长期一个都不填——迁移预检里「源长度超过目标上限会截断」那条规则
+// 只在把 Column 手工造出来的单测里成立，真库上永远不触发。看起来像有校验，
+// 实际是个摆设，这是最坏的一种「有测试」。
+func testTypeCarriesDeclaredLength(t *testing.T, cfg Config) {
+	ctx := context.Background()
+	c, err := cfg.New(false)
+	if err != nil {
+		t.Fatalf("连接: %v", err)
+	}
+	defer func() { _ = c.Close() }()
+
+	s, err := c.Acquire(ctx)
+	if err != nil {
+		t.Fatalf("Acquire: %v", err)
+	}
+	defer func() { _ = s.Close() }()
+	if _, err := s.Execute(ctx, "CREATE TABLE type_len_probe (id INTEGER PRIMARY KEY, v VARCHAR(37), d DECIMAL(9,3))", nil); err != nil {
+		t.Fatalf("建表: %v", err)
+	}
+
+	detail, err := c.Meta().DescribeTable(ctx, model.ObjectRef{Kind: model.KindTable, Name: "type_len_probe"})
+	if err != nil {
+		t.Fatalf("DescribeTable: %v", err)
+	}
+	byName := map[string]model.Column{}
+	for _, col := range detail.Columns {
+		byName[strings.ToLower(col.Name)] = col
+	}
+	if v := byName["v"]; v.Type.MaxLen != 37 {
+		t.Errorf("varchar(37) 的 MaxLen = %d，期望 37（没填就会让「收窄」判定永远不触发）", v.Type.MaxLen)
+	}
+	if d := byName["d"]; d.Type.Precision != 9 || d.Type.Scale != 3 {
+		t.Errorf("decimal(9,3) 的精度/小数位 = %d/%d，期望 9/3", d.Type.Precision, d.Type.Scale)
+	}
+}

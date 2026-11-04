@@ -76,6 +76,19 @@ func NeutralType(raw string) model.ColumnType {
 	default:
 		ct.Kind = model.TypeUnknown
 	}
+	// 声明长度只对「长度就是上限」的类型有意义：varchar/char/binary 的第一个参数
+	// 是最大长度，decimal/numeric 的两个参数是精度与小数位。
+	//
+	// 刻意不给 int(11) 填 MaxLen：那是显示宽度，不是能存多大，把它当上限会让
+	// 「int(11) → integer」看起来像收窄。text/blob 没有括号参数，也不需要。
+	if a, b, ok := model.TypeArgs(raw); ok {
+		switch ct.Kind {
+		case model.TypeString, model.TypeBinary:
+			ct.MaxLen = a
+		case model.TypeDecimal:
+			ct.Precision, ct.Scale = a, b
+		}
+	}
 	return ct
 }
 

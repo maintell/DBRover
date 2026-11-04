@@ -79,6 +79,19 @@ func NeutralType(raw string) model.ColumnType {
 		ct.Kind = model.TypeArray
 		ct.Elem = &elem
 	}
+	// PG 的 format_type 会写出 character varying(64) / character(4) / numeric(10,2)。
+	// 数组不取：它的括号属于元素类型，取到外层会得到「数组长度」，没有意义。
+	if ct.Kind != model.TypeArray {
+		if a, b, ok := model.TypeArgs(raw); ok {
+			switch ct.Kind {
+			case model.TypeString:
+				// text 没有长度；只有 char/varchar 带括号，走到这里说明确实声明了。
+				ct.MaxLen = a
+			case model.TypeDecimal:
+				ct.Precision, ct.Scale = a, b
+			}
+		}
+	}
 	return ct
 }
 

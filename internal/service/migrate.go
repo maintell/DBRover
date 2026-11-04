@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"unicode/utf8"
 
@@ -30,6 +31,11 @@ type ColumnVerdict struct {
 	Target string        `json:"target_hint,omitempty"`
 	Status MigrateStatus `json:"status"`
 	Reason string        `json:"reason,omitempty"`
+	// SourceMaxLen / TargetMaxLen 是声明长度（0 表示没有声明，无从比较）。
+	SourceMaxLen int `json:"source_max_len,omitempty"`
+	TargetMaxLen int `json:"target_max_len,omitempty"`
+	// ActualMax 是 plan -probe 读出来的实际最大字符数；没探测时为 nil。
+	ActualMax *int64 `json:"actual_max_len,omitempty"`
 }
 
 // MigratePlan 是一张表的预检结果。
@@ -91,9 +97,10 @@ func PlanMigration(src, dst *model.TableDetail, srcEngine, dstEngine model.Engin
 }
 
 func verdictFor(sc model.Column, dc *model.Column, srcEngine, dstEngine model.Engine) ColumnVerdict {
-	v := ColumnVerdict{Column: sc.Name, Source: sc.Type.Raw}
+	v := ColumnVerdict{Column: sc.Name, Source: sc.Type.Raw, SourceMaxLen: sc.Type.MaxLen}
 	if dc != nil {
 		v.Target = dc.Type.Raw
+		v.TargetMaxLen = dc.Type.MaxLen
 	}
 	raw := strings.ToLower(strings.TrimSpace(sc.Type.Raw))
 
@@ -476,4 +483,190 @@ func quoteLiteral(engine model.Engine, s string) string {
 		s = strings.ReplaceAll(s, "\\", "\\\\")
 	}
 	return "'" + strings.ReplaceAll(s, "'", "''") + "'"
+}
+
+// MaxLenFromTypeText 从类型声明里取出长度上限（"varchar(32)" → 32，"decimal(10,2)" → 10）。
+//
+// 取不到返回 0：没有声明长度（text / json）就无从比较，调用方必须把 0 当成
+// 「不知道」，而不是「上限是 0」。
+func MaxLenFromTypeText(s string) int {
+	// 解析只有一份（model.TypeArgs）：这里再写一遍，就会出现「决策里写的
+	// varchar(32) 认得出、目标表声明的认不出」这种互相矛盾的结论。
+	if n, _, ok := model.TypeArgs(s); ok {
+		return n
+	}
+	return 0
+}
+
+// ProbeLengths 读源表每列的实际最大字符长度。
+//
+// 一次全表扫描，代价与表大小成正比——所以它是**显式开启**的（plan -probe），
+// 不是每次预检都跑。为什么值得做：按声明长度判「收窄会丢数据」会把一批本来
+// 安全的情况拦住（源 varchar(255) 里最长只有 12 个字），用户只能靠猜；而真正
+// 危险的反方向是 MySQL 非严格模式下**静默截断**，那必须靠实际值才能提前发现。
+//
+// 返回空 map 表示没有需要探测的列（都不是字符串列，或都没有声明长度）。
+func ProbeLengths(ctx context.Context, src *Executor, table string, cols []string) (map[string]int64, error) {
+	if src == nil || len(cols) == 0 {
+		return nil, nil
+	}
+	d := dialect.For(src.conn.Engine())
+	exprs := make([]string, len(cols))
+	for i, c := range cols {
+		exprs[i] = "MAX(" + dialect.CharLengthExpr(src.conn.Engine(), d.QuoteIdent(c)) + ")"
+	}
+	q := "SELECT " + strings.Join(exprs, ", ") + " FROM " + d.QuoteIdent(table)
+	out, err := src.Execute(ctx, Request{SQL: q, Approval: true, Actor: "human:local"})
+	if err != nil {
+		return nil, fmt.Errorf("探测实际长度: %w", err)
+	}
+	if out == nil || len(out.Results) == 0 || out.Err != nil {
+		return nil, fmt.Errorf("探测实际长度失败: %+v", out)
+	}
+	rows := out.Results[0].Rows
+	if len(rows) != 1 || len(rows[0]) != len(cols) {
+		return nil, fmt.Errorf("探测实际长度返回了意外形状: %+v", rows)
+	}
+	outMap := make(map[string]int64, len(cols))
+	for i, c := range cols {
+		if n, ok := asInt64(rows[0][i]); ok {
+			outMap[c] = n
+		}
+	}
+	return outMap, nil
+}
+
+// ApplyProbedLengths 用实际最大长度修正「按声明长度收窄」的阻断结论。
+//
+// 只动**由长度收窄导致的** blocked：数组类型、无符号溢出这类阻断与数据长度
+// 无关，拿实际值去放行它们等于绕过预检。
+//
+// 放行时把话说全：它证明的是「已有数据放得下」，不是「以后也放得下」。
+func ApplyProbedLengths(plan *MigratePlan, decisions map[string]string, actual map[string]int64) {
+	if plan == nil {
+		return
+	}
+	for i := range plan.Columns {
+		v := &plan.Columns[i]
+		n, probed := actual[v.Column]
+		if !probed {
+			continue
+		}
+		v.ActualMax = &n
+		limit := v.TargetMaxLen
+		for k, val := range decisions {
+			if strings.EqualFold(k, v.Column) {
+				if l := MaxLenFromTypeText(val); l > 0 {
+					limit = l
+				}
+			}
+		}
+		if limit <= 0 {
+			continue
+		}
+		if int(n) > limit {
+			v.Status = MigrateBlocked
+			v.Reason = fmt.Sprintf("实际最大 %d 字符超过目标上限 %d：搬到这里会失败或截断", n, limit)
+			continue
+		}
+		// 只有「声明更宽」这一条阻断可以被实际值解开。
+		if v.Status == MigrateBlocked && v.SourceMaxLen > limit {
+			v.Status = MigrateOK
+			v.Reason = fmt.Sprintf("源声明长度 %d 宽于目标上限 %d，但实际最大只有 %d 字符，放行；后续新增写入仍需 ≤ %d",
+				v.SourceMaxLen, limit, n, limit)
+		}
+	}
+	recountPlan(plan)
+}
+
+// recountPlan 重新统计 blocked / review：调用方会直接读这两个数决定 ready。
+func recountPlan(plan *MigratePlan) {
+	plan.Blocked, plan.Review = 0, 0
+	for _, v := range plan.Columns {
+		switch v.Status {
+		case MigrateBlocked:
+			plan.Blocked++
+		case MigrateReview:
+			plan.Review++
+		}
+	}
+}
+
+// asInt64 把驱动返回的聚合值收成 int64（空表时 MAX 返回 NULL，调用方按缺失处理）。
+func asInt64(v any) (int64, bool) {
+	switch n := v.(type) {
+	case int64:
+		return n, true
+	case int32:
+		return int64(n), true
+	case int:
+		return int64(n), true
+	case float64:
+		return int64(n), true
+	case []byte:
+		i, err := strconv.ParseInt(string(n), 10, 64)
+		return i, err == nil
+	case string:
+		i, err := strconv.ParseInt(n, 10, 64)
+		return i, err == nil
+	}
+	return 0, false
+}
+
+// planColumnsToProbe 挑出「实际值能改变结论」的列。
+//
+// 判据是「有可比较的上限」：源声明了长度，或人工决策/目标表给出了长度上限。
+// 两条都没有（text → text）时探了也没得比，白白全表扫一遍。
+func planColumnsToProbe(plan *MigratePlan, decisions map[string]string) []string {
+	var cols []string
+	for _, v := range plan.Columns {
+		limit := v.TargetMaxLen
+		for k, val := range decisions {
+			if strings.EqualFold(k, v.Column) {
+				if l := MaxLenFromTypeText(val); l > 0 {
+					limit = l
+				}
+			}
+		}
+		if v.SourceMaxLen > 0 || limit > 0 {
+			cols = append(cols, v.Column)
+		}
+	}
+	return cols
+}
+
+// ProbeMigrationLengths 探测实际长度、修正 plan，并按修正后的 plan 重算 DDL。
+//
+// 之所以连 DDL 一起重算：长度放行会把 blocked 变成 ok，而 blocked 的列在
+// BuildMigrationDDL 里是「必须有 decisions」的——不重算的话，调用方拿到的是
+// 一份还要求决策的旧结论，与刚印出来的 plan 自相矛盾。
+// 第三个返回值表示「DDL 已按新结论重算」：没有可探测的列时它是 false，
+// 调用方必须保留原来的 DDL，而不是拿一个空串覆盖掉。
+func ProbeMigrationLengths(ctx context.Context, src, dst *Executor, table, targetTable string,
+	decisions map[string]string, plan *MigratePlan) (ddl string, recomputed bool, err error) {
+	if plan == nil || src == nil {
+		return "", false, nil
+	}
+	cols := planColumnsToProbe(plan, decisions)
+	if len(cols) == 0 {
+		return "", false, nil
+	}
+	actual, err := ProbeLengths(ctx, src, table, cols)
+	if err != nil {
+		return "", false, err
+	}
+	ApplyProbedLengths(plan, decisions, actual)
+	if dst == nil {
+		return "", false, nil
+	}
+	srcDetail, derr := src.DescribeTable(ctx, model.ObjectRef{Kind: model.KindTable, Name: table})
+	if derr != nil {
+		return "", false, fmt.Errorf("读源表结构: %w", derr)
+	}
+	name := targetTable
+	if name == "" {
+		name = table
+	}
+	ddl, derr = BuildMigrationDDL(dst.conn.Engine(), name, srcDetail, plan, decisions)
+	return ddl, derr == nil, derr
 }

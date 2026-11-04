@@ -501,3 +501,55 @@ func TestMigrateCommentsOnRealMySQL(t *testing.T) {
 		t.Errorf("表注释 = %q，期望 %q", got, want)
 	}
 }
+
+// TestProbeLengthsCountsCharacters 验证探测的是**字符数**而不是字节数。
+//
+// 这条必须真机跑：SQLite 只有 LENGTH、MySQL/PG 是 CHAR_LENGTH，而 MySQL 的
+// LENGTH 返回字节数——用错一个，「中文abc」就从 5 变成 8，判定「放得下」的
+// 阈值随之整体漂移。
+func TestProbeLengthsCountsCharacters(t *testing.T) {
+	ctx := context.Background()
+	const want = 5 // "中文abc"
+
+	check := func(t *testing.T, ex *Executor) {
+		t.Helper()
+		for _, q := range []string{"DROP TABLE IF EXISTS probe_len", "CREATE TABLE probe_len (id INT PRIMARY KEY, v VARCHAR(64))"} {
+			if out, err := ex.Execute(ctx, Request{SQL: q, Approval: true}); err != nil || out.Err != nil {
+				t.Fatalf("准备（%s）: %v %+v", q, err, out)
+			}
+		}
+		t.Cleanup(func() {
+			_, _ = ex.Execute(context.Background(), Request{SQL: "DROP TABLE IF EXISTS probe_len", Approval: true})
+		})
+		if out, err := ex.Execute(ctx, Request{SQL: `INSERT INTO probe_len (id,v) VALUES (1,'中文abc'),(2,'x')`, Approval: true}); err != nil || out.Err != nil {
+			t.Fatalf("插数据: %v %+v", err, out)
+		}
+		got, err := ProbeLengths(ctx, ex, "probe_len", []string{"v"})
+		if err != nil {
+			t.Fatalf("ProbeLengths: %v", err)
+		}
+		if got["v"] != want {
+			t.Fatalf("实际最大长度 = %d，期望 %d（字符数；按字节算会是 8）", got["v"], want)
+		}
+	}
+
+	t.Run("sqlite", func(t *testing.T) {
+		ex := NewExecutor(openMigrateDB(t, "probe.db"), model.EnvTest, model.AccessReadWrite, nil)
+		defer ex.Close()
+		check(t, ex)
+	})
+	if dsn := os.Getenv("DBRover_TEST_MYSQL"); dsn != "" {
+		t.Run("mysql", func(t *testing.T) {
+			ex := NewExecutor(openReal(t, "mysql", dsn), model.EnvTest, model.AccessReadWrite, nil)
+			defer ex.Close()
+			check(t, ex)
+		})
+	}
+	if dsn := os.Getenv("DBRover_TEST_PG"); dsn != "" {
+		t.Run("pg", func(t *testing.T) {
+			ex := NewExecutor(openReal(t, "pg", dsn), model.EnvTest, model.AccessReadWrite, nil)
+			defer ex.Close()
+			check(t, ex)
+		})
+	}
+}

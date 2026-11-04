@@ -407,3 +407,88 @@ func TestBuildMigrationCommentDDLTooLong(t *testing.T) {
 		t.Fatalf("正好等于上限应保留：%v", stmts)
 	}
 }
+
+// TestMaxLenFromTypeText 钉住「从类型声明里取长度」的边界。
+//
+// 取不到必须返回 0（不知道），不能返回一个默认值——那会让「没有声明长度」
+// 被当成「上限很小」，把本来安全的列全拦下来。
+func TestMaxLenFromTypeText(t *testing.T) {
+	cases := []struct {
+		in   string
+		want int
+	}{
+		{"varchar(32)", 32},
+		{"decimal(10,2)", 10},
+		{"varchar( 8 )", 8},
+		{"numeric(20)", 20},
+		{"text", 0},
+		{"varchar()", 0},
+		{"varchar(abc)", 0},
+		{"", 0},
+	}
+	for _, c := range cases {
+		if got := MaxLenFromTypeText(c.in); got != c.want {
+			t.Errorf("MaxLenFromTypeText(%q) = %d，期望 %d", c.in, got, c.want)
+		}
+	}
+}
+
+// TestApplyProbedLengths 钉住「实际值能改哪些结论」。
+//
+// 关键不是能放行，而是**只能放行长度收窄这一类**：数组类型、无符号溢出
+// 跟数据长度无关，拿实际值去放行等于绕过预检。
+func TestApplyProbedLengths(t *testing.T) {
+	// 1) 声明 64 → 目标 32，实际只有 12：该放行，并把实际值记进结论。
+	plan := &MigratePlan{Blocked: 1, Columns: []ColumnVerdict{{
+		Column: "name", Source: "varchar(64)", Target: "varchar(32)",
+		SourceMaxLen: 64, TargetMaxLen: 32, Status: MigrateBlocked,
+		Reason: "源长度 64 超过目标上限 32，会截断",
+	}}}
+	ApplyProbedLengths(plan, nil, map[string]int64{"name": 12})
+	if plan.Columns[0].Status != MigrateOK || plan.Blocked != 0 {
+		t.Fatalf("实际值放得下就应放行：%+v（blocked=%d）", plan.Columns[0], plan.Blocked)
+	}
+	if !strings.Contains(plan.Columns[0].Reason, "实际最大只有 12") {
+		t.Errorf("放行理由要说清依据是实际值：%s", plan.Columns[0].Reason)
+	}
+	if plan.Columns[0].ActualMax == nil || *plan.Columns[0].ActualMax != 12 {
+		t.Errorf("实际值要记进结论：%+v", plan.Columns[0].ActualMax)
+	}
+
+	// 2) 实际 40 > 目标上限 32：结论不变，理由换成实际值。
+	plan = &MigratePlan{Blocked: 1, Columns: []ColumnVerdict{{
+		Column: "name", Source: "varchar(64)", Target: "varchar(32)",
+		SourceMaxLen: 64, TargetMaxLen: 32, Status: MigrateBlocked,
+		Reason: "源长度 64 超过目标上限 32，会截断",
+	}}}
+	ApplyProbedLengths(plan, nil, map[string]int64{"name": 40})
+	if plan.Columns[0].Status != MigrateBlocked || plan.Blocked != 1 {
+		t.Fatalf("实际也放不下就必须继续阻断：%+v", plan.Columns[0])
+	}
+	if !strings.Contains(plan.Columns[0].Reason, "实际最大 40") {
+		t.Errorf("阻断理由要给出实际值：%s", plan.Columns[0].Reason)
+	}
+
+	// 3) 与长度无关的阻断（数组）：实际值再小也不许放行。
+	plan = &MigratePlan{Blocked: 1, Columns: []ColumnVerdict{{
+		Column: "tags", Source: "text[]", Status: MigrateBlocked,
+		Reason: "目标库没有数组类型；需拆子表或改 JSON，这是结构决策，不能自动映射",
+	}}}
+	ApplyProbedLengths(plan, nil, map[string]int64{"tags": 3})
+	if plan.Columns[0].Status != MigrateBlocked {
+		t.Fatalf("长度之外的阻断不能被实际值解开：%+v", plan.Columns[0])
+	}
+
+	// 4) 目标表还不存在、人工决策给了更窄的类型：按声明长度那套检查根本没跑过
+	//    （没有目标结构可比），实际值是唯一能拦住静默截断的东西。
+	plan = &MigratePlan{Columns: []ColumnVerdict{{
+		Column: "name", Source: "varchar(64)", SourceMaxLen: 64, Status: MigrateOK,
+	}}}
+	ApplyProbedLengths(plan, map[string]string{"name": "varchar(5)"}, map[string]int64{"name": 40})
+	if plan.Columns[0].Status != MigrateBlocked || plan.Blocked != 1 {
+		t.Fatalf("决策给的类型更窄时，实际值必须拦住：%+v", plan.Columns[0])
+	}
+	if !strings.Contains(plan.Columns[0].Reason, "超过目标上限 5") {
+		t.Errorf("要说清是按决策类型判的：%s", plan.Columns[0].Reason)
+	}
+}

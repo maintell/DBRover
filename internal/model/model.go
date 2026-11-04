@@ -4,7 +4,10 @@
 // 引擎差异一律通过 Capabilities 与 raw 字段表达。
 package model
 
-import "strings"
+import (
+	"strconv"
+	"strings"
+)
 
 // Engine 是数据库引擎类型。
 type Engine string
@@ -187,6 +190,39 @@ type ColumnType struct {
 	WithTZ    bool        `json:"with_tz,omitempty"`
 	Values    []string    `json:"values,omitempty"`
 	Elem      *ColumnType `json:"elem,omitempty"`
+}
+
+// TypeArgs 从类型声明里取出括号内的两个整数（"varchar(64)" → 64, 0；
+// "decimal(10,2)" → 10, 2）。
+//
+// 只解析**第一组**括号，且只认整数：这是各引擎类型声明里唯一通用的形状。
+// ok 为 false 表示没有括号参数（text / json / integer），调用方必须把它当成
+// 「不知道」，而不是「上限是 0」——把 0 当上限会把一切安全情况判成丢数据。
+//
+// 为什么放在 model：三个驱动的 NeutralType 与迁移预检都要用它，各写一份就会
+// 出现「MySQL 认 varchar(64)、PG 只认 numeric(10,2)」这种悄悄不一致。
+func TypeArgs(raw string) (first, second int, ok bool) {
+	i := strings.IndexByte(raw, '(')
+	if i < 0 {
+		return 0, 0, false
+	}
+	j := strings.IndexByte(raw[i:], ')')
+	if j < 0 {
+		return 0, 0, false
+	}
+	inner := raw[i+1 : i+j]
+	parts := strings.SplitN(inner, ",", 2)
+	n, err := strconv.Atoi(strings.TrimSpace(parts[0]))
+	if err != nil || n <= 0 {
+		return 0, 0, false
+	}
+	first = n
+	if len(parts) == 2 {
+		if m, err2 := strconv.Atoi(strings.TrimSpace(parts[1])); err2 == nil && m >= 0 {
+			second = m
+		}
+	}
+	return first, second, true
 }
 
 // ServerIdentity 是连接后采集的真实服务器指纹，用于防误连。
