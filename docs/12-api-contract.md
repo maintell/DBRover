@@ -79,7 +79,7 @@ Content-Type: application/x-ndjson
 | `GET` | `/api/v1/connections/{id}/tables` | 对象清单：表与视图，引擎能力支持时还包含触发器与序列（每项带 `kind`，界面据此决定能不能点开看数据） |
 | `GET` | `/api/v1/connections/{id}/tables/{name}/rows` | 表数据浏览，**键集分页**（`limit`、`after`、`where`、`order`） |
 | `GET` | `/api/v1/connections/{id}/tables/{name}/schema` | 列、索引、外键、主键与建表原文；表不存在 → 404。`?kind=trigger` / `?kind=sequence` 时只回对象定义（`{object, ddl, capabilities}`）——这两类对象没有列结构 |
-| `GET` | `/api/v1/connections/{id}/export` | 流式导出 CSV / NDJSON |
+| `GET` | `/api/v1/connections/{id}/export` | 流式导出 CSV / NDJSON / SQL（`format=sql`：建表 + `INSERT` 的可回放脚本，**同引擎**回放） |
 | `POST` | `/api/v1/connections/{id}/exec` | 执行 SQL（一次性，行数有上限） |
 | `POST` | `/api/v1/connections/{id}/query` | 打开**流式游标**，只接受单条只读语句 |
 | `GET` | `/api/v1/results/{cid}/page` | 按页拉取，`limit` 可调 |

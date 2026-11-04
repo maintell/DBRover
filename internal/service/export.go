@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/csv"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -26,10 +27,17 @@ const (
 	ExportCSV ExportFormat = "csv"
 	// ExportNDJSON 是每行一个 JSON 对象，适合流式消费。
 	ExportNDJSON ExportFormat = "ndjson"
+	// ExportSQL 是「建表 + INSERT」的可回放脚本，用于把一张表搬到另一个库。
+	//
+	// 只保证**同引擎**回放：字面量按方言生成（二进制 X'..' / '\x..'::bytea、
+	// 布尔 TRUE/FALSE 与 1/0），跨引擎请先核对类型映射。
+	ExportSQL ExportFormat = "sql"
 )
 
 // Valid 判断格式是否受支持。
-func (f ExportFormat) Valid() bool { return f == ExportCSV || f == ExportNDJSON }
+func (f ExportFormat) Valid() bool {
+	return f == ExportCSV || f == ExportNDJSON || f == ExportSQL
+}
 
 // ErrExportFormat 表示不支持的导出格式。
 var ErrExportFormat = fmt.Errorf("不支持的导出格式")
@@ -121,6 +129,18 @@ func (e *Executor) Export(ctx context.Context, req ExportRequest, w io.Writer) (
 
 	out := &ExportResult{Columns: len(names)}
 	bw := bufio.NewWriterSize(w, 64*1024)
+	table := quotePath(e, req.Table)
+
+	// SQL 脚本先写头与建表语句：拿到文件就能直接回放，不用另找结构。
+	if format == ExportSQL {
+		fmt.Fprintf(bw, "-- DBRover 导出：%s（%s）\n-- 同引擎回放；跨引擎请先核对类型映射。\n\n",
+			req.Table, e.conn.Engine())
+		ddl, derr := e.TableDDL(ctx, model.ObjectRef{Kind: model.KindTable, Name: req.Table})
+		if derr != nil {
+			return nil, fmt.Errorf("导出需要建表语句：%w", derr)
+		}
+		bw.WriteString(strings.TrimRight(ddl, "; \n") + ";\n\n")
+	}
 
 	switch format {
 	case ExportCSV:
@@ -152,6 +172,26 @@ func (e *Executor) Export(ctx context.Context, req ExportRequest, w io.Writer) (
 		cw.Flush()
 		if err := cw.Error(); err != nil {
 			return nil, err
+		}
+
+	case ExportSQL:
+		for {
+			batch, more, err := cur.Next(ctx)
+			if err != nil {
+				return nil, err
+			}
+			for _, row := range batch {
+				vals := make([]string, len(row))
+				for i, v := range row {
+					vals[i] = sqlLiteral(e.conn.Engine(), v)
+				}
+				fmt.Fprintf(bw, "INSERT INTO %s (%s) VALUES (%s);\n",
+					table, strings.Join(cols, ", "), strings.Join(vals, ", "))
+				out.Rows++
+			}
+			if !more {
+				break
+			}
 		}
 
 	case ExportNDJSON:
@@ -249,5 +289,43 @@ func jsonValue(v any) any {
 		return x.Format(time.RFC3339Nano)
 	default:
 		return v
+	}
+}
+
+// sqlLiteral 把一个值写成 SQL 字面量，按引擎的写法。
+//
+// 差异只有两处，但两处都会让脚本在对方引擎上语法错误：二进制（X'..' 与
+// '\x..'::bytea）和布尔（1/0 与 TRUE/FALSE）。其余类型用通用写法。
+// 认不出来的类型按字符串引起来——宁可多一层隐式转换，也不要拼出半截语句。
+func sqlLiteral(engine model.Engine, v any) string {
+	switch x := v.(type) {
+	case nil:
+		return "NULL"
+	case bool:
+		if engine == model.EnginePostgres {
+			if x {
+				return "TRUE"
+			}
+			return "FALSE"
+		}
+		if x {
+			return "1"
+		}
+		return "0"
+	case []byte:
+		hex := hex.EncodeToString(x)
+		if engine == model.EnginePostgres {
+			return `'\x` + hex + `'::bytea`
+		}
+		return "X'" + hex + "'"
+	case time.Time:
+		return "'" + x.Format("2006-01-02 15:04:05.999999") + "'"
+	case string:
+		return "'" + strings.ReplaceAll(x, "'", "''") + "'"
+	case int, int8, int16, int32, int64, uint, uint8, uint16, uint32, uint64,
+		float32, float64:
+		return fmt.Sprint(x)
+	default:
+		return "'" + strings.ReplaceAll(fmt.Sprint(x), "'", "''") + "'"
 	}
 }
