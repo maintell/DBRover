@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/maintell/DBRover/internal/driver/dialect"
 	"github.com/maintell/DBRover/internal/model"
@@ -371,18 +372,7 @@ func BuildMigrationNotes(src *model.TableDetail) []string {
 				c.Name, strings.TrimSpace(*c.Default)))
 		}
 	}
-	commented := 0
-	for _, c := range src.Columns {
-		if strings.TrimSpace(c.Comment) != "" {
-			commented++
-		}
-	}
-	if commented > 0 {
-		notes = append(notes, fmt.Sprintf("列注释未迁移（%d 列）", commented))
-	}
-	if strings.TrimSpace(src.Comment) != "" {
-		notes = append(notes, "表注释未迁移")
-	}
+	// 注释由 BuildMigrationCommentDDL 单独处理，这里不再重复提示。
 	if n := len(src.ForeignKeys); n > 0 {
 		notes = append(notes, fmt.Sprintf("外键（%d 个）不随建表创建：数据搬完后按目标库情况补建（见 migrate run 的输出）", n))
 	}
@@ -420,4 +410,70 @@ func BuildMigrationForeignKeyDDL(dstEngine model.Engine, supportsFK bool, table 
 			d.QuoteIdent(fk.RefTable), fk.RefColumns, fk.OnDelete, fk.OnUpdate)+";")
 	}
 	return stmts, skipped
+}
+
+// mysqlMaxTableComment 是 MySQL/MariaDB 的表注释上限（字符数）。超了引擎报 1629
+// 而不是截断，而注释撑不住不该让整次迁移失败——超了就说一声跳过。
+const mysqlMaxTableComment = 2048
+
+// BuildMigrationCommentDDL 生成注释迁移语句（ADR-0014）。
+//
+// PostgreSQL 的表与列注释都能搬（COMMENT ON ...）；MySQL 只有**表**注释能一条
+// 语句搞定——列注释必须带完整列定义（MODIFY COLUMN ... COMMENT），那要重算类型，
+// 价值不抵复杂度，v1 跳过并说明；SQLite 没有注释概念。
+//
+// 语句由调用方在**数据搬完之后**执行：注释不影响数据，不该挡在数据前面。
+func BuildMigrationCommentDDL(dstEngine model.Engine, table string, src *model.TableDetail) (stmts []string, skipped []string) {
+	if src == nil {
+		return nil, nil
+	}
+	d := dialect.For(dstEngine)
+	quotedTable := d.QuoteIdent(table)
+	hasColComment := false
+	for _, c := range src.Columns {
+		if strings.TrimSpace(c.Comment) != "" {
+			hasColComment = true
+		}
+	}
+
+	switch dstEngine {
+	case model.EnginePostgres:
+		if s := strings.TrimSpace(src.Comment); s != "" {
+			stmts = append(stmts, "COMMENT ON TABLE "+quotedTable+" IS "+quoteLiteral(dstEngine, s)+";")
+		}
+		for _, c := range src.Columns {
+			if s := strings.TrimSpace(c.Comment); s != "" {
+				stmts = append(stmts, "COMMENT ON COLUMN "+quotedTable+"."+d.QuoteIdent(c.Name)+" IS "+quoteLiteral(dstEngine, s)+";")
+			}
+		}
+	case model.EngineMySQL, model.EngineMariaDB:
+		if s := strings.TrimSpace(src.Comment); s != "" {
+			if n := utf8.RuneCountInString(s); n > mysqlMaxTableComment {
+				skipped = append(skipped, fmt.Sprintf("表注释未迁移：%d 字符超过 MySQL 上限 %d", n, mysqlMaxTableComment))
+			} else {
+				stmts = append(stmts, "ALTER TABLE "+quotedTable+" COMMENT = "+quoteLiteral(dstEngine, s)+";")
+			}
+		}
+		if hasColComment {
+			skipped = append(skipped, "列注释未迁移：MySQL 需要带完整列定义（MODIFY COLUMN），v1 不重算类型")
+		}
+	default:
+		if hasColComment || strings.TrimSpace(src.Comment) != "" {
+			skipped = append(skipped, fmt.Sprintf("注释未迁移：%s 没有注释语法", dstEngine))
+		}
+	}
+	return stmts, skipped
+}
+
+// quoteLiteral 把文本写成**目标引擎**的 SQL 单引号字面量。
+//
+// 只处理单引号是不够的：MySQL 默认 sql_mode 不含 NO_BACKSLASH_ESCAPES，反斜杠在
+// 字符串里是转义符，注释里写 C:\temp 会变成制表符前的 C:；PostgreSQL 从 9.1 起
+// standard_conforming_strings=on，反斜杠就是普通字符，多双写一个反而多存一个。
+// 所以按引擎分开处理——注释被改写属于静默数据失真，和丢数据一样不能接受。
+func quoteLiteral(engine model.Engine, s string) string {
+	if engine == model.EngineMySQL || engine == model.EngineMariaDB {
+		s = strings.ReplaceAll(s, "\\", "\\\\")
+	}
+	return "'" + strings.ReplaceAll(s, "'", "''") + "'"
 }

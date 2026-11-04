@@ -847,6 +847,10 @@ func cmdMigrate(args []string) error {
 	fs.StringVar(&dst.host, "to-host", "", "目标主机（网络引擎必填）")
 	fs.IntVar(&dst.port, "to-port", 0, "目标端口")
 	fs.StringVar(&dst.user, "to-user", "", "目标用户名")
+	// 目标端的口令必须能单独给：跨引擎迁移时源与目标往往不是同一套凭据，
+	// 复用源的口令会连不上，而错误看起来像「目标库拒绝连接」。
+	fs.BoolVar(&dst.passStdin, "to-password-stdin", false, "从标准输入读取目标密码")
+	fs.StringVar(&dst.passFile, "to-password-file", "", "从文件读取目标密码")
 	table := fs.String("table", "", "源表名")
 	targetTable := fs.String("to-table", "", "目标表名（默认同名）")
 	batch := fs.Int("batch", 1000, "每批行数")
@@ -980,6 +984,29 @@ func cmdMigrate(args []string) error {
 			fmt.Println("外键已建立：" + stmt)
 		}
 		for _, s := range fkSkipped {
+			fmt.Println("注意：" + s)
+		}
+	}
+
+	// 注释最后补：它不影响数据，但漏了会让人以为迁移丢东西。
+	//
+	// 失败只警告不中断：数据已经搬完并校验过，为一条注释把整次迁移判死不成比例。
+	// 用户需要知道的是「注释没过去」，不是「迁移失败」。
+	if derr == nil {
+		cmtStmts, cmtSkipped := service.BuildMigrationCommentDDL(dstConn.Engine(), name, srcDetail)
+		applied := 0
+		for _, stmt := range cmtStmts {
+			out, e := dstEx.Execute(ctx, service.Request{SQL: stmt, Approval: true, Actor: "human:cli"})
+			if e != nil || out == nil || out.Blocked || out.Err != nil {
+				fmt.Printf("注意：注释未迁移（%s）: err=%v blocked=%v\n", stmt, e, out != nil && out.Blocked)
+				continue
+			}
+			applied++
+		}
+		if applied > 0 {
+			fmt.Printf("注释已迁移：%d 条\n", applied)
+		}
+		for _, s := range cmtSkipped {
 			fmt.Println("注意：" + s)
 		}
 	}

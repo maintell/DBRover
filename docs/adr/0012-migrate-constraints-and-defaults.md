@@ -1,6 +1,6 @@
 # ADR-0012 · 迁移的约束与默认值：匿名唯一约束、只搬字面量默认值、注释不搬
 
-- 状态：**已采纳（部分实现）**
+- 状态：**已采纳（部分实现）**；§3「注释不搬」已被 [ADR-0014](0014-migrate-comments.md) 替代
 - 日期：2026-11-05
 - 影响面：`internal/service/migrate.go`（`BuildMigrationDDL` / `BuildMigrationNotes`）、`docs/08 §4`
 
@@ -49,11 +49,14 @@ CREATE TABLE t (
 - **宁可少搬并说出来，也不要搬一个行为不同的默认值**——后者会在用户不知情时
   改变写入数据的含义。
 
-### 3. 注释：不搬，但要说出来
+### 3. 注释：~~不搬，但要说出来~~ → 改由 [ADR-0014](0014-migrate-comments.md) 决定
 
-表注释与列注释都进 `BuildMigrationNotes`：「表/列注释未迁移」。三个引擎的写法不同
-（MySQL 在 `COMMENT` 子句、PG 用 `COMMENT ON`、SQLite 没有），而注释不影响数据正确性，
-放进 v1 只会增加失败点。
+原决定：表注释与列注释都进 `BuildMigrationNotes`（「表/列注释未迁移」），理由是三个引擎
+写法不同、注释不影响数据正确性、放进 v1 只会增加失败点。
+
+**这条已被真机推翻**：PostgreSQL 的表与列注释都能一条 `COMMENT ON` 搬过去，MySQL 的表
+注释也能一条 `ALTER TABLE … COMMENT` 搞定。现在按 ADR-0014 真搬，边界（MySQL 列注释
+跳过、失败只警告、按引擎转义、长度上限）都在那份 ADR 里。
 
 ## 后果
 
@@ -73,4 +76,5 @@ CREATE TABLE t (
 1. 源表带 `UNIQUE (email)`：DDL 里出现匿名 `UNIQUE ("email")`，且**不出现**源约束名。
 2. 源列带字面量默认值（`'0'`、`0`）：DDL 里出现 `DEFAULT`。
 3. 源列带表达式默认值（`nextval('s')`）：DDL 里不出现 `DEFAULT`，且 notes 里有该列。
-4. 源列带注释：notes 里有「注释未迁移」。
+4. 源列带注释：`BuildMigrationCommentDDL` 生成 `COMMENT ON` / `ALTER TABLE … COMMENT`
+   （原先只要求 notes 里有一句「注释未迁移」，已按 ADR-0014 改为真搬）。

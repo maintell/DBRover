@@ -272,11 +272,13 @@ func (c *Connector) DescribeTable(ctx context.Context, ref model.ObjectRef) (*mo
 		return nil, err
 	}
 
+	// 表注释与体量一起取：同一个 pg_class 行，多带一列而已。
 	_ = h.QueryRowContext(ctx,
-		`SELECT GREATEST(c.reltuples,0)::bigint, pg_total_relation_size(c.oid)
+		`SELECT GREATEST(c.reltuples,0)::bigint, pg_total_relation_size(c.oid),
+		        COALESCE(obj_description(c.oid,'pg_class'),'')
 		   FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
 		  WHERE n.nspname=$1 AND c.relname=$2`, schema, ref.Name).
-		Scan(&td.RowEstimate, &td.SizeBytes)
+		Scan(&td.RowEstimate, &td.SizeBytes, &td.Comment)
 
 	return td, nil
 }

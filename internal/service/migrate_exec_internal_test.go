@@ -383,3 +383,121 @@ func TestMigrateForeignKeyCrossEngine(t *testing.T) {
 		t.Fatal("插孤儿行应当被外键拒绝")
 	}
 }
+
+// TestMigrateCommentsOnRealPG 验证注释语句在真库上能执行、能读回。
+//
+// 单测只能证明我们拼出的 SQL 形状对；能不能被引擎接受、中文能不能原样存下来，
+// 只有真库说了算。
+func TestMigrateCommentsOnRealPG(t *testing.T) {
+	dsn := os.Getenv("DBRover_TEST_PG")
+	if dsn == "" {
+		t.Skip("需要 DBRover_TEST_PG")
+	}
+	ctx := context.Background()
+	pgEx := NewExecutor(openReal(t, "pg", dsn), model.EnvTest, model.AccessReadWrite, nil)
+	defer pgEx.Close()
+
+	for _, q := range []string{"DROP TABLE IF EXISTS mig_comment", "CREATE TABLE mig_comment (a int)"} {
+		if out, err := pgEx.Execute(ctx, Request{SQL: q, Approval: true}); err != nil || out.Err != nil {
+			t.Fatalf("准备 PG（%s）: %v %+v", q, err, out)
+		}
+	}
+	t.Cleanup(func() {
+		_, _ = pgEx.Execute(context.Background(), Request{SQL: "DROP TABLE IF EXISTS mig_comment", Approval: true})
+	})
+
+	src := &model.TableDetail{
+		Comment: "表的说明",
+		Columns: []model.Column{{Name: "a", Comment: "列'说明"}},
+	}
+	stmts, skipped := BuildMigrationCommentDDL(model.EnginePostgres, "mig_comment", src)
+	if len(skipped) != 0 {
+		t.Fatalf("PG 不该跳过：%v", skipped)
+	}
+	for _, stmt := range stmts {
+		if out, err := pgEx.Execute(ctx, Request{SQL: stmt, Approval: true}); err != nil || out.Err != nil {
+			t.Fatalf("执行注释（%s）: %v %+v", stmt, err, out)
+		}
+	}
+
+	sess, err := pgEx.conn.Acquire(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = sess.Close() }()
+	cur, err := sess.Query(ctx, "SELECT obj_description('mig_comment'::regclass,'pg_class'), col_description('mig_comment'::regclass, 1)", nil, driver.QueryOptions{MaxRows: 1})
+	if err != nil {
+		t.Fatalf("读注释: %v", err)
+	}
+	defer func() { _ = cur.Close() }()
+	rows, _, err := cur.Next(ctx)
+	if err != nil || len(rows) != 1 || len(rows[0]) != 2 {
+		t.Fatalf("读注释结果异常: %v %v", err, rows)
+	}
+	if got, _ := rows[0][0].(string); got != "表的说明" {
+		t.Errorf("表注释 = %q", got)
+	}
+	if got, _ := rows[0][1].(string); got != "列'说明" {
+		t.Errorf("列注释 = %q（单引号应原样保留）", got)
+	}
+}
+
+// TestMigrateCommentsOnRealMySQL 验证 MySQL 只有表注释能搬、且反斜杠不被改写。
+//
+// MySQL 默认 sql_mode 不含 NO_BACKSLASH_ESCAPES，反斜杠在字符串里是转义符：
+// 只双写单引号的话，注释里的路径会被存成带制表符的另一段文本——语句不报错、
+// 用户却看不到自己写的注释。这条用例就是为了让那种「看起来对」的拼接立刻变红。
+func TestMigrateCommentsOnRealMySQL(t *testing.T) {
+	dsn := os.Getenv("DBRover_TEST_MYSQL")
+	if dsn == "" {
+		t.Skip("需要 DBRover_TEST_MYSQL")
+	}
+	ctx := context.Background()
+	myEx := NewExecutor(openReal(t, "mysql", dsn), model.EnvTest, model.AccessReadWrite, nil)
+	defer myEx.Close()
+
+	for _, q := range []string{"DROP TABLE IF EXISTS mig_comment", "CREATE TABLE mig_comment (a INT)"} {
+		if out, err := myEx.Execute(ctx, Request{SQL: q, Approval: true}); err != nil || out.Err != nil {
+			t.Fatalf("准备 MySQL（%s）: %v %+v", q, err, out)
+		}
+	}
+	t.Cleanup(func() {
+		_, _ = myEx.Execute(context.Background(), Request{SQL: "DROP TABLE IF EXISTS mig_comment", Approval: true})
+	})
+
+	const bs = "\\" // 反斜杠本身
+	want := "表说明 C:" + bs + "temp 与 '引号'"
+	src := &model.TableDetail{
+		Comment: want,
+		Columns: []model.Column{{Name: "a", Comment: "列说明"}},
+	}
+	stmts, skipped := BuildMigrationCommentDDL(model.EngineMySQL, "mig_comment", src)
+	if len(stmts) != 1 {
+		t.Fatalf("MySQL 只该生成表注释：%v", stmts)
+	}
+	if len(skipped) != 1 || !strings.Contains(skipped[0], "列注释未迁移") {
+		t.Fatalf("列注释要说明跳过原因：%v", skipped)
+	}
+	if out, err := myEx.Execute(ctx, Request{SQL: stmts[0], Approval: true}); err != nil || out.Err != nil {
+		t.Fatalf("执行注释（%s）: %v %+v", stmts[0], err, out)
+	}
+
+	// 读回真值：反斜杠与单引号都必须原样在。
+	sess, err := myEx.conn.Acquire(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = sess.Close() }()
+	cur, err := sess.Query(ctx, "SELECT TABLE_COMMENT FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'mig_comment'", nil, driver.QueryOptions{MaxRows: 1})
+	if err != nil {
+		t.Fatalf("读注释: %v", err)
+	}
+	defer func() { _ = cur.Close() }()
+	rows, _, err := cur.Next(ctx)
+	if err != nil || len(rows) != 1 || len(rows[0]) != 1 {
+		t.Fatalf("读注释结果异常: %v %v", err, rows)
+	}
+	if got, _ := rows[0][0].(string); got != want {
+		t.Errorf("表注释 = %q，期望 %q", got, want)
+	}
+}

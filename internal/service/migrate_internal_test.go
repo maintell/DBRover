@@ -280,10 +280,7 @@ func TestMigrationConstraintsAndDefaults(t *testing.T) {
 	if !strings.Contains(notes, "列 s 的默认值未迁移") {
 		t.Errorf("notes 要点名表达式默认值：%s", notes)
 	}
-	// 4) 注释与外键要出声。
-	if !strings.Contains(notes, "列注释未迁移") || !strings.Contains(notes, "表注释未迁移") {
-		t.Errorf("notes 要提到注释：%s", notes)
-	}
+	// 4) 外键要说明是搬完后补建（注释由 BuildMigrationCommentDDL 单独处理）。
 	if !strings.Contains(notes, "外键") || !strings.Contains(notes, "补建") {
 		t.Errorf("notes 要说明外键是搬完后补建：%s", notes)
 	}
@@ -328,5 +325,85 @@ func TestBuildMigrationForeignKeyDDL(t *testing.T) {
 	}
 	if len(skipped) != 1 || !strings.Contains(skipped[0], "不支持") {
 		t.Fatalf("跳过理由要说清引擎不支持：%v", skipped)
+	}
+}
+
+// TestBuildMigrationCommentDDL 钉住三种引擎的注释能力差异。
+func TestBuildMigrationCommentDDL(t *testing.T) {
+	src := &model.TableDetail{
+		Comment: "表说明",
+		Columns: []model.Column{
+			{Name: "a", Comment: "列说明"},
+			{Name: "b"},
+		},
+	}
+
+	// PostgreSQL：表 + 列都能搬。
+	stmts, skipped := BuildMigrationCommentDDL(model.EnginePostgres, "t", src)
+	if len(stmts) != 2 || len(skipped) != 0 {
+		t.Fatalf("PG 应生成 2 条注释语句：stmts=%v skipped=%v", stmts, skipped)
+	}
+	joined := strings.Join(stmts, "\n")
+	if !strings.Contains(joined, `COMMENT ON TABLE "t"`) || !strings.Contains(joined, `COMMENT ON COLUMN "t"."a"`) {
+		t.Errorf("注释语句不对：%s", joined)
+	}
+	if !strings.Contains(joined, "'表说明'") {
+		t.Errorf("中文注释应原样写入：%s", joined)
+	}
+
+	// MySQL：只有表注释能一条语句搞定，列注释跳过并说明。
+	stmts, skipped = BuildMigrationCommentDDL(model.EngineMySQL, "t", src)
+	if len(stmts) != 1 || !strings.Contains(stmts[0], "COMMENT = ") {
+		t.Fatalf("MySQL 应只生成表注释：%v", stmts)
+	}
+	if len(skipped) != 1 || !strings.Contains(skipped[0], "列注释未迁移") {
+		t.Fatalf("跳过的列注释要说明原因：%v", skipped)
+	}
+
+	// SQLite：没有注释语法。
+	stmts, skipped = BuildMigrationCommentDDL(model.EngineSQLite, "t", src)
+	if len(stmts) != 0 || len(skipped) != 1 || !strings.Contains(skipped[0], "没有注释语法") {
+		t.Fatalf("SQLite 应全部跳过：stmts=%v skipped=%v", stmts, skipped)
+	}
+}
+
+// TestQuoteLiteralByEngine 钉住「反斜杠只在 MySQL 里是转义符」这条引擎差异。
+//
+// 只双写单引号是半个转义：MySQL 默认把反斜杠当转义符，注释里的路径会被改写；
+// PG 从 9.1 起 standard_conforming_strings=on，反斜杠就是普通字符，多写一个就
+// 多存一个。两种错法都会静默改写用户写的注释，所以两边的期望值都要钉死。
+func TestQuoteLiteralByEngine(t *testing.T) {
+	const bs = "\\" // 反斜杠本身，省得在断言里数转义层数
+	raw := "C:" + bs + "temp 与 '引号'"
+
+	pg := quoteLiteral(model.EnginePostgres, raw)
+	if want := "'C:" + bs + "temp 与 ''引号'''"; pg != want {
+		t.Errorf("PG 不该动反斜杠：%q want %q", pg, want)
+	}
+
+	// MySQL：反斜杠双写，单引号仍然双写成 ''（MySQL 也接受这种写法）。
+	my := quoteLiteral(model.EngineMySQL, raw)
+	if want := "'C:" + bs + bs + "temp 与 ''引号'''"; my != want {
+		t.Errorf("MySQL 的字面量不对：%q want %q", my, want)
+	}
+	if !strings.HasPrefix(my, "'") || !strings.HasSuffix(my, "'") {
+		t.Errorf("字面量没有闭合：%q", my)
+	}
+}
+
+// TestBuildMigrationCommentDDLTooLong 钉住「超长注释跳过并说明，不发一条注定 1629 的语句」。
+func TestBuildMigrationCommentDDLTooLong(t *testing.T) {
+	src := &model.TableDetail{Comment: strings.Repeat("注", mysqlMaxTableComment+1)}
+	stmts, skipped := BuildMigrationCommentDDL(model.EngineMySQL, "t", src)
+	if len(stmts) != 0 {
+		t.Fatalf("超长注释不该生成语句：%v", stmts)
+	}
+	if len(skipped) != 1 || !strings.Contains(skipped[0], "超过 MySQL 上限") {
+		t.Fatalf("跳过理由要说清超长：%v", skipped)
+	}
+	// 边界：正好等于上限要保留（差一错误的方向必须是「少拦」而不是「多拦」）。
+	src.Comment = strings.Repeat("注", mysqlMaxTableComment)
+	if stmts, _ := BuildMigrationCommentDDL(model.EngineMySQL, "t", src); len(stmts) != 1 {
+		t.Fatalf("正好等于上限应保留：%v", stmts)
 	}
 }

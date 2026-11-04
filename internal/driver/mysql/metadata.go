@@ -330,10 +330,13 @@ func (c *Connector) DescribeTable(ctx context.Context, ref model.ObjectRef) (*mo
 	if err := c.loadForeignKeys(ctx, h, db, ref.Name, td); err != nil {
 		return nil, err
 	}
+	// 表注释也在这张表里。漏了它整条链路都看不见：表详情不显示、迁移搬不过去、
+	// 比对拿不到一侧的值——而列注释一直是有的，看起来就像「MySQL 没有表注释」。
 	_ = h.QueryRowContext(ctx,
-		`SELECT COALESCE(TABLE_ROWS,0), COALESCE(DATA_LENGTH,0)+COALESCE(INDEX_LENGTH,0)
+		`SELECT COALESCE(TABLE_ROWS,0), COALESCE(DATA_LENGTH,0)+COALESCE(INDEX_LENGTH,0),
+		        COALESCE(TABLE_COMMENT,'')
 		   FROM information_schema.TABLES WHERE TABLE_SCHEMA=? AND TABLE_NAME=?`,
-		db, ref.Name).Scan(&td.RowEstimate, &td.SizeBytes)
+		db, ref.Name).Scan(&td.RowEstimate, &td.SizeBytes, &td.Comment)
 
 	return td, nil
 }

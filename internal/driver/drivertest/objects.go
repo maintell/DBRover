@@ -226,3 +226,43 @@ func testSearchComments(t *testing.T, cfg Config) {
 		}
 	}
 }
+
+// testDescribeReportsTableComment 验证表详情里能拿到**表**注释。
+//
+// 为什么单列一条：列注释一直有，表注释却长期缺着——MySQL 的
+// information_schema.TABLES.TABLE_COMMENT、PG 的 obj_description 都查得到，
+// 只是没接进 DescribeTable。缺了它，表详情看不到说明、迁移搬不过去、
+// 比对只能比列注释，而表面上完全不像缺陷（列注释明明在）。
+func testDescribeReportsTableComment(t *testing.T, cfg Config) {
+	if cfg.Comment == nil {
+		t.Skip("这个引擎没有表注释")
+	}
+	ctx := context.Background()
+	c, err := cfg.New(false)
+	if err != nil {
+		t.Fatalf("连接: %v", err)
+	}
+	defer func() { _ = c.Close() }()
+
+	s, err := c.Acquire(ctx)
+	if err != nil {
+		t.Fatalf("Acquire: %v", err)
+	}
+	defer func() { _ = s.Close() }()
+	const table = "comment_detail_probe"
+	if _, err := s.Execute(ctx, "CREATE TABLE "+table+" (id INTEGER PRIMARY KEY)", nil); err != nil {
+		t.Fatalf("建表: %v", err)
+	}
+	const token = "表说明 token-3d51 中文"
+	if err := cfg.Comment(ctx, s, table, token); err != nil {
+		t.Fatalf("写注释: %v", err)
+	}
+
+	detail, err := c.Meta().DescribeTable(ctx, model.ObjectRef{Kind: model.KindTable, Name: table})
+	if err != nil {
+		t.Fatalf("DescribeTable: %v", err)
+	}
+	if detail.Comment != token {
+		t.Fatalf("表注释 = %q，期望 %q（说明 DescribeTable 没取表注释）", detail.Comment, token)
+	}
+}
