@@ -1590,7 +1590,9 @@ function renderSchema(out) {
       '<input id="ck-expr" class="narrow" placeholder="表达式，例如 age >= 0" autocomplete="off" spellcheck="false">' +
       '<button id="ck-add" class="primary">加约束</button>';
     wrap.appendChild(ckForm);
-    $('ck-add').onclick = () => planAddCheck();
+    // 绑定放到 wrap 挂进文档之后（见函数末尾）：这里 $('ck-add') 还查不到元素，
+    // 直接赋值会抛 "Cannot set properties of null (setting 'onclick')"，
+    // 整个结构视图当场白掉——真机点一次才发现，源码门禁看不出来。
   }
 
   const idxs = out.indexes || [];
@@ -1742,6 +1744,7 @@ function renderSchema(out) {
   $('sch-add').onclick = () => planAddColumn();
   $('ix-add').onclick = () => planCreateIndex();
   if ($('fk-add')) $('fk-add').onclick = () => planAddForeignKey();
+  if ($('ck-add')) $('ck-add').onclick = () => planAddCheck();
   setStatus(state.tableName + ' · ' + cols.length + ' 列' +
     (pk.length ? '（主键 ' + pk.join(', ') + '）' : '（无主键）'));
 }
