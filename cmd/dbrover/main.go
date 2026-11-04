@@ -62,6 +62,8 @@ func main() {
 		err = cmdBackup(os.Args[2:])
 	case "restore":
 		err = cmdRestore(os.Args[2:])
+	case "migrate":
+		err = cmdMigrate(os.Args[2:])
 	default:
 		fmt.Fprintf(os.Stderr, "未知命令: %s\n\n", os.Args[1])
 		usage()
@@ -91,6 +93,7 @@ func usage() {
   dbrover secret (set|clear|status) [-service dbrover/agent] [-account api-key]  # 口令从 stdin 读
   dbrover backup (create|inspect) [-db <file> ...] [-out <文件.dbr>] [-resume] [-compress] [-passphrase-stdin]
   dbrover restore -file <文件.dbr> -db <file> -env ... -yes [-allow-existing]  # 同引擎恢复
+  dbrover migrate (plan|run) -db <源> -table <表> -to-db <目标> [-set col=type] [-yes]
 
 退出码:
   0  成功
@@ -824,4 +827,135 @@ func readPassphraseStdin() (string, error) {
 		return "", fmt.Errorf("读取口令失败: %w", err)
 	}
 	return strings.TrimRight(line, "\r\n"), nil
+}
+
+// cmdMigrate 是迁移的命令行入口。
+//
+// 两个子命令：plan 只给结论与 DDL；run 依次做「建表 → 搬数据 → 校验」。
+// 源连接用通用的 -db/-host/...，目标连接用 -to-* 前缀。
+func cmdMigrate(args []string) error {
+	if len(args) == 0 {
+		return errors.New("用法: dbrover migrate plan|run -db <源> -table <表> -to-db <目标> ...")
+	}
+	sub := args[0]
+	fs := flag.NewFlagSet("migrate "+sub, flag.ExitOnError)
+	var src, dst connFlags
+	src.bind(fs)
+	fs.StringVar(&dst.engine, "to-engine", "sqlite", "目标引擎: sqlite|mysql|postgres")
+	fs.StringVar(&dst.db, "to-db", "", "目标库文件或库名")
+	fs.StringVar(&dst.schema, "to-schema", "", "目标 schema（可选）")
+	fs.StringVar(&dst.host, "to-host", "", "目标主机（网络引擎必填）")
+	fs.IntVar(&dst.port, "to-port", 0, "目标端口")
+	fs.StringVar(&dst.user, "to-user", "", "目标用户名")
+	table := fs.String("table", "", "源表名")
+	targetTable := fs.String("to-table", "", "目标表名（默认同名）")
+	batch := fs.Int("batch", 1000, "每批行数")
+	maxRows := fs.Int("max-rows", 0, ">0 时只搬这么多行（演练）")
+	yes := fs.Bool("yes", false, "确认执行（run 需要）")
+	var sets multiFlag
+	fs.Var(&sets, "set", "人工决定的目标类型，形如 -set col=varchar(64)（可重复）")
+	if err := fs.Parse(args[1:]); err != nil {
+		return err
+	}
+	if strings.TrimSpace(*table) == "" {
+		return errors.New("需要 -table")
+	}
+	decisions, err := parseMigrateSets(sets)
+	if err != nil {
+		return err
+	}
+
+	// 目标是写入方：沿用源的环境，并强制读写。否则 -to-* 没带 -env 时默认
+	// unknown → 只读，建表会以「attempt to write a readonly database」失败，
+	// 而这个错误看起来像磁盘问题。
+	dst.env = src.env
+	dst.rw = true
+
+	srcConn, env, mode, err := src.open()
+	if err != nil {
+		return fmt.Errorf("源连接: %w", err)
+	}
+	defer func() { _ = srcConn.Close() }()
+	dstConn, _, dstMode, err := dst.open()
+	if err != nil {
+		return fmt.Errorf("目标连接: %w", err)
+	}
+	defer func() { _ = dstConn.Close() }()
+
+	srcEx := service.NewExecutor(srcConn, env, mode, nil)
+	defer srcEx.Close()
+	dstEx := service.NewExecutor(dstConn, env, dstMode, nil)
+	defer dstEx.Close()
+	ctx := context.Background()
+
+	plan, ddlText, perr := service.PlanMigrationBetween(ctx, srcEx, dstEx, *table, *targetTable, decisions)
+	for _, c := range plan.Columns {
+		fmt.Printf("  %-24s %-18s %-8s %s\n", c.Column, c.Source, c.Status, c.Reason)
+	}
+	if errors.Is(perr, service.ErrMigrateNeedsDecision) {
+		return perr
+	}
+	if perr != nil {
+		return perr
+	}
+	if sub == "plan" {
+		fmt.Println(ddlText)
+		return nil
+	}
+	if !*yes {
+		return errors.New("run 会建表并写数据；确认无误后加 -yes")
+	}
+
+	name := *targetTable
+	if name == "" {
+		name = *table
+	}
+	changePlan, err := dstEx.BuildDDLPlan(ctx, service.DDLRequest{
+		Table:  model.ObjectRef{Kind: model.KindTable, Name: name},
+		Action: service.DDLRaw,
+		RawSQL: ddlText,
+	})
+	if err != nil {
+		return fmt.Errorf("建表预案: %w", err)
+	}
+	if out, err := dstEx.ApplyChangePlan(ctx, changePlan, service.Request{Approval: true, Actor: "human:cli"}); err != nil || out.Err != nil || out.Blocked {
+		return fmt.Errorf("建表失败: err=%v out=%+v", err, out)
+	}
+	fmt.Println("结构已建立")
+
+	rep, err := service.MigrateTable(ctx, srcEx, dstEx, *table, *targetTable,
+		service.MigrateExecOptions{BatchSize: *batch, MaxRows: *maxRows})
+	if err != nil {
+		return err
+	}
+	fmt.Printf("迁移完成：%d 行 / %d 批，校验=%v\n", rep.Rows, rep.Batches, rep.Verified)
+	if rep.Note != "" {
+		fmt.Println("注意：" + rep.Note)
+	}
+	return nil
+}
+
+// multiFlag 是可重复的字符串参数。
+type multiFlag []string
+
+func (m *multiFlag) String() string { return strings.Join(*m, ",") }
+func (m *multiFlag) Set(v string) error {
+	*m = append(*m, v)
+	return nil
+}
+
+// parseMigrateSets 解析 -set col=type 形式的决策。
+func parseMigrateSets(items []string) (map[string]string, error) {
+	if len(items) == 0 {
+		return nil, nil
+	}
+	out := map[string]string{}
+	for _, it := range items {
+		i := strings.Index(it, "=")
+		if i <= 0 || i == len(it)-1 {
+			return nil, fmt.Errorf("-set 需要 col=type 形式，实际 %q", it)
+		}
+		out[strings.TrimSpace(it[:i])] = strings.TrimSpace(it[i+1:])
+	}
+	return out, nil
 }

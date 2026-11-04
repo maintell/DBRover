@@ -153,6 +153,10 @@ bin/dbrover.exe exec -db demo.db -ro -env test -sql "DELETE FROM t"
 
 # 起服务（浏览器界面 + HTTP API），审计落盘
 bin/dbrover.exe serve -addr 127.0.0.1:7788 -audit ./audit.jsonl
+
+# 迁移一张表（同引擎）：预检 → 建表 → 搬数据 → 校验
+bin/dbrover.exe migrate plan -db demo.db -table t -to-db target.db
+bin/dbrover.exe migrate run  -db demo.db -table t -to-db target.db -yes
 # 打开它打印的 http://127.0.0.1:7788/#t=<token> 即可操作
 ```
 
