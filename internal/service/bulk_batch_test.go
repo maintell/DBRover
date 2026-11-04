@@ -218,8 +218,6 @@ func TestBulkBatchAbortBetweenBatches(t *testing.T) {
 	}
 }
 
-// TestBulkCompositePrimaryKeyDoesNotBatch 验证复合主键不启用分批，并且把原因写出来。
-// 宁可少一个能力，也不能拼出各引擎方言不一的行值比较。
 // TestBulkCompositePrimaryKeyBatches 验证复合主键也能按主键键集分批：
 // 键集条件按列展开成 OR，不需要行值比较，三个引擎通吃。
 //

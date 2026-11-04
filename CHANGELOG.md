@@ -147,6 +147,8 @@
 
 - **恢复覆盖要「把目标名写出来」**（[ADR-0015](docs/adr/0015-connector-target-and-restore-confirmation.md)）：`Connector` 新增 `Target()`（关系库是 catalog、SQLite 是文件路径，不暴露带口令的 `ConnectConfig`），`restore` 的 `-allow-existing` 换成 `-confirm-target`——必须与连接器自报的目标一致，写错会当场拦住并同时给出「你写的」与「实际指向」。**顺带修掉一个假功能**：`-allow-existing` 以前只是放行，而恢复执行的是容器里不带 `IF NOT EXISTS` 的 `CREATE TABLE`，目标表已存在时必然失败（这条路径此前没有任何用例）。现在覆盖 = 确认 → 先删冲突对象（视图先于表）→ 再重建，全程一个事务，报告用 `Replaced` 点名被替换的对象。**不可回滚的引擎（MySQL）拒绝覆盖**：DDL 隐式提交下「删完才失败」会留下半毁的库，不由开关授权。
 
+- **文档引用门禁**（`internal/ci/docs_test.go`）：文档里写着的 `TestX`、`(NNNN-*.md)` ADR 链接、`scripts/*.ps1` 逐条核对。测试改名、ADR 重编号、脚本换名之后文档不会产生任何编译错误——读者点进去看到 404，才知道那句验收是空的。判据是「同名或以它为前缀」：文档里常写 `TestBulkPlan` 指一整族 `TestBulkPlan*`，那是有效的指路，整族改名时仍然会红。**上线即抓到一次真的腐烂**：`docs/06` 引用的 `TestBulkCompositePrimaryKeyDoesNotBatch` 早已被 `TestBulkCompositePrimaryKeyBatches` 取代（复合主键现在**会**分批，每批 200），而 `bulk_batch_test.go` 里还留着那个已删测试的注释——两处恰好互相矛盾，谁都没在编译或测试里被提醒。三条门禁都带「扫不到东西就红」的下限（引用数、测试函数数），避免正则写坏之后静默通过。
+
 ### 安全
 
 - **大整数不再静默丢精度**：`BIGINT` 超过 2^53 时，界面保持字符串、服务端按列类型还原；客户端若把它写成 JSON 数字，直接 `400 NUMBER_PRECISION_LOSS` 并提示改用字符串，而不是把丢了低位的值写进库。此前界面 `coerce()` 用 `Number()` 转换整数列，编辑 `9223372036854775807` 会变成 `...5808`。
