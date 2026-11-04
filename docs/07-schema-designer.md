@@ -249,18 +249,18 @@ SELECT COUNT(*) FROM t WHERE c > 2147483647 OR c < -2147483648;
 
 | # | 项 | 判定 |
 |---|---|---|
-| 1 | 表设计器改动实时生成 DDL 且可见 | 手动 |
-| 2 | 5 种关系库的 DDL 还原可空库回放并结构等价 | `drivertest` |
+| 1 | 表设计器改动实时生成 DDL 且可见 | 手动 + 集成 ✅ 后端：`POST /schema/plan?preview=1` 只算语句**不保管预案**——`TestSchemaPreviewDoesNotStorePlan` 断言「拿预览的 id 去执行返回 404，不带 preview 的正式预案才 201 且能执行」；前端：输入变化 250ms 后调预览并展示（浏览器实测） |
+| 2 | 5 种关系库的 DDL 还原可空库回放并结构等价 | `drivertest` ⚠️ **3/5**：SQLite / MySQL / PostgreSQL 的 `DDLRoundTrip` 真机通过；SQL Server 与 Oracle 驱动尚未实现，这条不能算全绿 |
 | 3 | MySQL 上 `DROP COLUMN` 显示「不可回滚且丢数据」红色警示 | 手动 + 集成 ✅ 预案本身说清三件事：`irreversible: true`、`affected_rows` 是非空行数（界面用它说「会丢多少」）、`rollback` 里只有把列加回来的语句；界面把不可逆提示渲染成红色（`.card p.danger` + 红色「不可逆」徽标），`TestIrreversibleWarningIsRed` 钉住类名与配色（改回琥珀色即红）。真机 MySQL 5.7 与 PG 17 都验过：`TestDropColumnIsIrreversibleOnRealEngines`（删列后列真的消失、旁列不受影响、`RollsBackAsCompensation` 与 `DDLTransactional` 一致） |
 | 4 | PG 上展示 `CONCURRENTLY` 建议并提示不能用于事务 | 手动 + 集成 ✅ 预案 `notes` 给出 `CREATE INDEX CONCURRENTLY …` 的写法并说明「不能用于事务、要到 SQL 工作区单独跑」，界面把 `plan.notes` 渲染成警示条；`TestCreateIndexPlanGivesConcurrentlyAdvice` 反向锁住「预案里的语句不许自动出现 CONCURRENTLY」（执行门是单事务的，自动生成会让每次执行都失败）。真机 PG 17 核过：事务里建并发索引报 `CREATE INDEX CONCURRENTLY cannot run inside a transaction block`，普通 `CREATE INDEX` 正常 |
-| 5 | 加外键前检测孤儿数据并阻断 | 集成 |
-| 6 | 加唯一索引前检测重复值并阻断 | 集成 |
-| 7 | 收窄类型前检测越界数据并给出样本 | 集成 |
-| 8 | 存在视图依赖时 `DROP TABLE` 被阻断 | 集成 |
-| 9 | 结构比对生成升级与回退脚本，且脚本可执行 | 集成（双库） |
-| 10 | 对象定义在执行前被他人修改 → 预检失败并阻断 | 集成 |
-| 11 | 无长事务时才允许执行高风险 DDL | 集成 |
-| 12 | 表单视图与 SQL 视图内容一致（双向） | 单测 |
+| 5 | 加外键前检测孤儿数据并阻断 | 集成 ✅ `TestFKPrecheckOrphansBlocked`、`TestFKPrecheckCleanData`、`TestFKPrecheckCompositeUniqueness`、`TestFKPrecheckEndpoint`、`TestDDLAddForeignKeyOnRealEngines`（MySQL 5.7 + PG 17 真机：孤儿阻断带样本 → 清数据后出预案 → 执行 → 结构里出现外键 → 回滚摘掉） |
+| 6 | 加唯一索引前检测重复值并阻断 | 集成 ✅ `TestDDLUniqueIndexBlocksDuplicates`（真机路径在 `TestDDLIndexOnRealEngines`） |
+| 7 | 收窄类型前检测越界数据并给出样本 | 集成 ✅ `TestBoundsFor` + `TestDDLAlterColumnTypeOnRealEngines`（MySQL + PG 真机，含拦截与放行两条路径） |
+| 8 | 存在视图依赖时 `DROP TABLE` 被阻断 | 集成 ✅ `TestDDLDropTableBlockedByView`、`TestSchemaPlanDropTableBlockedByDependency`、`drivertest` 的 `DependentsReported`（三引擎）、`scripts/accept/deps-drop.ps1`（MySQL 5.7 + PG 17 真机：外键 + 视图双阻断 → 拆掉后出预案 → 执行 → 表消失） |
+| 9 | 结构比对生成升级与回退脚本，且脚本可执行 | 集成（双库）✅ `TestCompareSchemas` / `TestCompareIndexes` / `TestCompareForeignKeys` / `TestCompareChecks` / `TestCompareViews` / `TestCompareEndpoint`；真机 `scripts/accept/compare-cross.ps1`（MySQL 5.7 ↔ PG 17 同构表零差异、跨引擎单侧视图分类、MySQL 两库视图零误报） |
+| 10 | 对象定义在执行前被他人修改 → 预检失败并阻断 | 集成 ✅ `TestDDLPlanSchemaChangedBlocks`、`TestDDLCreateTableBlocksWhenTableAppeared`、`TestDDLPlanOnRealEngines`（MySQL + PG）；返回 `409 SCHEMA_CHANGED`，前端据此重读结构 |
+| 11 | 无长事务时才允许执行高风险 DDL | 集成 ⚠️ 实现有：`checkBlockers` 把 `lock_wait` 判为阻断（`ErrLockWait`）、`idle_in_transaction` 只进提示，`TestSplitBlockers` 覆盖两类分流；**缺「真等到一把锁 → 预案被拒」的集成用例**，所以不标通过 |
+| 12 | 表单视图与 SQL 视图内容一致（双向） | 单测 ⚠️ **只有单向**：表单 → DDL 由 `BuildDDLPlan` 生成；DDL → 表单（反解）未做，需要完整 DDL 解析器（见 §9 已知限制）。没有自动化用例直接比对两种输入产生同一份语句，此前是人工核对 |
 
 ---
 
