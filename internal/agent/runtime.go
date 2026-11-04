@@ -43,6 +43,12 @@ type Options struct {
 	// ContextBudget 是历史消息的字符预算，0 表示默认（24000）。
 	// 超过就把最早的工具结果压成一指代（见 compactHistory）。
 	ContextBudget int
+	// ContextTokens 是模型上下文窗口的 token 数。>0 时压缩按「估算 token 达到
+	// 窗口的 85%」触发（见 compactHistoryByTokens），字符预算退居其次。
+	//
+	// 没有内置 tokenizer：估算规则是「CJK 一个字算 1 token，其它按 4 字符算
+	// 1 token」，偏保守。要精确值就得为每个模型带词表，成本远超收益。
+	ContextTokens int
 	// Actor 是审计里的发起者，默认 agent:local。
 	Actor string
 }
@@ -85,6 +91,7 @@ type Runtime struct {
 	maxToolFailures int
 	maxDuration     time.Duration
 	contextBudget   int
+	contextTokens   int
 	tools           map[string]Tool
 
 	mu       sync.Mutex
@@ -137,6 +144,7 @@ func NewRuntime(o Options) (*Runtime, error) {
 		maxToolFailures: o.MaxToolFailures,
 		maxDuration:     o.MaxDuration,
 		contextBudget:   o.ContextBudget,
+		contextTokens:   o.ContextTokens,
 		plans:           map[string]*service.ChangePlan{},
 		approved:        map[string]bool{},
 		failures:        map[string]int{},
@@ -153,6 +161,19 @@ func NewRuntime(o Options) (*Runtime, error) {
 
 // Mode 返回收窄后的实际权限模式。
 func (r *Runtime) Mode() Mode { return r.policy.Mode() }
+
+// compact 按配置选择压缩口径。
+//
+// 给了上下文窗口（ContextTokens）就按估算 token 的 85% 触发——那是契约里写的
+// 口径；没给就退回字符预算，行为与从前一致，不会因为升级悄悄改掉阈值。
+func (r *Runtime) compact(msgs []Message) []Message {
+	if r.contextTokens > 0 {
+		out, _ := compactHistoryByTokens(msgs, int(float64(r.contextTokens)*compactRatio))
+		return out
+	}
+	out, _ := compactHistory(msgs, r.contextBudget)
+	return out
+}
 
 // ProviderName 返回模型服务名，给界面显示。
 func (r *Runtime) ProviderName() string { return r.prov.Name() }
@@ -330,7 +351,7 @@ func (r *Runtime) ask(ctx context.Context, question string, emit func(Event)) (*
 		msgs = append(msgs, Message{Role: "system", Name: "context", Content: background})
 	}
 	msgs = append(msgs, Message{Role: "user", Content: question})
-	msgs, _ = compactHistory(msgs, r.contextBudget)
+	msgs = r.compact(msgs)
 
 	res := &Result{}
 	var lastSig string
@@ -381,7 +402,7 @@ func (r *Runtime) ask(ctx context.Context, question string, emit func(Event)) (*
 				Content: envText,
 			})
 			// 每加一条就检查预算：等到最后再压，上下文可能已经超了。
-			msgs, _ = compactHistory(msgs, r.contextBudget)
+			msgs = r.compact(msgs)
 
 			sig := call.Name + "|" + compactJSON(call.Arguments)
 			if sig == lastSig {

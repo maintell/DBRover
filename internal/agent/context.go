@@ -22,8 +22,10 @@ const (
 	maxDescribeTables = 5
 	// defaultContextBudget 是历史消息的字符预算（粗估 3 字符 ≈ 1 token）。
 	defaultContextBudget = 24000
-	// compactedStubLen 是压缩后每条工具结果保留的字符数。
-	compactedStubLen = 200
+	// compactedStubRunes 是压缩后每条工具结果保留的字符数（按 rune 计，不按字节）。
+	compactedStubRunes = 200
+	// compactRatio 是「上下文用到窗口的多少就开始压缩」。
+	compactRatio = 0.85
 )
 
 // retrieveContext 按问题里出现的词去检索相关对象，拼成一段给模型的背景。
@@ -193,7 +195,25 @@ var stopWords = map[string]bool{
 	"limit": true, "count": true, "table": true, "the": true, "and": true,
 }
 
-// compactHistory 在历史过长时把最早的工具结果压成一指代。
+// compactHistory 在历史过长时把最早的工具结果压成一指代（按字符计）。
+func compactHistory(msgs []Message, budget int) ([]Message, int) {
+	if budget <= 0 {
+		budget = defaultContextBudget
+	}
+	return compactWith(msgs, func(s string) int { return len(s) }, budget)
+}
+
+// compactHistoryByTokens 同上，但按**估算 token** 计。
+//
+// budgetTokens 是触发压缩的额度，调用方通常传上下文窗口的 85%（compactRatio）。
+func compactHistoryByTokens(msgs []Message, budgetTokens int) ([]Message, int) {
+	if budgetTokens <= 0 {
+		return msgs, 0
+	}
+	return compactWith(msgs, estimateTokens, budgetTokens)
+}
+
+// compactWith 是两条口径共用的压缩实现。
 //
 // 为什么只压工具结果、不压对话：用户说过的话和模型的结论都很短，而且丢了
 // 就没法追溯「为什么走到这一步」；工具结果才是体积的大头（一张表几万行也会
@@ -201,13 +221,10 @@ var stopWords = map[string]bool{
 //
 // 压缩是**有损**的，所以必须在消息里留一句话说明被压过——否则模型会以为
 // 自己看过全部内容，然后基于不完整的信息下结论。
-func compactHistory(msgs []Message, budget int) ([]Message, int) {
-	if budget <= 0 {
-		budget = defaultContextBudget
-	}
+func compactWith(msgs []Message, size func(string) int, budget int) ([]Message, int) {
 	total := 0
 	for _, m := range msgs {
-		total += len(m.Content)
+		total += size(m.Content)
 	}
 	if total <= budget {
 		return msgs, 0
@@ -221,16 +238,58 @@ func compactHistory(msgs []Message, budget int) ([]Message, int) {
 		if total <= budget {
 			break
 		}
-		if out[i].Role != "tool" || len(out[i].Content) <= compactedStubLen {
+		if out[i].Role != "tool" {
 			continue
 		}
-		cut := len(out[i].Content) - compactedStubLen
-		out[i].Content = out[i].Content[:compactedStubLen] +
-			fmt.Sprintf("\n…（已压缩：省略 %d 字符。需要细节请重新调用该工具）", cut)
-		total -= cut
+		before := size(out[i].Content)
+		if before <= compactedStubRunes {
+			continue
+		}
+		stub := truncateRunes(out[i].Content, compactedStubRunes)
+		out[i].Content = stub + fmt.Sprintf("\n…（已压缩：省略 %d 字符。需要细节请重新调用该工具）",
+			before-size(stub))
+		total -= before - size(out[i].Content)
 		compacted++
 	}
 	return out, compacted
+}
+
+// truncateRunes 按字符数截断，且不切断 UTF-8 编码。
+//
+// 早先按字节切 200：中文堆得多时会切出半个字，那条消息就成了非法 UTF-8，
+// 发给模型只会得到乱码或 400。
+func truncateRunes(s string, n int) string {
+	r := []rune(s)
+	if len(r) <= n {
+		return s
+	}
+	return string(r[:n])
+}
+
+// estimateTokens 粗略估算一段文本的 token 数。
+//
+// 规则：CJK（含中文标点、假名、韩文、全角符号）一个字算 1 token；其余按
+// 4 字符算 1 token，向上取整。没有 tokenizer 时宁可高估——低估会等到真的
+// 撞上窗口上限才发现压不下去。
+func estimateTokens(s string) int {
+	cjk, other := 0, 0
+	for _, r := range s {
+		if isWideRune(r) {
+			cjk++
+		} else {
+			other++
+		}
+	}
+	return cjk + (other+3)/4
+}
+
+// isWideRune 判断是否属于「一个字≈一个 token」的宽字符区段。
+func isWideRune(r rune) bool {
+	return (r >= 0x2E80 && r <= 0x9FFF) || // 部首、标点、假名、汉字
+		(r >= 0xA960 && r <= 0xA97F) || // 韩文字母扩展
+		(r >= 0xAC00 && r <= 0xD7AF) || // 韩文音节
+		(r >= 0xF900 && r <= 0xFAFF) || // 兼容汉字
+		(r >= 0xFF00 && r <= 0xFFEF) // 全角符号
 }
 
 // relatedLines 列出「依赖命中对象」的东西（视图与外键）。

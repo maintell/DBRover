@@ -20,6 +20,9 @@ type AgentConfig struct {
 	BaseURL string
 	APIKey  string
 	Model   string
+	// ContextTokens 是模型上下文窗口的 token 数；>0 时长会话按「估算 token 达到
+	// 窗口 85%」压缩，0 表示未知（退回字符预算）。
+	ContextTokens int
 }
 
 // Configured 判断是否配了可用的模型服务。
@@ -161,6 +164,9 @@ func (s *Server) handleAgentConversationCreate(w http.ResponseWriter, r *http.Re
 		AccessMode:  e.conn.AccessMode,
 		CatalogName: e.conn.Catalog,
 		Schema:      e.conn.Schema,
+		// 窗口来自配置（DBROVER_AGENT_CONTEXT_TOKENS）；没配就让运行时按字符预算，
+		// 不猜一个假的窗口值。
+		ContextTokens: cfg.ContextTokens,
 	})
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "AGENT_NOT_CONFIGURED", "internal", err.Error(), "", false)

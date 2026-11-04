@@ -178,7 +178,7 @@ DBRover 的做法是把 Agent 接进**执行闭环**：
 | 触发 | 动作 | 状态 |
 |---|---|---|
 | 历史超过字符预算（默认 24000 字符） | 把**最早的工具结果**截到 200 字符并注明「已压缩」 | ✅ |
-| 上下文用量 > 85% | 生成阶段性总结，丢弃原始消息，保留结论与开放问题 | ⛔（没有 tokenizer，按字符预算触发） |
+| 上下文用量 > 85% | 把最早的工具结果压成一指代并注明「已压缩」；配置了窗口就按**估算 token** 的 85% 触发，没配则退回字符预算 | ✅（估算规则：CJK 1 字≈1 token，其余 4 字符≈1 token；没有内置 tokenizer） |
 | 用户手动「压缩」 | 同上，并明确告知用户 | ⛔ |
 
 压缩只动工具结果，不动对话与结论：前者是体积大头，后者丢了就没法追溯「为什么走到这一步」。压缩是**有损**的，所以被压的那条消息里必须留一句话说明——否则模型会以为自己看过全部内容，然后基于不完整的信息下结论。
@@ -410,6 +410,7 @@ type Provider interface {
 |---|---|---|
 | `DBROVER_AGENT_BASE_URL` | 是 | 形如 `https://api.deepseek.com/v1`、`http://127.0.0.1:11434/v1` |
 | `DBROVER_AGENT_MODEL` | 是 | 模型名，由服务方决定 |
+| `DBROVER_AGENT_CONTEXT_TOKENS` | 否 | 模型上下文窗口（token）。给了就按「估算 token 到窗口 85%」压缩长会话；不给沿用字符预算（24000） |
 | `DBROVER_AGENT_API_KEY` | 视服务方 | 本地 Ollama 不需要 |
 
 | 项 | 状态 |
@@ -590,7 +591,7 @@ report: markdown
 
 ## 13. 验收清单
 
-**当前落地**：切片一（运行时骨架）与切片二（HTTP 端点 + 界面）都已完成，上下文检索、长会话压缩、评测集也已落地。下表 14 项里 **13 项 ✅**，只剩第 14 项因没有 tokenizer 而按字符预算（⚠️）。
+**当前落地**：切片一（运行时骨架）与切片二（HTTP 端点 + 界面）都已完成，上下文检索、长会话压缩、评测集也已落地。下表 14 项**全部 ✅**——第 14 条按「估算 token 的 85%」实现（没有内置 tokenizer，估算是近似，规则写在条目里）。
 
 | # | 项 | 判定 | 状态 |
 |---|---|---|---|
@@ -607,7 +608,7 @@ report: markdown
 | 11 | 不支持工具调用的模型无法进入 Agent 模式 | 单测 | ✅ `TestNewRuntimeRejectsModelWithoutToolCalling` |
 | 12 | 评测集不安全行为率 = 0 | CI 门禁 | ✅ `internal/agent/eval`：14 条录制回放用例，**SQLite / MySQL 5.7 / PostgreSQL 17 三引擎全过**（真机实测 17.9 s / 27.9 s / 2.0 s，平均工具调用数均为 1.4）。`TestEvalSuite` 断言不安全行为率 = 0、平均工具调用数 ≤ 8、全部用例通过；另有 `TestInjectionCasesExist`（注入 ≥3）与 `TestEveryCaseDeclaresDenial`（安全类必须声明预期拒绝）。CI 里只跑 SQLite（无实例），MySQL/PG 由环境变量开启 |
 | 13 | 会话可完整重放（工具参数 + 结果摘要） | 集成 | ✅ `GET /agent/conversations/{id}/export` 返回每轮的问题、结论、步骤（工具名、参数、成败、摘要、耗时）、用量与停止原因；`TestAgentExport` + `TestAskStreamEmitsEvents`（导出里留下这一轮）。尚未落库，进程内保留 |
-| 14 | 长会话在 85% 上下文时压缩且保留关键事实 | 集成 | ⚠️ 按**字符预算**（默认 24000）触发压缩，不是 token 百分比——没有 tokenizer。只压工具结果（截到 200 字符 + 注明已压缩），对话与结论原样保留；`TestCompactHistoryKeepsNewest` 含「预算充足时不压缩」「最新一条不动」的反向断言 |
+| 14 | 长会话在 85% 上下文时压缩且保留关键事实 | 集成 | ✅ 配了窗口（`DBROVER_AGENT_CONTEXT_TOKENS`）就按**估算 token 的 85%** 触发，没配则退回字符预算（24000）——两条口径都由 `TestRuntimeCompactPrefersWindow` 钉住。**估算是近似**：CJK 1 字≈1 token、其余 4 字符≈1 token，没有内置 tokenizer（精确值要求为每个模型带词表，成本远超收益）。只压最早的工具结果，对话与结论原样保留；压缩按 **rune** 截断，不会切出半个中文字（`TestCompactKeepsValidUTF8`）。反向断言：`TestCompactHistoryKeepsNewest`（预算充足不压、最新一条不动）、`TestCompactByTokensAtThreshold`（未到 85% 不压） |
 
 ---
 

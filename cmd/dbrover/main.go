@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"text/tabwriter"
 	"time"
@@ -462,6 +463,13 @@ func agentConfigFromEnv() api.AgentConfig {
 		BaseURL: strings.TrimSpace(os.Getenv("DBROVER_AGENT_BASE_URL")),
 		Model:   strings.TrimSpace(os.Getenv("DBROVER_AGENT_MODEL")),
 		APIKey:  os.Getenv("DBROVER_AGENT_API_KEY"),
+	}
+	// 模型上下文窗口：给了才按「85% 上下文」压，没给就沿用字符预算。
+	// 解析失败不阻断启动——它只影响压缩时机，不该让 serve 起不来。
+	if raw := strings.TrimSpace(os.Getenv("DBROVER_AGENT_CONTEXT_TOKENS")); raw != "" {
+		if n, err := strconv.Atoi(raw); err == nil && n > 0 {
+			cfg.ContextTokens = n
+		}
 	}
 	// 环境变量优先（便于 CI 临时覆盖），否则去系统凭据库取。
 	// 环境变量里的 key 会跟着进程环境走（崩溃转储、子进程都看得到），
