@@ -98,6 +98,14 @@ else { ... }                                          // 关系型
 GET  /api/v1/connections/{id}/kv/keys?cursor&pattern&type&count
 GET  /api/v1/connections/{id}/kv/keys/{key}            # 类型 + TTL + 元素数
 GET  /api/v1/connections/{id}/kv/keys/{key}/value?cursor&count
+```
+
+> **实现口径（2026-11-05）**：上面两条带 `{key}` 的路径**没有按这个形状实现**——
+> key 里可以含 `/`，路径参数表达不了（`a/b` 会被当成两级）。实际是 query 参数：
+> `GET /kv/entry?key=` 取类型 + TTL + 元素数，`GET /kv/value?key=&cursor&count` 取值。
+> 以 [`docs/12`](../12-api-contract.md) 为准，本节保留设计时的原样。
+
+```
 POST /api/v1/connections/{id}/kv/apply                 # 变更预案（同 Plan/Apply）
 POST /api/v1/connections/{id}/kv/command               # 命令模式
 ```
