@@ -63,6 +63,8 @@ const (
 	DDLCreateTrigger DDLAction = "create_trigger"
 	// DDLCreateType 建一个用户类型（v1 只做枚举）。
 	DDLCreateType DDLAction = "create_type"
+	// DDLCreateRoutine 建一个例程（存储过程 / 函数）。
+	DDLCreateRoutine DDLAction = "create_routine"
 	// DDLRaw 是「我已经有 DDL，只想让它经过这道门」：语句由用户写，
 	// 工具不做语义解析，只负责分级、审批、审计与竞态保护。
 	DDLRaw DDLAction = "raw"
@@ -165,6 +167,8 @@ type DDLRequest struct {
 	Trigger TriggerSpec `json:"trigger"`
 	// Type 用于 create_type（v1 只做枚举）。
 	Type TypeSpec `json:"type"`
+	// Routine 用于 create_routine。
+	Routine RoutineSpec `json:"routine"`
 	// RawSQL 用于 raw：一条手写的 DDL 语句。
 	RawSQL string `json:"sql"`
 }
@@ -204,6 +208,25 @@ type TypeSpec struct {
 	Name string `json:"name"`
 	// Values 是枚举标签，顺序即排序顺序（PostgreSQL 按声明顺序比较大小）。
 	Values []string `json:"values"`
+}
+
+// RoutineSpec 是一个例程定义。
+//
+// 参数只支持输入参数（见 dialect.RoutineParam 的注释）；`Returns` 只在 function
+// 时有意义，`Language` 只在 PostgreSQL 上有意义（默认 plpgsql）。
+type RoutineSpec struct {
+	Name     string         `json:"name"`
+	Kind     string         `json:"kind"` // procedure / function，空表示 procedure
+	Params   []RoutineParam `json:"params"`
+	Returns  string         `json:"returns"`
+	Language string         `json:"language"`
+	Body     string         `json:"body"`
+}
+
+// RoutineParam 是一个输入参数。
+type RoutineParam struct {
+	Name string `json:"name"`
+	Type string `json:"type"`
 }
 
 // SequenceSpec 是一个序列定义。零值指针表示「不指定，由引擎取默认」。
@@ -480,6 +503,10 @@ func (e *Executor) BuildDDLPlan(ctx context.Context, req DDLRequest) (*ChangePla
 	// 用户类型同理：它不是改某张表，没有表结构可读。
 	if req.Action == DDLCreateType {
 		return e.buildCreateTypePlan(ctx, req)
+	}
+	// 例程也不挂在某张表上。
+	if req.Action == DDLCreateRoutine {
+		return e.buildCreateRoutinePlan(ctx, req)
 	}
 	// 手写 DDL 也不依赖「我要改的那张表」：它可能建表、也可能改别的东西。
 	if req.Action == DDLRaw {
@@ -1561,6 +1588,150 @@ func (e *Executor) buildCreateTypePlan(ctx context.Context, req DDLRequest) (*Ch
 		"类型本身不存数据；一旦有列在用它，删这个类型会让那些列读不出来（要连列一起改）")
 	plan.Notes = append(plan.Notes,
 		"枚举值只能往后追加（ALTER TYPE … ADD VALUE），不能删除或重排——已有的数据会读出另一个值")
+	e.finishDDLPlan(plan)
+	return plan, nil
+}
+
+const (
+	// maxRoutineParams / maxRoutineBody 是防呆上限，不是引擎限制：一个表单里
+	// 塞几十个参数或几万字的体，说明该去 SQL 工作区写。
+	maxRoutineParams = 32
+	maxRoutineBody   = 20000
+	// routineDollarTag 是 PostgreSQL 体用的固定 dollar-quote 标签。体里出现它就会
+	// 提前收尾，所以在校验阶段直接拒。
+	routineDollarTag = "$dbrover$"
+)
+
+// routineLanguagePattern 限定 LANGUAGE 名：plpgsql / sql / plpython3u 都符合。
+var routineLanguagePattern = regexp.MustCompile(`^[a-z][a-z0-9_]{0,31}$`)
+
+// normalizeRoutineParams 校验并规整参数列表。
+//
+// 参数名与类型都会被拼进语句，所以都走白名单；错误信息里带序号，否则「哪个参数
+// 写错了」只能靠人数。
+func normalizeRoutineParams(in []RoutineParam) ([]dialect.RoutineParam, error) {
+	if len(in) > maxRoutineParams {
+		return nil, fmt.Errorf("%w: 参数最多 %d 个", ErrInvalidDDL, maxRoutineParams)
+	}
+	out := make([]dialect.RoutineParam, 0, len(in))
+	seen := make(map[string]bool, len(in))
+	for i, p := range in {
+		name := strings.TrimSpace(p.Name)
+		if !constraintNamePattern.MatchString(name) {
+			return nil, fmt.Errorf("%w: 第 %d 个参数名 %q 只能用字母、数字、下划线，且以字母或下划线开头",
+				ErrInvalidDDL, i+1, p.Name)
+		}
+		if seen[strings.ToLower(name)] {
+			return nil, fmt.Errorf("%w: 参数名 %q 重复", ErrInvalidDDL, name)
+		}
+		seen[strings.ToLower(name)] = true
+		typ := strings.TrimSpace(p.Type)
+		if !typePattern.MatchString(typ) {
+			return nil, fmt.Errorf("%w: 第 %d 个参数的类型 %q 不在白名单里（只接受普通类型名，如 int / varchar(64) / numeric(10, 2)）",
+				ErrInvalidDDL, i+1, p.Type)
+		}
+		out = append(out, dialect.RoutineParam{Name: name, Type: typ})
+	}
+	return out, nil
+}
+
+// buildCreateRoutinePlan 生成建例程预案。
+//
+// 参数校验一律排在能力判断之前：空体、缺返回类型在哪台引擎上都不成立。
+// 两条引擎特有的拒绝也在这里，并把「该怎么办」写进错误信息——
+// 让用户对着「不支持」三个字猜替代方案是最糟的体验。
+func (e *Executor) buildCreateRoutinePlan(ctx context.Context, req DDLRequest) (*ChangePlan, error) {
+	spec := req.Routine
+	name := strings.TrimSpace(spec.Name)
+	if !constraintNamePattern.MatchString(name) {
+		return nil, fmt.Errorf("%w: 例程名 %q 只能用字母、数字、下划线，且以字母或下划线开头",
+			ErrInvalidDDL, spec.Name)
+	}
+	kind := strings.ToLower(strings.TrimSpace(spec.Kind))
+	if kind == "" {
+		kind = "procedure"
+	}
+	if kind != "procedure" && kind != "function" {
+		return nil, fmt.Errorf("%w: 例程种类只接受 procedure / function，实际 %q", ErrInvalidDDL, spec.Kind)
+	}
+	params, perr := normalizeRoutineParams(spec.Params)
+	if perr != nil {
+		return nil, perr
+	}
+	returns := strings.TrimSpace(spec.Returns)
+	if kind == "function" {
+		if returns == "" {
+			return nil, fmt.Errorf("%w: 函数必须给返回类型", ErrInvalidDDL)
+		}
+		if !typePattern.MatchString(returns) {
+			return nil, fmt.Errorf("%w: 返回类型 %q 不在白名单里", ErrInvalidDDL, spec.Returns)
+		}
+	} else if returns != "" {
+		return nil, fmt.Errorf("%w: 存储过程没有返回类型（要返回值请改建成 function）", ErrInvalidDDL)
+	}
+	body := strings.TrimSpace(spec.Body)
+	if body == "" {
+		return nil, fmt.Errorf("%w: 例程体不能为空", ErrInvalidDDL)
+	}
+	if len(body) > maxRoutineBody {
+		return nil, fmt.Errorf("%w: 例程体超过 %d 字符，请到 SQL 工作区写", ErrInvalidDDL, maxRoutineBody)
+	}
+	if strings.Contains(body, routineDollarTag) {
+		return nil, fmt.Errorf("%w: 例程体里不能出现 %s（它是包住体的定界符）", ErrInvalidDDL, routineDollarTag)
+	}
+	if strings.HasSuffix(body, ";") {
+		return nil, fmt.Errorf("%w: 例程体不要以分号结尾（工具会自己收尾）", ErrInvalidDDL)
+	}
+	engine := e.conn.Engine()
+	if engine == model.EngineMySQL && strings.Contains(body, ";") &&
+		!strings.HasPrefix(strings.ToUpper(body), "BEGIN") {
+		return nil, fmt.Errorf("%w: MySQL 的多语句体必须用 BEGIN … END 包起来——分号只有在这个块里才不会被切成两条语句", ErrInvalidDDL)
+	}
+	if !e.conn.Capabilities().AddRoutine {
+		return nil, fmt.Errorf("%w: %s 没有例程（SQLite 不支持存储过程与函数）", ErrInvalidDDL, engine)
+	}
+	if engine == model.EngineMySQL && kind == "function" {
+		return nil, fmt.Errorf("%w: MySQL 上建函数需要声明 DETERMINISTIC / READS SQL DATA / NO SQL，"+
+			"否则在开启 binlog 的实例上直接报 1418；v1 不做这个表单，请用「手写 DDL」并自己加上那个子句", ErrInvalidDDL)
+	}
+	lang := strings.TrimSpace(spec.Language)
+	if lang == "" {
+		lang = "plpgsql"
+	}
+	if !routineLanguagePattern.MatchString(lang) {
+		return nil, fmt.Errorf("%w: LANGUAGE %q 只能用字母、数字、下划线", ErrInvalidDDL, spec.Language)
+	}
+	// 同名先查：CREATE 自己会报 already exists，但那句话不告诉人该怎么办。
+	if objs, oerr := e.conn.Meta().Objects(ctx, req.Table.Catalog, req.Table.Schema, model.KindRoutine); oerr == nil {
+		for _, o := range objs {
+			if strings.EqualFold(o.Name, name) {
+				return nil, fmt.Errorf("%w: 例程 %q 已存在（要替换请先删旧的那个，本工具不做静默替换）", ErrInvalidDDL, name)
+			}
+		}
+	}
+	quoted := e.dialect.QuoteQualified(schemaOf(req.Table, e.cfgSchema()), name)
+	opts := dialect.RoutineOptions{
+		Name: quoted, Kind: kind, Params: params, Returns: returns, Language: lang, Body: body,
+	}
+	sqlText, ok := e.dialect.CreateRoutineSQL(opts)
+	if !ok {
+		return nil, fmt.Errorf("%w: %s 不支持用表单建例程", ErrInvalidDDL, engine)
+	}
+	plan := &ChangePlan{
+		ID: "ddl-" + newID(),
+		Table: model.ObjectRef{
+			Kind: model.KindRoutine, Name: name, Schema: req.Table.Schema, Catalog: req.Table.Catalog,
+		},
+		CreatedAt:    time.Now(),
+		ExpiresAt:    time.Now().Add(planTTL),
+		Statements:   []PlanStatement{{SQL: sqlText, ExpectRows: -1}},
+		Rollback:     []PlanStatement{{SQL: e.dialect.DropRoutineSQL(opts), ExpectRows: -1}},
+		AffectedRows: 0,
+	}
+	plan.Notes = append(plan.Notes,
+		"例程体原样存进数据库，本工具不格式化、不做行级 diff；要改就改完整体再建一次")
+	plan.Notes = append(plan.Notes,
+		"回滚是删掉这个例程，不动任何数据；但调用它的程序会立刻找不到它")
 	e.finishDDLPlan(plan)
 	return plan, nil
 }

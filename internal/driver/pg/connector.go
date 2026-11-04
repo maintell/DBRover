@@ -77,6 +77,8 @@ func (c *Connector) Capabilities() model.Capabilities {
 		DDLTransactional: true,
 		AlterColumnType:  true,
 		AddForeignKey:    true,
+		// 过程与函数都能建：函数要返回类型，体放进 dollar-quote。
+		AddRoutine: true,
 	}
 }
 

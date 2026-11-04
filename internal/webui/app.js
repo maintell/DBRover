@@ -339,6 +339,8 @@ async function loadIdentity(id) {
     if ($('btn-new-seq')) $('btn-new-seq').hidden = !caps.sequences;
     // 用户类型同理：没有这个概念的引擎上不摆按钮。
     if ($('btn-new-type')) $('btn-new-type').hidden = !caps.user_types;
+    // 例程同理（SQLite 没有存储过程）。
+    if ($('btn-new-routine')) $('btn-new-routine').hidden = !caps.add_routine;
     const ident = h.identity || {};
     const host = ident.hostname || '?';
     const fp = (ident.fingerprint || '').slice(0, 8);
@@ -2841,6 +2843,7 @@ $('btn-new-table').onclick = () => showCreateTable();
 $('btn-new-view').onclick = () => showCreateView();
 $('btn-new-seq').onclick = () => showCreateSequence();
 $('btn-new-type').onclick = () => showCreateType();
+$('btn-new-routine').onclick = () => showCreateRoutine();
 $('btn-forget').onclick = () => {
   forgetToken();
   location.reload();
@@ -3316,6 +3319,63 @@ async function showCreateType() {
   }
   if (!(await confirmPlan(plan))) return;
   // 建完刷新对象树：类型要在左侧看得到，否则用户会以为没建成。
+  await applyPlan(plan.id, undefined, loadTables);
+}
+// showCreateRoutine 建一个存储过程或函数。
+//
+// 参数一行一个「名字 类型」，而不是做成表格：绝大多数例程只有 0-3 个参数，
+// 表格反而要点很多次。类型本身可以含空格（character varying(64)），所以只按
+// 第一个空白切开。
+async function showCreateRoutine() {
+  if (!state.current) {
+    showNotice('请先建立连接。', 'warn');
+    return;
+  }
+  const ok = await dialog(
+    '新建例程',
+    '<label class="field">名字</label>' +
+      '<input id="rt-name" style="width:100%" autocomplete="off" spellcheck="false">' +
+      '<div class="toolbar">' +
+      '<label class="field">种类</label>' +
+      '<select id="rt-kind"><option value="procedure">存储过程</option>' +
+      '<option value="function">函数</option></select>' +
+      '<label class="field">返回类型</label>' +
+      '<input id="rt-returns" class="narrow" placeholder="仅函数" autocomplete="off">' +
+      '</div>' +
+      '<label class="field">参数（一行一个「名字 类型」，只支持输入参数）</label>' +
+      '<textarea id="rt-params" rows="3" style="width:100%" spellcheck="false" ' +
+      'placeholder="a integer&#10;b varchar(64)"></textarea>' +
+      '<label class="field">体（不带结尾分号；多语句在 MySQL 上要用 BEGIN … END 包起来）</label>' +
+      '<textarea id="rt-body" rows="6" style="width:100%" spellcheck="false" ' +
+      'placeholder="BEGIN&#10;  SELECT 1;&#10;END"></textarea>',
+    '生成预案');
+  if (!ok) return;
+  const params = ($('rt-params').value || '')
+    .split('\n')
+    .map((s) => s.trim())
+    .filter((s) => s !== '')
+    .map((line) => {
+      const i = line.search(/\s/);
+      if (i < 0) return { name: line, type: '' };
+      return { name: line.slice(0, i), type: line.slice(i + 1).trim() };
+    });
+  let plan;
+  try {
+    plan = await postSchemaPlan({
+      action: 'create_routine',
+      routine: {
+        name: ($('rt-name').value || '').trim(),
+        kind: $('rt-kind').value,
+        params,
+        returns: ($('rt-returns').value || '').trim(),
+        body: $('rt-body').value.trim(),
+      },
+    }, false);
+  } catch (e) {
+    showNotice(e.message + (e.hint ? '（' + e.hint + '）' : ''), 'error');
+    return;
+  }
+  if (!(await confirmPlan(plan))) return;
   await applyPlan(plan.id, undefined, loadTables);
 }
 // planAddTrigger 建一条触发器。

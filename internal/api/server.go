@@ -992,6 +992,7 @@ type schemaPlanRequest struct {
 	Sequence service.SequenceSpec `json:"sequence"`
 	Trigger  service.TriggerSpec  `json:"trigger"`
 	Type     service.TypeSpec     `json:"type"`
+	Routine  service.RoutineSpec  `json:"routine"`
 	RawSQL   string               `json:"sql"`
 }
 
@@ -1012,7 +1013,8 @@ func (s *Server) handleSchemaPlan(w http.ResponseWriter, r *http.Request) {
 		Table: req.Table, Action: req.Action, Column: req.Column,
 		Columns: req.Columns, PrimaryKey: req.PrimaryKey, Index: req.Index,
 		ForeignKey: req.ForeignKey, Check: req.Check, View: req.View,
-		Sequence: req.Sequence, Trigger: req.Trigger, Type: req.Type, RawSQL: req.RawSQL,
+		Sequence: req.Sequence, Trigger: req.Trigger, Type: req.Type,
+		Routine: req.Routine, RawSQL: req.RawSQL,
 	})
 	if errors.Is(err, service.ErrLockWait) {
 		writeError(w, http.StatusConflict, "LOCK_WAIT_BLOCKED", "connection",

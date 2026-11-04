@@ -137,6 +137,8 @@
 
 - **例程能列、能看定义**（`Objects(KindRoutine)`）：MySQL 走 `information_schema.ROUTINES`，定义取 `SHOW CREATE PROCEDURE` / `SHOW CREATE FUNCTION`（先查一次 `ROUTINE_TYPE`，两者结果列名不同）；PostgreSQL 走 `pg_proc` 的 `prokind IN ('f','p')`，定义取 `pg_get_functiondef`，并排除聚合、窗口函数与**扩展自带的成员**（`pg_depend` 的 `deptype='e'`）——不排除的话，装完扩展就会列出上百个别人的函数，把「我建的过程在哪」淹掉。SQLite 没有例程，能力位保持 `false`。**PG 的重载**要单独说：一个名字下可以有多条，列表按名字去重、定义只显示第一条并在开头注明共几条，把几条拼在一起会让人以为那是**一条**可回放的语句。对象树按能力位把它们摆成「有定义没数据」的对象，点击走 `?kind=routine`。`drivertest` 新增 `RoutineListing`（第 19 项）走完整链路：建一个带 `BEGIN … END` 体的过程 → 列出来 → 取定义 → 删掉后**立刻**消失（挡住缓存）→ 用取到的定义**回放**（回放不了就说明定义不完整）→ 又能列出来；MySQL 5.7 与 PG 17 真机通过。变异验证：把 PG 的提前返回改回只带 `triggers`，用例立即红——这已经是同一个提前返回分支第二次吞掉新结果（上次是用户类型）。
 
+- **新建例程**（`create_routine`）：`kind` 为 `procedure` / `function`，参数只支持**输入参数**（`OUT`/`INOUT` 会让 PG 的 `DROP` 签名变复杂——`DROP` 只认输入类型，把 OUT 拼进去就删不掉，先关这条口子），`language` 只在 PG 上有意义（默认 `plpgsql`）。渲染：PG 是 `CREATE … LANGUAGE … AS $dbrover$ 体 $dbrover$`，MySQL 是 `CREATE … 体`；**不加 `OR REPLACE`**，同名由服务层拒绝。回滚 `DROP PROCEDURE|FUNCTION`，**PG 必须带参数类型签名**——只给名字删不掉，是个静默失败的高发点（变异验证：去掉签名即红）。体不能为空 / 不能以分号结尾 / 不能含定界符 / ≤2 万字符；MySQL 的多语句体必须 `BEGIN … END` 包起来（分号只有在该块里才不会被切成两条）。**两条引擎特有拒绝**：MySQL 上建**函数**要求 `DETERMINISTIC / READS SQL DATA / NO SQL`，否则开 binlog 的实例直接报 1418，v1 不替用户决定语义、明确拒绝并指路手写 DDL；SQLite 没有例程。新增能力位 `add_routine`（MySQL 表示能建过程、PG 过程与函数都行、SQLite `false`）。真机：MySQL 5.7 建过程 → `CALL` → 回滚后 `CALL` 失败、函数被拒并说明 1418；PG 17 建过程 → `CALL` → 回滚，再建 `it_fn(a integer) RETURNS integer LANGUAGE sql` → `SELECT it_fn(21)` 返回 42。
+
 ### 安全
 
 - **大整数不再静默丢精度**：`BIGINT` 超过 2^53 时，界面保持字符串、服务端按列类型还原；客户端若把它写成 JSON 数字，直接 `400 NUMBER_PRECISION_LOSS` 并提示改用字符串，而不是把丢了低位的值写进库。此前界面 `coerce()` 用 `Number()` 转换整数列，编辑 `9223372036854775807` 会变成 `...5808`。

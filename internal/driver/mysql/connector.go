@@ -71,6 +71,9 @@ func (c *Connector) Capabilities() model.Capabilities {
 		// 触发器一条语句就能建（体跟在 FOR EACH ROW 后面）。
 		AddTrigger:    true,
 		AddForeignKey: true,
+		// 能建**过程**；建函数要求 DETERMINISTIC / READS SQL DATA / NO SQL，
+		// v1 不替用户决定语义，服务层会明确拒绝并指路手写 DDL。
+		AddRoutine: true,
 	}
 }
 

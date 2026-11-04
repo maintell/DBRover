@@ -283,6 +283,12 @@ type Capabilities struct {
 	// AddForeignKey 表示引擎支持用 ALTER TABLE 追加外键约束。
 	// SQLite 为 false：它的 ALTER TABLE 只认 RENAME / ADD COLUMN，加约束必须重建整表。
 	AddForeignKey bool `json:"add_foreign_key"`
+	// AddRoutine 表示能用表单建例程（存储过程 / 函数）。
+	//
+	// 与 Routines（能列出）分开：MySQL 能列出过程与函数，但**建函数**在开启
+	// binlog 的实例上要求声明 DETERMINISTIC / READS SQL DATA / NO SQL，否则直接
+	// 报 1418。给用户一个「大概率建不出来」的按钮，不如明确拒绝并指路手写 DDL。
+	AddRoutine bool `json:"add_routine"`
 }
 
 // Connection 是一个可复用的连接配置。它不持有物理连接。

@@ -76,6 +76,36 @@ func TestSchemaPlanAcceptsType(t *testing.T) {
 		t.Errorf("错误应说清这个引擎用列类型表达枚举：%s", s)
 	}
 }
+
+// TestSchemaPlanAcceptsRoutine 守住 create_routine 在 HTTP 上真的可达。
+//
+// 同 create_type：SQLite 没有例程，所以只断言不会出现「字段不认识」——
+// 那正是「请求结构有字段、处理器逐字段转交时漏了」的表现。
+func TestSchemaPlanAcceptsRoutine(t *testing.T) {
+	_, ts, dir := newServer(t)
+	connID := createConn(t, ts, dir, "test", "read-write")
+	execSQL(t, ts, connID, "CREATE TABLE t (id INTEGER PRIMARY KEY, v TEXT)")
+
+	code, body := do(t, ts, http.MethodPost, "/api/v1/connections/"+connID+"/schema/plan",
+		map[string]any{
+			"table":  map[string]any{"kind": "table", "name": "t"},
+			"action": "create_routine",
+			"routine": map[string]any{
+				"name": "rt_api", "kind": "procedure", "body": "BEGIN SELECT 1; END",
+			},
+		}, true)
+	if code != http.StatusBadRequest {
+		t.Fatalf("SQLite 上建例程应当 400, 实际 %d %v", code, body)
+	}
+	s := toJSON(body)
+	if strings.Contains(s, "unknown field") {
+		t.Fatalf("请求字段没被识别：%s", s)
+	}
+	if !strings.Contains(s, "没有例程") {
+		t.Errorf("错误应说清这个引擎没有例程：%s", s)
+	}
+}
+
 func toJSON(v any) string {
 	b, _ := json.Marshal(v)
 	return string(b)

@@ -122,6 +122,14 @@ type Dialect interface {
 	// DropEnumTypeSQL 渲染删枚举类型语句。
 	DropEnumTypeSQL(name string) string
 
+	// CreateRoutineSQL 渲染建例程语句；第二个返回 false 表示这个引擎没有例程
+	// （SQLite）或 v1 不支持用表单建（其余未实现引擎）。
+	CreateRoutineSQL(opts RoutineOptions) (string, bool)
+
+	// DropRoutineSQL 渲染删例程语句。PostgreSQL 的身份里含参数类型，
+	// 所以必须带签名；MySQL 只认名字。
+	DropRoutineSQL(opts RoutineOptions) string
+
 	// CreateViewSQL 渲染建视图语句。name 应当是已引用好的限定名，
 	// query 是已过校验的 SELECT / WITH 主体（不含分号）。
 	CreateViewSQL(name, query string) string
@@ -393,6 +401,91 @@ func (d impl) CreateEnumTypeSQL(name string, values []string) string {
 		labels[i] = "'" + strings.ReplaceAll(v, "'", "''") + "'"
 	}
 	return "CREATE TYPE " + name + " AS ENUM (" + strings.Join(labels, ", ") + ")"
+}
+
+// RoutineParam 是例程的一个输入参数。
+//
+// v1 只支持输入参数：MySQL 的 OUT / INOUT 会引入「回滚要用的签名」这件事——
+// PostgreSQL 的 DROP 只认输入参数类型，把 OUT 也拼进去就删不掉。宁可先不支持，
+// 也不要生成一条必然失败的 DROP。
+type RoutineParam struct {
+	Name string
+	Type string
+}
+
+// RoutineOptions 是一条例程定义。Kind 为 procedure 或 function。
+type RoutineOptions struct {
+	Name   string // 已引用好的限定名
+	Kind   string
+	Params []RoutineParam
+	// Returns 只在 function 时有意义。
+	Returns string
+	// Language 只在 PostgreSQL 上有意义（默认 plpgsql）；MySQL 没有这个概念。
+	Language string
+	Body     string
+}
+
+// routineSignature 渲染参数列表。withNames 为 false 时只留类型——PostgreSQL 的
+// DROP FUNCTION f(int) 要的是类型签名，带名字会是语法错。
+func (d impl) routineSignature(params []RoutineParam, withNames bool) string {
+	parts := make([]string, len(params))
+	for i, p := range params {
+		if withNames {
+			parts[i] = d.QuoteIdent(p.Name) + " " + p.Type
+		} else {
+			parts[i] = p.Type
+		}
+	}
+	return "(" + strings.Join(parts, ", ") + ")"
+}
+
+// CreateRoutineSQL 见接口注释。
+//
+// 两种写法几乎没有共同点：
+//   - PostgreSQL 把体放进 dollar-quote，必须声明 LANGUAGE；函数还要 RETURNS。
+//   - MySQL 直接把体跟在签名后面（单条语句或 BEGIN … END 块），没有 LANGUAGE。
+//
+// 都不加 OR REPLACE：同名例程由服务层拒绝——悄悄替换会改掉所有调用方看到的行为。
+func (d impl) CreateRoutineSQL(opts RoutineOptions) (string, bool) {
+	switch d.engine {
+	case model.EngineSQLite:
+		return "", false
+	case model.EnginePostgres:
+		lang := opts.Language
+		if lang == "" {
+			lang = "plpgsql"
+		}
+		head := "CREATE PROCEDURE " + opts.Name + d.routineSignature(opts.Params, true)
+		if opts.Kind == "function" {
+			head = "CREATE FUNCTION " + opts.Name + d.routineSignature(opts.Params, true) +
+				" RETURNS " + opts.Returns
+		}
+		// 固定标签：服务层已确保体里不含 $dbrover$，否则体内一旦出现同名标签就会提前收尾。
+		return head + " LANGUAGE " + lang + " AS $dbrover$\n" + opts.Body + "\n$dbrover$", true
+	case model.EngineMySQL, model.EngineMariaDB:
+		head := "CREATE PROCEDURE " + opts.Name + d.routineSignature(opts.Params, true)
+		if opts.Kind == "function" {
+			head = "CREATE FUNCTION " + opts.Name + d.routineSignature(opts.Params, true) +
+				" RETURNS " + opts.Returns
+		}
+		return head + " " + opts.Body, true
+	default:
+		return "", false
+	}
+}
+
+// DropRoutineSQL 见接口注释。
+//
+// 不带 IF EXISTS：删一个不存在的例程说明调用方拿的是旧结构，应该报错而不是静默成功。
+func (d impl) DropRoutineSQL(opts RoutineOptions) string {
+	kw := "PROCEDURE"
+	if opts.Kind == "function" {
+		kw = "FUNCTION"
+	}
+	if d.engine == model.EnginePostgres {
+		return "DROP " + kw + " " + opts.Name + d.routineSignature(opts.Params, false)
+	}
+	return "DROP " + kw + " " + opts.Name
 }
 
 // DropEnumTypeSQL 见接口注释。

@@ -65,6 +65,8 @@ func (c *Connector) Capabilities() model.Capabilities {
 		// SQLite 的触发器件是 BEGIN … END，一条语句，切分器已经认它。
 		AddTrigger:    true,
 		AddForeignKey: false,
+		// SQLite 没有存储过程与函数，例程这条路整个不通。
+		AddRoutine: false,
 	}
 }
 
