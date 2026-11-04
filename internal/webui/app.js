@@ -982,6 +982,60 @@ async function submitChanges() {
   await applyPlan(plan.id);
 }
 
+// rowValues 把这一行的所有列拼成「列名 → 值」。
+//
+// 删除的回滚要靠它把整行插回去：只给主键的话，回滚语句会插回一条缺列的空壳，
+// 比不生成回滚更糟——它看起来能撤，实际撤回了半条数据。
+function rowValues(tr) {
+  const cols = state.gridColumns || [];
+  const vals = tr._values || [];
+  const out = {};
+  for (let i = 0; i < cols.length; i++) {
+    out[cols[i].name] = vals[i];
+  }
+  return out;
+}
+
+// deleteRow 删掉右键点中的那一行：key 用来定位，before 用来生成回滚。
+async function deleteRow(tr) {
+  await submitRowChange(
+    { op: 'delete', key: JSON.parse(tr.dataset.key), before: rowValues(tr) },
+    '删除这行');
+}
+
+// copyRow 以选中的行为模板插一条新的。
+//
+// 主键不复制：自增主键复制过来必然撞键，非自增的也得由人给新的。主键被省掉之后
+// 服务端会把这个插入标成不可逆（拿不到新键就没法定位）——预案里会写清楚。
+async function copyRow(tr) {
+  const values = rowValues(tr);
+  const pks = (state.pkCols || []).map((c) => String(c).toLowerCase());
+  for (const name of Object.keys(values)) {
+    if (pks.includes(name.toLowerCase())) delete values[name];
+  }
+  await submitRowChange({ op: 'insert', after: values }, '复制这行');
+}
+
+// submitRowChange 走与单元格编辑同一套流程：出预案 → 确认 → 执行 → 刷新。
+async function submitRowChange(change, what) {
+  if (!state.current || !state.tableName) return;
+  let plan;
+  try {
+    plan = await api(path(API.changePlan, { id: state.current.id }), {
+      method: 'POST',
+      body: JSON.stringify({
+        table: { kind: 'table', name: state.tableName },
+        changes: [change],
+      }),
+    });
+  } catch (e) {
+    showNotice('生成' + what + '的预案失败：' + e.message + (e.hint ? '（' + e.hint + '）' : ''), 'error');
+    return;
+  }
+  if (!(await confirmPlan(plan))) return;
+  await applyPlan(plan.id);
+}
+
 // confirmPlan 把预案讲清楚再让人点执行。
 // 三件事必须出现在弹窗里：会执行什么、能不能回来、影响多少行。
 async function confirmPlan(plan) {
@@ -1011,7 +1065,10 @@ function rollbackNote(plan) {
   }
   if (plan.irreversible) {
     // 不可逆用红色：删列丢的是数据，和「需要注意」不是一个量级。
-    return '<p class="danger">该变更不可逆：回滚语句只能恢复结构，数据不会回来' + lost + '。</p>';
+    // 但结构变更与数据变更的说法不一样：前者回滚只能恢复结构，后者（比如没给主键
+    // 的插入）是根本无从回退——一句话盖两种会把话说错。
+    const tail = plan.ddl ? '回滚语句只能恢复结构，数据不会回来' : '执行后无法自动回退';
+    return '<p class="danger">该变更不可逆：' + tail + lost + '。</p>';
   }
   return '<p>已生成回滚语句，可在需要时手动执行。</p>';
 }
@@ -2158,6 +2215,9 @@ function clipLines(text, max) {
 // allowEdit 必须由调用方显式给：表浏览可以编辑，而原始 SQL 的结果集不行——
 // 后者的列可能来自别的表，拿它拼 UPDATE 会改错表。
 function renderTable(container, columns, rows, append, allowEdit) {
+  // 记下这张表的列：右键菜单里的「删除本行」要靠列名把整行的值拼成 before，
+  // 只给主键不够——那样回滚会插回一条缺列的空壳。
+  if (allowEdit) state.gridColumns = columns;
   let table = container.querySelector('table');
   if (!append || !table) {
     table = document.createElement('table');
@@ -2178,6 +2238,7 @@ function renderTable(container, columns, rows, append, allowEdit) {
   const tbody = table.querySelector('tbody');
   for (const r of rows) {
     const tr = document.createElement('tr');
+    tr._values = r;
 
     // 行定位键：只取主键列的值。没有主键就不可编辑。
     let key = null;
@@ -2303,15 +2364,23 @@ document.addEventListener('contextmenu', (ev) => {
   menu.style.left = ev.clientX + 'px';
   menu.style.top = ev.clientY + 'px';
   const actions = [
-    ['设为 NULL', null],
-    ["设为空串 ''", ''],
+    { label: '设为 NULL', run: () => setCellExact(td, null) },
+    { label: "设为空串 ''", run: () => setCellExact(td, '') },
   ];
-  for (const [label, value] of actions) {
+  // 行级操作：只给可写连接（只读连接上摆出来，点下去只会在提交时被拒），
+  // 而且这一行必须有主键——menu 的入口检查已经保证了 dataset.key 存在。
+  const writable = state.current && state.current.access_mode !== 'read-only';
+  if (writable) {
+    actions.push({ label: '删除本行', id: 'row-del', run: () => deleteRow(tr) });
+    actions.push({ label: '复制本行', id: 'row-copy', run: () => copyRow(tr) });
+  }
+  for (const a of actions) {
     const b = document.createElement('button');
-    b.textContent = label;
+    b.textContent = a.label;
+    if (a.id) b.id = a.id;
     b.onclick = () => {
       closeCellMenu();
-      setCellExact(td, value);
+      a.run();
     };
     menu.appendChild(b);
   }
