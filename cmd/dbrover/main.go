@@ -923,6 +923,24 @@ func cmdMigrate(args []string) error {
 	}
 	fmt.Println("结构已建立")
 
+	// 索引单独执行：DDLRaw 只接受一条语句，索引没法跟着建表语句一起过去。
+	if detail, derr := srcEx.DescribeTable(ctx, model.ObjectRef{Kind: model.KindTable, Name: *table}); derr == nil {
+		for _, stmt := range service.BuildMigrationIndexDDL(dstConn.Engine(), name, detail) {
+			ip, ierr := dstEx.BuildDDLPlan(ctx, service.DDLRequest{
+				Table:  model.ObjectRef{Kind: model.KindTable, Name: name},
+				Action: service.DDLRaw,
+				RawSQL: stmt,
+			})
+			if ierr != nil {
+				return fmt.Errorf("建索引预案（%s）: %w", stmt, ierr)
+			}
+			if out, err := dstEx.ApplyChangePlan(ctx, ip, service.Request{Approval: true, Actor: "human:cli"}); err != nil || out.Err != nil || out.Blocked {
+				return fmt.Errorf("建索引失败（%s）: err=%v out=%+v", stmt, err, out)
+			}
+			fmt.Println("索引已建立：" + stmt)
+		}
+	}
+
 	rep, err := service.MigrateTable(ctx, srcEx, dstEx, *table, *targetTable,
 		service.MigrateExecOptions{BatchSize: *batch, MaxRows: *maxRows})
 	if err != nil {

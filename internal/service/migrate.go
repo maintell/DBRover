@@ -271,7 +271,36 @@ func BuildMigrationDDL(dstEngine model.Engine, table string, src *model.TableDet
 	if len(cols) == 0 {
 		return "", errors.New("迁移：源表没有列")
 	}
+	// 主键必须一起建：没有主键的目标表既不能做键集续跑，也没法按行定位。
+	// 索引不能塞进这条语句（DDLRaw 只接受单条），由 BuildMigrationIndexDDL 单独给。
+	if pk := src.PrimaryKeyColumns(); len(pk) > 0 {
+		quoted := make([]string, len(pk))
+		for i, c := range pk {
+			quoted[i] = d.QuoteIdent(c)
+		}
+		cols = append(cols, "PRIMARY KEY ("+strings.Join(quoted, ", ")+")")
+	}
 	return "CREATE TABLE " + d.QuoteIdent(table) + " (\n  " + strings.Join(cols, ",\n  ") + "\n)", nil
+}
+
+// BuildMigrationIndexDDL 生成目标端的建索引语句（不含主键与约束索引）。
+//
+// 单独一个函数是因为 DDLRaw 只接受**一条**语句：把 CREATE INDEX 拼在 CREATE TABLE
+// 后面的文本里，执行门会以「必须恰好一条」拒绝。
+func BuildMigrationIndexDDL(dstEngine model.Engine, table string, src *model.TableDetail) []string {
+	if src == nil {
+		return nil
+	}
+	d := dialect.For(dstEngine)
+	quotedTable := d.QuoteIdent(table)
+	var out []string
+	for _, ix := range src.Indexes {
+		if ix.Primary || ix.Constraint || len(ix.Columns) == 0 {
+			continue
+		}
+		out = append(out, d.CreateIndexSQL(quotedTable, ix.Name, ix.Columns, ix.Unique)+";")
+	}
+	return out
 }
 
 // PlanMigrationBetween 读两端结构，给出迁移预检与目标端 DDL。

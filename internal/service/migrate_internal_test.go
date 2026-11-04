@@ -174,6 +174,7 @@ func TestBuildMigrationDDL(t *testing.T) {
 		{Name: "id", Type: model.ColumnType{Raw: "int", Kind: model.TypeInteger}, Nullable: false},
 		{Name: "flag", Type: model.ColumnType{Raw: "tinyint(1)", Kind: model.TypeInteger}, Nullable: true},
 	}}
+	src.Columns[0].IsPrimary = true // id 是主键：建表语句必须带上它
 	plan := PlanMigration(src, nil, model.EngineMySQL, model.EnginePostgres)
 
 	// 只给了 id 的决策，flag 还缺：必须报错并点名。
@@ -198,6 +199,10 @@ func TestBuildMigrationDDL(t *testing.T) {
 	if !strings.Contains(ddlText, `"flag" boolean`) {
 		t.Errorf("DDL 应使用人工决策的类型：\n%s", ddlText)
 	}
+	// 主键必须随建表一起建：没有主键的表迁过去既不能续跑也不能按行定位。
+	if !strings.Contains(ddlText, `PRIMARY KEY ("id")`) {
+		t.Errorf("DDL 应包含主键：\n%s", ddlText)
+	}
 
 	// 决策里的类型要过白名单：带分号的直接拒绝。
 	_, err = BuildMigrationDDL(model.EnginePostgres, "t", src, plan, map[string]string{
@@ -205,5 +210,28 @@ func TestBuildMigrationDDL(t *testing.T) {
 	})
 	if err == nil || !strings.Contains(err.Error(), "不合法") {
 		t.Fatalf("非法类型应被拒，实际 %v", err)
+	}
+}
+
+// TestBuildMigrationIndexDDL 钉住两件事：普通索引要迁、约束背后的索引不许重复建。
+func TestBuildMigrationIndexDDL(t *testing.T) {
+	src := &model.TableDetail{
+		Columns: []model.Column{
+			{Name: "id", Type: model.ColumnType{Raw: "int", Kind: model.TypeInteger}, IsPrimary: true},
+			{Name: "a", Type: model.ColumnType{Raw: "text", Kind: model.TypeString}},
+			{Name: "b", Type: model.ColumnType{Raw: "text", Kind: model.TypeString}},
+		},
+		Indexes: []model.Index{
+			{Name: "PRIMARY", Columns: []string{"id"}, Primary: true, Unique: true, Constraint: true},
+			{Name: "uq_b", Columns: []string{"b"}, Unique: true, Constraint: true},
+			{Name: "idx_a", Columns: []string{"a"}},
+		},
+	}
+	stmts := BuildMigrationIndexDDL(model.EnginePostgres, "t", src)
+	if len(stmts) != 1 {
+		t.Fatalf("应只生成 1 条索引语句（约束索引跳过），实际 %v", stmts)
+	}
+	if !strings.Contains(stmts[0], `CREATE INDEX "idx_a" ON "t" ("a")`) {
+		t.Errorf("索引语句不对：%s", stmts[0])
 	}
 }
