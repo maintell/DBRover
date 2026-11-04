@@ -166,7 +166,7 @@ CI 中跑一个测试：构造含密码的 `Config`，序列化到 JSON、写日
 | 引擎 | 手段 |
 |---|---|
 | PG | 连接串 `options=-c default_transaction_read_only=on`；或连接后 `SET SESSION CHARACTERISTICS AS TRANSACTION READ ONLY` |
-| MySQL | `SET SESSION TRANSACTION READ ONLY`（8.0+）；5.7 用 `SET SESSION tx_read_only=1` |
+| MySQL | `SET SESSION TRANSACTION READ ONLY`（5.7.20+ 与 8.0 都支持，代码不分版本；更早的 5.7 才需要已弃用的 `SET SESSION tx_read_only=1`） |
 | MSSQL | 无会话级只读 → 依赖数据库级 `db_datareader` 角色 + SQL 分析 |
 | Oracle | `SET TRANSACTION READ ONLY`（仅事务级）→ 依赖权限 + SQL 分析 |
 | SQLite | `PRAGMA query_only = ON` |
