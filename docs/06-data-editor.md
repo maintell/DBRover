@@ -436,5 +436,5 @@ GET /api/v1/connections/{id}/tables/{name}/rows
 | 批量修改的「多单元格」路径 | §3.1 | 条件批量修改与分批都已实现（见 §3.4）；无「选中同列多行改同值」这条路径 | 待实现 |
 
 | 筛选与排序的完整形态 | §4.1 / §4.2 | 只有 AND；无 `OR`、分组、正则、原始 SQL 模式、多列拖拽排序（`IN`/`BETWEEN` 已支持） | 待实现；原始 SQL 模式需先有表达式校验，否则等于开注入面 |
-| 导出与测试数据生成 | §5 / 验收 10 | CSV / NDJSON 已实现并压测通过（100 万行内存增长 10.6 MB）；xlsx、SQL INSERT、Markdown 与测试数据生成未做 | 待实现 |
+| 导出与测试数据生成 | §5 / 验收 10 | CSV / NDJSON / **SQL** / **Markdown** 已实现：CSV 与 NDJSON 压测通过（100 万行内存增长 10.6 MB），SQL 是「建表 + INSERT」的同引擎可回放脚本（SQLite 会补独立索引，MySQL/PG 的 DDL 已含索引），Markdown 是 GitHub 风格表格（表头必写、`NULL` 与空串分开、`|`/换行转义）。**未做**：xlsx、测试数据生成 | 待实现（xlsx 需要写 OOXML，测试数据生成要先定「按列类型造什么值」的规则） |
 

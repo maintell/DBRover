@@ -32,11 +32,17 @@ const (
 	// 只保证**同引擎**回放：字面量按方言生成（二进制 X'..' / '\x..'::bytea、
 	// 布尔 TRUE/FALSE 与 1/0），跨引擎请先核对类型映射。
 	ExportSQL ExportFormat = "sql"
+	// ExportMarkdown 是 GitHub 风格的表：粘到 issue / PR / 文档里就能看。
+	//
+	// 与另外三种不同，它一定是「给人看的」：表头必写（没有表头的 markdown
+	// 表格是坏语法），NULL 写成 NULL、空串写成 ''——与界面上的渲染一致，
+	// 因为这张表最常见的用途就是把「界面上看到的东西」贴出去对账。
+	ExportMarkdown ExportFormat = "markdown"
 )
 
 // Valid 判断格式是否受支持。
 func (f ExportFormat) Valid() bool {
-	return f == ExportCSV || f == ExportNDJSON || f == ExportSQL
+	return f == ExportCSV || f == ExportNDJSON || f == ExportSQL || f == ExportMarkdown
 }
 
 // ErrExportFormat 表示不支持的导出格式。
@@ -186,6 +192,28 @@ func (e *Executor) Export(ctx context.Context, req ExportRequest, w io.Writer) (
 			return nil, err
 		}
 
+	case ExportMarkdown:
+		// 表头必写：req.Header 是 CSV 的开关，markdown 表格没有表头就是坏语法。
+		bw.WriteString("| " + strings.Join(markdownCells(names), " | ") + " |\n")
+		bw.WriteString("|" + strings.Repeat(" --- |", len(names)) + "\n")
+		for {
+			batch, more, err := cur.Next(ctx)
+			if err != nil {
+				return nil, err
+			}
+			for _, row := range batch {
+				rec := make([]string, len(row))
+				for i, v := range row {
+					rec[i] = markdownCell(v)
+				}
+				bw.WriteString("| " + strings.Join(rec, " | ") + " |\n")
+				out.Rows++
+			}
+			if !more {
+				break
+			}
+		}
+
 	case ExportSQL:
 		for {
 			batch, more, err := cur.Next(ctx)
@@ -244,6 +272,42 @@ func (e *Executor) Export(ctx context.Context, req ExportRequest, w io.Writer) (
 		Duration:    out.Duration,
 	}, "ok", q, fmt.Sprintf("导出 %d 行（%s）", out.Rows, format))
 	return out, nil
+}
+
+// markdownCell 把一个值写成 markdown 表格单元格。
+//
+// 与 csvCell 的区别不只是转义：这里把 NULL 与空串分开了。CSV 没法表达 NULL，
+// 两者都只能是空，只能去读 ndjson 才知道区别；而 markdown 是给人对账用的，
+// 一行「NULL」和一行「”」正是界面上显示的样子，不该在这个环节糊掉。
+func markdownCell(v any) string {
+	if v == nil {
+		return "NULL"
+	}
+	if s, ok := v.(string); ok && s == "" {
+		return "''"
+	}
+	return markdownEscape(csvCell(v))
+}
+
+// markdownCells 批量转义（表头也走这里，列名里的竖线同样会破表）。
+func markdownCells(vals []string) []string {
+	out := make([]string, len(vals))
+	for i, v := range vals {
+		out[i] = markdownEscape(v)
+	}
+	return out
+}
+
+// markdownEscape 处理两处会破表的东西。
+//
+// 反斜杠必须先转：只把 | 换成 \| 的话，数据里本来就是 | 的会变成 \|，
+// 渲染时前半截是转义后的反斜杠、后半截变成单元格分隔符——表格当场错位。
+// 换行换成 <br>：markdown 表格里不能有真换行，写进去整行就断了。
+func markdownEscape(s string) string {
+	s = strings.ReplaceAll(s, "\\", "\\\\")
+	s = strings.ReplaceAll(s, "|", "\\|")
+	s = strings.ReplaceAll(s, "\r\n", "<br>")
+	return strings.ReplaceAll(s, "\n", "<br>")
 }
 
 // csvCell 把一个值写成 CSV 单元格。

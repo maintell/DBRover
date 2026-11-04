@@ -197,3 +197,74 @@ func TestExportWorksWithoutPrimaryKey(t *testing.T) {
 		t.Errorf("导出行数 = %d, 期望 2", res.Rows)
 	}
 }
+
+// TestExportMarkdown 钉住 markdown 表格的两条口径：会破表的东西必须转义，
+// NULL 与空串必须能分辨。
+//
+// 这条用例的重点不是「能导出」，而是「粘进 issue 以后表格没错位、NULL 没糊成
+// 空白」——那才是人用这个格式的唯一理由。
+func TestExportMarkdown(t *testing.T) {
+	e := setup(t)
+	ctx := context.Background()
+	ex := newTestExecutor(t, e)
+
+	s, err := e.rw.Acquire(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// setup 已经塞过数据，先清空：这里要的是一组形状确定的单元格。
+	if _, err := s.Execute(ctx, `DELETE FROM t`, nil); err != nil {
+		t.Fatalf("清空: %v", err)
+	}
+	if _, err := s.Execute(ctx, `INSERT INTO t (id, v) VALUES (1, ?)`, []any{"a|b\\c"}); err != nil {
+		t.Fatalf("插带竖线的值: %v", err)
+	}
+	if _, err := s.Execute(ctx, `INSERT INTO t (id, v) VALUES (2, ?)`, []any{"第一行\n第二行"}); err != nil {
+		t.Fatalf("插带换行的值: %v", err)
+	}
+	if _, err := s.Execute(ctx, `INSERT INTO t (id, v) VALUES (3, NULL)`, nil); err != nil {
+		t.Fatalf("插 NULL: %v", err)
+	}
+	if _, err := s.Execute(ctx, `INSERT INTO t (id, v) VALUES (4, '')`, nil); err != nil {
+		t.Fatalf("插空串: %v", err)
+	}
+	_ = s.Close()
+
+	var buf bytes.Buffer
+	res, err := ex.Export(ctx, service.ExportRequest{
+		Table: "t", Format: service.ExportMarkdown, // 刻意不传 Header
+	}, &buf)
+	if err != nil {
+		t.Fatalf("Export: %v", err)
+	}
+	if res.Rows != 4 {
+		t.Fatalf("导出 %d 行，期望 4", res.Rows)
+	}
+
+	lines := strings.Split(strings.TrimRight(buf.String(), "\n"), "\n")
+	if len(lines) != 6 {
+		t.Fatalf("应有表头 + 分隔 + 4 行，实际 %d 行：%v", len(lines), lines)
+	}
+	// 表头必写：不传 Header 也要有，否则粘出去是坏语法。
+	if !strings.HasPrefix(lines[0], "| ") || !strings.Contains(lines[0], "id") {
+		t.Errorf("第一行不是表头：%q", lines[0])
+	}
+	if !strings.HasPrefix(lines[1], "|") || !strings.Contains(lines[1], "---") {
+		t.Errorf("第二行不是分隔行：%q", lines[1])
+	}
+
+	body := strings.Join(lines[2:], "\n")
+	// 竖线与反斜杠一起：只转义竖线会让数据里本来就是 \\| 的内容错位。
+	if !strings.Contains(body, `a\|b\\c`) {
+		t.Errorf("竖线/反斜杠没转义：%s", body)
+	}
+	if !strings.Contains(body, "第一行<br>第二行") {
+		t.Errorf("换行没换成 <br>，表格会被截断：%s", body)
+	}
+	if !strings.Contains(body, "| NULL |") {
+		t.Errorf("NULL 要显式写成 NULL：%s", body)
+	}
+	if !strings.Contains(body, "| '' |") {
+		t.Errorf("空串要写成两个单引号（与界面一致）：%s", body)
+	}
+}
