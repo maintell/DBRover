@@ -171,7 +171,7 @@ if m, ok := conn.(driver.MonitorProvider); ok && conn.Capabilities().SessionMgmt
 | 例程源码 | ● | ● | ● | ●（可能被 wrap） | ◐ | ○ | ◐ JS | ○ |
 | 对象 DDL 还原 | `pg_get_*def` | `SHOW CREATE` | 自拼（无原生） | `DBMS_METADATA` | 自拼 | 自拼 | 自拼 | 自拼 |
 
-> **对象类型覆盖**：视图与触发器三个引擎都支持（触发器分别走 `sqlite_master` / `information_schema.TRIGGERS` / `pg_trigger`，PG 需排除 `tgisinternal`，否则每个外键都会冒出两条内部触发器）；序列只有 PostgreSQL 做了（`pg_class.relkind='S'`），MySQL 与例程都还没接。没做的类型能力位一律为 `false`——声明 `true` 却返回空列表，会被读成「这个库没有该对象」，比「不支持」更误导。
+> **对象类型覆盖**：视图与触发器三个引擎都支持（触发器分别走 `sqlite_master` / `information_schema.TRIGGERS` / `pg_trigger`，PG 需排除 `tgisinternal`，否则每个外键都会冒出两条内部触发器）；序列只有 PostgreSQL 做了（`pg_class.relkind='S'`），MySQL 与例程都还没接。**界面入口未做**：`/tables` 目前只取表与视图，触发器/序列已能在 `Metadata.Objects` 列出并由 `drivertest` 验证，但对象树里还看不到它们。没做的类型能力位一律为 `false`——声明 `true` 却返回空列表，会被读成「这个库没有该对象」，比「不支持」更误导。
 >
 > **MSSQL 与 SQLite 没有「一键取 DDL」**，必须由驱动自己拼装。这是两个容易低估工作量的实现点，需专门写测试（拼出的 DDL 能被回放到新库并产生等价结构）。
 
