@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"strings"
 
 	"github.com/maintell/DBRover/internal/driver"
@@ -16,7 +17,15 @@ type MigrateExecOptions struct {
 	BatchSize int
 	// MaxRows > 0 时只搬这么多行就停（演练/测试用）。
 	MaxRows int
+	// CheckpointPath 非空时，每批完成后把「下一批从哪开始」与累计摘要落盘。
+	CheckpointPath string
+	// Resume 为 true 时从 CheckpointPath 继续；没有检查点会明确报错，
+	// 不静默从头（那会撞主键冲突，用户以为是坏数据）。
+	Resume bool
 }
+
+// ErrMigrateNoCheckpoint 表示要求续跑但找不到检查点。
+var ErrMigrateNoCheckpoint = errors.New("找不到迁移检查点")
 
 // MigrateExecReport 是一次数据搬运的结果。
 type MigrateExecReport struct {
@@ -84,7 +93,38 @@ func MigrateTable(ctx context.Context, src, dst *Executor, table, targetTable st
 	}
 	digest := &tableDigest{}
 	var last []any
+	// done 表示「真的搬完了」。只有搬完才删检查点——MaxRows 演练停在半路时
+	// 删掉它，就等于把续跑的凭据扔了。
+	done := false
 
+	if opt.Resume {
+		if opt.CheckpointPath == "" {
+			return nil, errors.New("迁移：续跑需要指定检查点路径")
+		}
+		cp, cerr := loadMigrateCheckpoint(opt.CheckpointPath, table)
+		if cerr != nil {
+			if os.IsNotExist(cerr) {
+				return nil, fmt.Errorf("%w：%s（需从头搬：先清空目标表，或检查表名是否一致）",
+					ErrMigrateNoCheckpoint, opt.CheckpointPath)
+			}
+			return nil, cerr
+		}
+		for _, v := range cp.Last {
+			val, derr := decodeCheckpointValue(v)
+			if derr != nil {
+				return nil, derr
+			}
+			last = append(last, val)
+		}
+		rep.Rows = cp.Rows
+		if rep.Verified {
+			d, derr := digestFromHex(cp.Digest, cp.Rows)
+			if derr != nil {
+				return nil, derr
+			}
+			digest = d
+		}
+	}
 	for {
 		if opt.MaxRows > 0 && rep.Rows >= int64(opt.MaxRows) {
 			break
@@ -99,6 +139,7 @@ func MigrateTable(ctx context.Context, src, dst *Executor, table, targetTable st
 			return nil, fmt.Errorf("读源数据: %w", err)
 		}
 		if len(rows) == 0 {
+			done = true
 			break
 		}
 		if err := insertRows(ctx, dst, targetTable, cols, rows); err != nil {
@@ -114,7 +155,18 @@ func MigrateTable(ctx context.Context, src, dst *Executor, table, targetTable st
 		if len(pk) > 0 {
 			last = pkValues(pk, cols, rows[len(rows)-1])
 		}
+		if opt.CheckpointPath != "" {
+			if err := saveMigrateCheckpoint(opt.CheckpointPath, migrateCheckpoint{
+				Table:  table,
+				Rows:   rep.Rows,
+				Last:   encodeKeyValues(last),
+				Digest: digestHexIfVerified(rep, digest),
+			}); err != nil {
+				return nil, fmt.Errorf("写检查点: %w", err)
+			}
+		}
 		if len(rows) < limit {
+			done = true
 			break
 		}
 	}
@@ -130,7 +182,32 @@ func MigrateTable(ctx context.Context, src, dst *Executor, table, targetTable st
 			return rep, err
 		}
 	}
+	if done && opt.CheckpointPath != "" {
+		_ = os.Remove(opt.CheckpointPath)
+	}
 	return rep, nil
+}
+
+// encodeKeyValues 把主键值编码进检查点；遇到不支持的类型返回 nil，
+// 让该批不落检查点（续跑会从更早的位置重来，而不是用错类型的键）。
+func encodeKeyValues(vals []any) []checkpointValue {
+	out := make([]checkpointValue, 0, len(vals))
+	for _, v := range vals {
+		enc, err := encodeCheckpointValue(v)
+		if err != nil {
+			return nil
+		}
+		out = append(out, enc)
+	}
+	return out
+}
+
+// digestHexIfVerified 在需要校验时给出累计摘要，否则留空。
+func digestHexIfVerified(rep *MigrateExecReport, d *tableDigest) string {
+	if !rep.Verified {
+		return ""
+	}
+	return d.Hex()
 }
 
 // migrateColumns 取两侧同名列，按源顺序输出；源有而目标没有的列直接报错。

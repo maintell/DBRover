@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"errors"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -127,5 +128,70 @@ func TestMigrateNoPrimaryKey(t *testing.T) {
 	}
 	if rep.Rows != 2 {
 		t.Errorf("搬了 %d 行，期望 2", rep.Rows)
+	}
+}
+
+// TestMigrateResume 是 ADR-0011 验证计划的第 1 条：中途停下后从检查点续跑，
+// 最终行数与摘要都要对得上，且检查点用完即删。
+func TestMigrateResume(t *testing.T) {
+	ctx := context.Background()
+	src, dst := openMigrateDB(t, "src.db"), openMigrateDB(t, "dst.db")
+	execOn(t, src, "CREATE TABLE t (id INTEGER PRIMARY KEY, v TEXT)")
+	execOn(t, src, "WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM c WHERE x<2500) "+
+		"INSERT INTO t (id, v) SELECT x, 'v'||x FROM c")
+	execOn(t, dst, "CREATE TABLE t (id INTEGER PRIMARY KEY, v TEXT)")
+	srcEx := NewExecutor(src, model.EnvTest, model.AccessReadWrite, nil)
+	dstEx := NewExecutor(dst, model.EnvTest, model.AccessReadWrite, nil)
+	defer srcEx.Close()
+	defer dstEx.Close()
+
+	cpPath := filepath.Join(t.TempDir(), "migrate-t.json")
+	first, err := MigrateTable(ctx, srcEx, dstEx, "t", "", MigrateExecOptions{
+		BatchSize: 500, MaxRows: 1000, CheckpointPath: cpPath,
+	})
+	if err != nil {
+		t.Fatalf("首段搬运: %v", err)
+	}
+	if first.Rows != 1000 {
+		t.Fatalf("首段应搬 1000 行，实际 %d", first.Rows)
+	}
+	if _, statErr := os.Stat(cpPath); statErr != nil {
+		t.Fatalf("应当留下检查点：%v", statErr)
+	}
+
+	second, err := MigrateTable(ctx, srcEx, dstEx, "t", "", MigrateExecOptions{
+		BatchSize: 500, CheckpointPath: cpPath, Resume: true,
+	})
+	if err != nil {
+		t.Fatalf("续跑: %v", err)
+	}
+	if second.Rows != 2500 {
+		t.Fatalf("续跑后总行数 = %d，期望 2500", second.Rows)
+	}
+	if !second.Verified || second.SourceDigest == "" || second.SourceDigest != second.TargetDigest {
+		t.Fatalf("续跑后的校验不通过：%+v", second)
+	}
+	if _, statErr := os.Stat(cpPath); !os.IsNotExist(statErr) {
+		t.Errorf("完成后检查点应被删掉，实际 %v", statErr)
+	}
+}
+
+// TestMigrateResumeNeedsCheckpoint 保证没有检查点时明确报错，不静默从头
+// ——从头跑会撞主键冲突，用户会误以为是坏数据。
+func TestMigrateResumeNeedsCheckpoint(t *testing.T) {
+	ctx := context.Background()
+	src, dst := openMigrateDB(t, "src.db"), openMigrateDB(t, "dst.db")
+	execOn(t, src, "CREATE TABLE t (id INTEGER PRIMARY KEY)")
+	execOn(t, dst, "CREATE TABLE t (id INTEGER PRIMARY KEY)")
+	srcEx := NewExecutor(src, model.EnvTest, model.AccessReadWrite, nil)
+	dstEx := NewExecutor(dst, model.EnvTest, model.AccessReadWrite, nil)
+	defer srcEx.Close()
+	defer dstEx.Close()
+
+	_, err := MigrateTable(ctx, srcEx, dstEx, "t", "", MigrateExecOptions{
+		CheckpointPath: filepath.Join(t.TempDir(), "none.json"), Resume: true,
+	})
+	if !errors.Is(err, ErrMigrateNoCheckpoint) {
+		t.Fatalf("缺检查点应返回 ErrMigrateNoCheckpoint，实际 %v", err)
 	}
 }
