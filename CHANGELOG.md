@@ -260,6 +260,16 @@
 
 ### 修复
 
+- **系统性地补齐所有 POST 端点的 OpenAPI 请求体契约**（承接上一笔 /exec 漂移的排查）：
+  写 `TestSpecAllPostBodiesMatchService`，把「POST 路径 → 请求结构体」的映射建表，
+  字段一律从结构体的 json tag 用 reflect 取、与 spec 的 requestBody.properties 双向比对；
+  两个方向都查，不手抄清单。它一次性抓出 5 处漂移：
+  - `explain` / `agent/conversations` / `agent/conversations/{id}/messages` /
+    `agent/conversations/{id}/approvals/{pid}` 四个端点代码里 `decode(r,&req)`，但 spec 里
+    **完全没有 requestBody**——按契约生成的客户端不知道该 POST 什么；
+  - `migrate/plan` 漏了 `probe` 字段（`-probe` 按实际最大长度判长度，docs/08 §4.4）。
+  已在 openapi.json 补齐（含各字段语义说明）。变异验证：删掉 explain 的 `cursor` 字段，
+  门禁精确报「入参 cursor 在 explainRequest 里有，spec 没声明」而红；还原复绿。
 - **`/exec` 的 OpenAPI 契约漏了两个请求字段**（文档与实现不一致）：`execRequest` 有
   `sql` / `approval_token` / `stop_on_error` / `max_rows` / `cursor` 五个字段，而 `openapi.json`
   只声明了前三个 + `max_rows`——`stop_on_error`（docs/05 §2.1 新增）与 `cursor`（光标定位）都漏了。

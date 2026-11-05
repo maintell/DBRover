@@ -1011,7 +1011,8 @@
                     "type": "object",
                     "description": "列名 → 目标类型（review/blocked 列必填）",
                     "additionalProperties": { "type": "string" }
-                  }
+                  },
+                  "probe": { "type": "boolean", "description": "true 时读源表实际最大字符长度，据此把「声明收窄」翻成 ok 或继续阻断；代价是一次全表扫描，不默认开（docs/08 §4.4）" }
                 }
               }
             }
@@ -1163,6 +1164,16 @@
     "/api/v1/connections/{id}/explain": {
       "post": {
         "summary": "取一条查询的执行计划（不执行语句本身；可带 cursor 只解释光标所在那条）",
+        "requestBody": {
+          "required": true,
+          "content": { "application/json": { "schema": {
+            "type": "object", "required": ["sql"],
+            "properties": {
+              "sql": { "type": "string" },
+              "cursor": { "type": "integer", "description": "与 /exec 同义：给了就只解释光标所在的那一条" }
+            }
+          } } }
+        },
         "responses": {
           "200": { "description": "ok" },
           "400": { "description": "这个引擎不支持单条语句取计划（MSSQL / Oracle）" },
@@ -1194,6 +1205,16 @@
     "/api/v1/agent/conversations": {
       "post": {
         "summary": "新建 Agent 会话（绑定连接与权限模式）",
+        "requestBody": {
+          "required": true,
+          "content": { "application/json": { "schema": {
+            "type": "object", "required": ["connection_id"],
+            "properties": {
+              "connection_id": { "type": "string", "description": "会话绑定的连接 id" },
+              "mode": { "type": "string", "description": "read-only（默认）/ write-with-approval / autonomous；mode 省略时用只读" }
+            }
+          } } }
+        },
         "responses": {
           "201": { "description": "created" },
           "400": { "description": "未配置模型服务，或连接/模式不合法" }
@@ -1231,6 +1252,13 @@
     "/api/v1/agent/conversations/{id}/messages": {
       "post": {
         "summary": "发一条消息（含步骤、结论与待批预案）；加 ?stream=1 改为 NDJSON 流式",
+        "requestBody": {
+          "required": true,
+          "content": { "application/json": { "schema": {
+            "type": "object", "required": ["content"],
+            "properties": { "content": { "type": "string", "description": "用户这一轮的问题" } }
+          } } }
+        },
         "responses": {
           "200": { "description": "ok（stopped 非空表示没走完，原因在 stop_message）" },
           "404": { "description": "会话不存在或已过期" },
@@ -1250,6 +1278,13 @@
     "/api/v1/agent/conversations/{id}/approvals/{pid}": {
       "post": {
         "summary": "批准或拒绝一张预案（人类签字口，模型无法调用）",
+        "requestBody": {
+          "required": false,
+          "content": { "application/json": { "schema": {
+            "type": "object",
+            "properties": { "approve": { "type": "boolean", "description": "省略时视为批准；false 表示拒绝（预案作废）" } }
+          } } }
+        },
         "responses": {
           "200": { "description": "ok" },
           "404": { "description": "会话或预案不存在" }
