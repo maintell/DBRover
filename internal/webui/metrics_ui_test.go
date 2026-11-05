@@ -29,6 +29,12 @@ func TestUIMetricsPanel(t *testing.T) {
 		"out.verdict",
 		// 入口按能力位显示。
 		"if ($('btn-metrics')) $('btn-metrics').hidden = !caps.metrics;",
+		// 慢查询区（FR-MON-04）：首次采样必须标注「没有增量」，否则用户会把累计值
+		// 当成最近这段窗口的量（docs/09 §6.2 点名的坑）。
+		"slowQueries: '/api/v1/connections/:id/monitor/slow-queries'",
+		"function slowSection(slow)",
+		"首次采样，暂无增量",
+		"slow.available === false",
 	} {
 		if !strings.Contains(src, want) {
 			t.Errorf("性能面板缺少 %q", want)

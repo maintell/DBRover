@@ -201,6 +201,21 @@
         }
       }
     },
+    "/api/v1/connections/{id}/monitor/slow-queries": {
+      "get": {
+        "summary": "慢查询 Top N（窗口增量）",
+        "description": "FR-MON-04。**返回的是窗口增量，不是累计值**：引擎计数器自启动以来累加，第一次调用只能给累计值并标 first_sample=true，界面必须标注「首次采样，暂无增量」。默认按窗口内总耗时倒序。实例没开统计（PG 未 preload pg_stat_statements / MySQL 关掉 performance_schema）时返回 200 + available=false + hint；采集超时同样返回 200 + degraded。",
+        "parameters": [
+          { "name": "id", "in": "path", "required": true, "schema": { "type": "string" } },
+          { "name": "limit", "in": "query", "schema": { "type": "integer", "default": 20, "maximum": 200 } }
+        ],
+        "responses": {
+          "200": { "description": "ok（available=false 或 degraded 非空表示降级）" },
+          "400": { "description": "这个引擎没有慢查询统计，或 limit 非法" },
+          "404": { "description": "连接不存在" }
+        }
+      }
+    },
     "/api/v1/connections/{id}/monitor/metrics": {
       "get": {
         "summary": "性能面板：连接与负载、缓存命中",

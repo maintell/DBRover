@@ -148,3 +148,25 @@ func TestMetricsCapabilityIsHonest(t *testing.T) {
 		}
 	}
 }
+
+// TestSlowQueryCapabilityIsHonest 钉住「慢查询统计」这句话的真值。
+//
+// PG 走 pg_stat_statements（没开时降级并给打开步骤），MySQL 走
+// performance_schema；SQLite 没有服务端统计。与其它能力位同一条规则：先实现 →
+// 真机跑通 → 再翻这张表。
+func TestSlowQueryCapabilityIsHonest(t *testing.T) {
+	want := map[model.Engine]bool{
+		model.EngineSQLite:   false,
+		model.EngineMySQL:    true,
+		model.EnginePostgres: true,
+	}
+	for _, c := range []driver.Connector{sqlite.New(), mysql.New(), pg.New()} {
+		exp, ok := want[c.Engine()]
+		if !ok {
+			t.Fatalf("新增引擎 %s 没写进这张表：慢查询能力要有明确预期", c.Engine())
+		}
+		if got := c.Capabilities().SlowQueryStats; got != exp {
+			t.Errorf("%s: Capabilities.SlowQueryStats = %v，期望 %v", c.Engine(), got, exp)
+		}
+	}
+}

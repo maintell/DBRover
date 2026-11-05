@@ -38,6 +38,7 @@ const API = {
   tables: '/api/v1/connections/:id/tables',
   search: '/api/v1/connections/:id/search',
   metrics: '/api/v1/connections/:id/monitor/metrics',
+  slowQueries: '/api/v1/connections/:id/monitor/slow-queries',
   sessions: '/api/v1/connections/:id/monitor/sessions',
   killSession: '/api/v1/connections/:id/monitor/sessions/:sid/kill',
   rows: '/api/v1/connections/:id/tables/:name/rows',
@@ -3256,7 +3257,17 @@ async function showMetrics(auto) {
     setStatus('失败');
     return;
   }
-  renderMetrics(out);
+  // 慢查询是可选能力：它失败不该把指标卡也拖下水。
+  let slow = null;
+  const caps = (state.current && state.current.capabilities) || {};
+  if (caps.slow_query_stats) {
+    try {
+      slow = await api(path(API.slowQueries, { id: state.current.id }));
+    } catch (e) {
+      slow = null;
+    }
+  }
+  renderMetrics(out, slow);
   if (auto) return;
   setStatus('指标已更新');
   stopMetricsRefresh();
@@ -3319,7 +3330,84 @@ function renderMetrics(out) {
   }
   table.appendChild(tbody);
   wrap.appendChild(table);
+  if (slow) wrap.appendChild(slowSection(slow));
   $('results').replaceChildren(wrap);
+}
+
+// slowSection 画慢查询 Top N（FR-MON-04）。
+//
+// 首次采样只能给累计值——引擎计数器是自启动以来累加的，没有上一份样本就算不出
+// 增量。这时候必须在最显眼的位置说明，否则用户会把「自启动以来跑了 120 万次」
+// 当成「最近 5 秒跑了 120 万次」（docs/09 §6.2 点名这是最容易做错的地方）。
+function slowSection(slow) {
+  const box = document.createElement('div');
+  const head = document.createElement('div');
+  head.className = 'head';
+  box.appendChild(head);
+
+  if (slow.available === false) {
+    head.textContent = '慢查询（不可用）';
+    const n = document.createElement('div');
+    n.className = 'notice';
+    n.textContent = slow.hint || '这个实例没有开启慢查询统计。';
+    box.appendChild(n);
+    return box;
+  }
+  if (slow.degraded) {
+    head.textContent = '慢查询';
+    const n = document.createElement('div');
+    n.className = 'notice';
+    n.textContent = slow.degraded;
+    box.appendChild(n);
+    return box;
+  }
+
+  const items = slow.items || [];
+  head.textContent = '慢查询（' + items.length + '）';
+  if (slow.first_sample) {
+    const n = document.createElement('div');
+    n.className = 'notice';
+    n.textContent = '首次采样，暂无增量：下面是自实例启动以来的累计值，不是最近这段窗口。';
+    box.appendChild(n);
+  } else if (slow.window_seconds > 0) {
+    const n = document.createElement('div');
+    n.className = 'notice';
+    n.textContent = '窗口 ' + slow.window_seconds.toFixed(1) + ' 秒内的增量。';
+    box.appendChild(n);
+  }
+  if (!items.length) return box;
+
+  const t = document.createElement('table');
+  const thead = document.createElement('thead');
+  const htr = document.createElement('tr');
+  for (const label of ['总耗时(ms)', '次数', '平均(ms)', '语句']) {
+    const th = document.createElement('th');
+    th.textContent = label;
+    htr.appendChild(th);
+  }
+  thead.appendChild(htr);
+  t.appendChild(thead);
+  const tb = document.createElement('tbody');
+  for (const it of items) {
+    const tr = document.createElement('tr');
+    tr.appendChild(cell(formatMS(it.total_ms)));
+    tr.appendChild(cell(String(it.calls)));
+    tr.appendChild(cell(formatMS(it.mean_ms)));
+    const td = cell(it.text || '');
+    td.style.maxWidth = '520px';
+    td.style.overflow = 'hidden';
+    td.style.textOverflow = 'ellipsis';
+    tr.appendChild(td);
+    tb.appendChild(tr);
+  }
+  t.appendChild(tb);
+  box.appendChild(t);
+  return box;
+}
+
+function formatMS(v) {
+  if (typeof v !== 'number' || !isFinite(v)) return '—';
+  return v >= 100 ? v.toFixed(0) : v.toFixed(1);
 }
 
 $('btn-metrics').onclick = () => showMetrics(false);

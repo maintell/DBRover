@@ -176,6 +176,8 @@
 
 - **终止会话的确认与审计**（docs/09 验收 6）：之前确认框只有一句「会掐断它的语句」，连对方在跑什么都不知道；而且 `handleKillSession` **完全绕开了执行门**，不写任何审计——一个不可逆的写操作在审计里查不到。现在确认框带上**该会话当时在跑的语句**（超 400 字符截断，且先转义再拼 HTML：语句来自数据库，不能当可信文本拼），终止后记一条 `monitor.kill_session` 审计，`sql` 就是那条语句（已脱敏），失败也记（`outcome=error` + 原因）。终止不走执行门是因为它不是 SQL、走的是驱动的专门方法，所以审计在 API 层自己写，id 复用同一个生成器以免审计里出现两种 id 形态。真机 MySQL：后台跑 `SELECT SLEEP(90)` → 终止 → `/audit` 里查到 `monitor.kill_session` 且 `sql=SELECT SLEEP(90)`；内置浏览器确认框显示同一句 SQL。
 
+- **慢查询 Top N（窗口增量）**（FR-MON-04，docs/09 验收 3/4）：`driver.SlowQueryProvider`（判据 `Capabilities().SlowQueryStats`）。PG 走 `pg_stat_statements`（`total_exec_time`），MySQL 走 `performance_schema.events_statements_summary_by_digest`（TIMER 是**皮秒**，换算放驱动里——只有它知道这个引擎用什么单位）。**差分成窗口增量**：`Executor` 每条连接一份采样状态，本次累计值减上一次；`docs/09 §6.2` 点名这是最容易做错的地方——把累计值当窗口值展示，用户会看到「这条 SQL 跑了 120 万次」，而那是自实例启动以来的总量。首次采样没有上一份样本，只能给累计值并标 `first_sample`，界面在表头上方写明「首次采样，暂无增量」。**排序按窗口内总耗时重排**：引擎给的是生命周期排序，窗口里跑得最多的可能根本不在前几名。计数器被清过（`pg_stat_statements_reset` / `TRUNCATE performance_schema`）时差成负数，按新增处理——显示负数比不显示更糟。两条降级路径都返回 200：实例没开统计（`available=false` + 怎么打开的说明，PG 是 preload + 重启 + `CREATE EXTENSION` 三步）、采集超时（`degraded`）。面板把慢查询接在指标卡下面，同一个 5 秒节奏——第一次点开建立基线，之后每次都是增量。
+
 ### 安全
 
 - **大整数不再静默丢精度**：`BIGINT` 超过 2^53 时，界面保持字符串、服务端按列类型还原；客户端若把它写成 JSON 数字，直接 `400 NUMBER_PRECISION_LOSS` 并提示改用字符串，而不是把丢了低位的值写进库。此前界面 `coerce()` 用 `Number()` 转换整数列，编辑 `9223372036854775807` 会变成 `...5808`。

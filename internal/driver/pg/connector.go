@@ -151,9 +151,10 @@ func (c *Connector) Capabilities() model.Capabilities {
 		AddCheck: true,
 		// indisvalid 查得到：无效索引（失败的 CREATE INDEX CONCURRENTLY 会留下）
 		// 照样出现在清单里，只看「有几个索引」发现不了。
-		IndexValidity:  true,
-		Explain:        true, // EXPLAIN
-		SlowQueryStats: false,
+		IndexValidity: true,
+		Explain:       true, // EXPLAIN
+		// 慢查询走 pg_stat_statements（没开时降级并给出打开步骤）。
+		SlowQueryStats: true,
 		// 会话列表走 pg_stat_activity；终止走 pg_terminate_backend。
 		SessionMgmt: true,
 		KillSession: true,

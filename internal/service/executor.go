@@ -122,6 +122,9 @@ type Executor struct {
 	env     model.Environment
 	mode    model.AccessMode
 	audit   AuditSink
+	// slow 保存上一次慢查询采样的累计值，用来算窗口增量（docs/09 §6.2）。
+	// 每条连接一个 Executor，所以按连接天然隔离。
+	slow slowSampler
 	// WarmRelations 为 true 时，执行前会查目标表主键以精确分级到 R1。
 	WarmRelations bool
 	// cursors 持有流式查询的游标，生命周期由执行器管理。

@@ -127,12 +127,13 @@ func (c *Connector) Capabilities() model.Capabilities {
 		// 例程（过程 / 函数）走 information_schema.ROUTINES，已接进 Objects。
 		Routines: true,
 		// 触发器走 information_schema.TRIGGERS 单独查（见 metadata.go triggerRefs）。
-		Triggers:       true,
-		Sequences:      false,
-		UserTypes:      false,
-		Indexes:        true,
-		Explain:        true, // EXPLAIN
-		SlowQueryStats: false,
+		Triggers:  true,
+		Sequences: false,
+		UserTypes: false,
+		Indexes:   true,
+		Explain:   true, // EXPLAIN
+		// 慢查询走 performance_schema.events_statements_summary_by_digest。
+		SlowQueryStats: true,
 		// 会话列表走 information_schema.processlist；终止走 KILL。
 		SessionMgmt: true,
 		KillSession: true,

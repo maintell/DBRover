@@ -273,7 +273,7 @@ CREATE TABLE slow_query_hourly (
 
 | 缺口 | 契约位置 | 影响 | 处置 |
 |---|---|---|---|
-| 慢查询 Top N 与指纹聚合 | §3.2 / FR-MON-04 | 面板没有「慢查询」这张卡；`SlowQueryStats` 能力位仍为 false | 必须先把「累计值 vs 窗口值」的**差分采样**做出来（§6.2）——目录里的数字是自实例启动以来的累计量，直接展示会让用户看到「这条 SQL 跑了 120 万次」 |
+| 慢查询 Top N（窗口增量） | §3.2 / 验收 3、4 | `driver.SlowQueryProvider`（判据 `Capabilities().SlowQueryStats`）+ `service.Executor.SlowQueries`。**差分在服务层**：`Executor` 每条连接一份 `slowSampler`，保存上一次的累计值，本次相减得到窗口增量；计数器被清过（`pg_stat_statements_reset` / `TRUNCATE performance_schema`）时差成负数，按新增处理而不是显示负数。**首次采样只能给累计值并标 `first_sample`**。排序用**窗口内**总耗时重排。降级：扩展/表不存在 → `available=false` + `hint`（PG 给出 preload + 重启 + `CREATE EXTENSION` 三步；MySQL 给出 performance_schema 的检查点）；超时 → `degraded` | `TestDiffSlowQueriesIsWindowDelta`（两次采样：累计 → 增量、窗口里没跑过的不出现、按窗口总耗时重排、平均耗时）、`TestDiffSlowQueriesSurvivesCounterReset`（清零后不显示负数）；真机验证见下 |
 | QPS | §3.1 / FR-MON-01 | 没有吞吐数字 | 同上：累计计数要两次采样差分。PG 的语句计数在 `pg_stat_statements`（需扩展），未装时只能给事务数 |
 | 锁与阻塞链 | §3.4 / FR-MON-03 | 没有阻塞视图；`LockGraph` 仍为 false | 需要构造真实锁的集成用例（与 `docs/07` 验收 11 的 MDL 卡点同源） |
 | 容量视图 | §3.5 / FR-MON-06 | 没有表体量与增长 | 依赖各引擎的体积查询，且大表统计要手动触发（一次可能扫几千行系统表） |
