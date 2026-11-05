@@ -550,6 +550,14 @@ async function showSessions() {
   const canKill = !!caps.kill_session && state.current.access_mode !== 'read-only';
   for (const it of items) {
     const tr = document.createElement('tr');
+    // 「空闲但事务没提交」超过 60 秒是事故高发点（docs/09 验收 5）：它什么都不干，
+    // 却抱着锁不放，别人全在排队。引擎只有 PG 会在状态里明说这件事（MySQL 的
+    // processlist 只有一个 Sleep，看不出来），所以这里有数据就标、没有就不标。
+    const stuckTx = it.state === 'idle in transaction' && it.duration_ms > 60000;
+    if (stuckTx) {
+      tr.style.color = '#e5534b';
+      tr.title = '空闲但事务没提交，已持续 ' + Math.round(it.duration_ms / 1000) + ' 秒：它在占着锁';
+    }
     const add = (v) => {
       const td = document.createElement('td');
       td.textContent = v === null || v === undefined ? '' : String(v);
@@ -3691,6 +3699,17 @@ async function showHealth() {
   }
   t.appendChild(tb);
   wrap.appendChild(t);
+
+  // 导出：新窗口打开 Markdown，用户可直接保存/贴进工单（验收 12）。
+  const bar = document.createElement('div');
+  bar.className = 'toolbar';
+  const btn = document.createElement('button');
+  btn.id = 'btn-health-export';
+  btn.textContent = '导出 Markdown';
+  btn.onclick = () => window.open(path(API.healthCheck, { id: state.current.id }) + '?format=markdown', '_blank');
+  bar.appendChild(btn);
+  wrap.appendChild(bar);
+
   $('results').replaceChildren(wrap);
   setStatus('巡检完成');
 }

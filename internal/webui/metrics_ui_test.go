@@ -54,6 +54,9 @@ func TestUIMetricsPanel(t *testing.T) {
 		"alerts: '/api/v1/connections/:id/monitor/alerts'",
 		"function alertSection(alerts)",
 		"function showHealth()",
+		// 巡检报告可导出（验收 12 的后半）。
+		"id = 'btn-health-export'",
+		"'?format=markdown'",
 		"unknown: '未知'",
 		// 链而不是平表：从持有者往下展开（FR-MON-03 要的是「谁卡住了谁」）。
 		"'持有 #' + id",

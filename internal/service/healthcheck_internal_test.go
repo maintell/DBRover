@@ -16,6 +16,8 @@ func TestAssessHealthRules(t *testing.T) {
 		locks:   []driver.LockWait{},
 		slow:    &SlowQueriesResult{Available: true},
 		sizes:   []driver.TableSize{{Name: "t", TotalBytes: 1 << 20}},
+		// capacityOn 要显式给真：不给会被当成「引擎没有体量视图」而记 unknown。
+		capacityOn: true,
 	})
 	if ok.Level != "ok" {
 		t.Errorf("全绿时整体应为 ok，实际 %q：%+v", ok.Level, ok.Items)
@@ -28,10 +30,11 @@ func TestAssessHealthRules(t *testing.T) {
 
 	// 有锁等待 → warn，且整体跟着升。
 	warn := assess(healthInput{
-		metrics: &MetricsSummary{Connections: 1, MaxConnections: 100, CacheHitRatio: &ratio},
-		locks:   []driver.LockWait{{WaitingID: "5", BlockingID: "4", WaitSeconds: 7}},
-		slow:    &SlowQueriesResult{Available: true},
-		sizes:   []driver.TableSize{{Name: "t", TotalBytes: 1 << 20}},
+		metrics:    &MetricsSummary{Connections: 1, MaxConnections: 100, CacheHitRatio: &ratio},
+		locks:      []driver.LockWait{{WaitingID: "5", BlockingID: "4", WaitSeconds: 7}},
+		slow:       &SlowQueriesResult{Available: true},
+		sizes:      []driver.TableSize{{Name: "t", TotalBytes: 1 << 20}},
+		capacityOn: true,
 	})
 	if warn.Level != "warn" {
 		t.Errorf("有锁等待应升到 warn，实际 %q", warn.Level)
@@ -60,6 +63,8 @@ func TestAssessHealthRules(t *testing.T) {
 		metrics: &MetricsSummary{Connections: 1, MaxConnections: 100},
 		locks:   []driver.LockWait{},
 		slow:    &SlowQueriesResult{Available: true, FirstSample: true},
+		// 空库 + 有视图 = 正常；这里显式给真，避免被当成「没有视图」。
+		capacityOn: true,
 	})
 	for _, it := range first.Items {
 		if it.Name == "慢查询" && it.Level != "unknown" {

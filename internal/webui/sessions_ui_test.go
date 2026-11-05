@@ -40,6 +40,9 @@ func TestUISessionsPanel(t *testing.T) {
 		"function escapeText(s)",
 		"escapeText(q.length > 400 ? q.slice(0, 400) + ' …' : q)",
 		"!!caps.kill_session && state.current.access_mode !== 'read-only'",
+		// 空闲事务超过 60 秒要高亮（docs/09 验收 5）：它不干活却占着锁。
+		"it.state === 'idle in transaction' && it.duration_ms > 60000",
+		"它在占着锁",
 	} {
 		if !strings.Contains(src, want) {
 			t.Errorf("会话面板缺少 %q", want)

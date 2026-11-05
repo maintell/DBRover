@@ -32,6 +32,9 @@ type healthInput struct {
 	slow    *SlowQueriesResult
 	sizes   []driver.TableSize
 	errs    map[string]error
+	// capacityOn 区分「这个引擎没有体量视图」与「有这个视图但一张用户表都没有」：
+	// 后者是正常状态，不该记成未知。
+	capacityOn bool
 }
 
 // HealthCheck 跑一组健康检查并出报告（FR-MON-07）。
@@ -64,7 +67,8 @@ func (e *Executor) HealthCheck(ctx context.Context) (*HealthReport, error) {
 			in.slow = s
 		}
 	}
-	if e.conn.Capabilities().Capacity {
+	in.capacityOn = e.conn.Capabilities().Capacity
+	if in.capacityOn {
 		z, err := e.Capacity(ctx, 5)
 		if err != nil {
 			in.errs["表体量"] = err
@@ -152,8 +156,11 @@ func assess(in healthInput) *HealthReport {
 	switch {
 	case in.errs["表体量"] != nil:
 		add("表体量", "unknown", "采集失败："+in.errs["表体量"].Error())
+	case !in.capacityOn:
+		add("表体量", "unknown", "这个引擎没有表体量视图")
 	case len(in.sizes) == 0:
-		add("表体量", "unknown", "拿不到表体量")
+		// 有视图、查得到、只是没有用户表——这是正常状态，不是「拿不到」。
+		add("表体量", "ok", "没有用户表")
 	default:
 		big := in.sizes[0]
 		const oneGB = 1 << 30
