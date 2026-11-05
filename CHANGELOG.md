@@ -194,6 +194,8 @@
 
 - **指标面板六块数据改成并发取**（docs/09 验收 1）：指标 / 慢查询 / 表体量 / 锁 / 趋势 / 告警原来是一条接一条 `await`，串行等于把「最慢的那个 × 6」当成首屏时间——远端库上每个端点都可能要 1 秒，而验收要求 2 秒内出结论。现在 `Promise.allSettled` 一起发、逐块降级，只有指标本身是必须的。真机 MySQL 上六个端点串行合计 37–50ms（本机），改造前后六块都完整渲染。
 
+- **README 补 CLI 参数表 + 一条防漂移门禁**：`serve -metrics`、`-audit`、`-allow-remote`、`-token`，`tunnel -known-hosts`/`-accept-host-key`，`migrate -to-table`/`-batch`/`-probe` 等 13 个开关在 README 里根本没有条目——AGENTS.md 要求「README 参数表必须覆盖代码里每个开关」，而这条一直靠人记。新增 `TestReadmeCoversEveryFlag`：从 `cmd/dbrover/main.go` 的 AST 取开关名，README 里必须逐个出现。**第一版门禁是假绿的**：纯子串匹配把 `-metrics-removed` 里的 `-metrics` 当成「写了」，变异验证才发现，改成带边界匹配后才真会红。CLI 的 `-h` 文本也一并补齐（`-known-hosts`、`-accept-host-key`、`-to-table`、`-batch`、`-probe`、`-max-rows` 原来只在代码里有）。
+
 ### 安全
 
 - **大整数不再静默丢精度**：`BIGINT` 超过 2^53 时，界面保持字符串、服务端按列类型还原；客户端若把它写成 JSON 数字，直接 `400 NUMBER_PRECISION_LOSS` 并提示改用字符串，而不是把丢了低位的值写进库。此前界面 `coerce()` 用 `Number()` 转换整数列，编辑 `9223372036854775807` 会变成 `...5808`。

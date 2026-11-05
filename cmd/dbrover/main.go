@@ -87,14 +87,16 @@ func usage() {
   dbrover version
   dbrover health -db <file> [-env ...] [-ro|-rw]
   dbrover tables -db <file> [-env ...] [-ro|-rw]
-  dbrover exec   -db <file> (-sql "..." | -file <path>) [-env ...] [-ro|-rw] [-approve]
+  dbrover exec   -db <file> (-sql "..." | -file <path>) [-env ...] [-ro|-rw] [-approve] [-max-rows 50]
   dbrover serve  [-addr 127.0.0.1:7788] [-token <token>] [-allow-remote] [-open] [-audit <path>] [-audit-anchor <path>] [-metrics <path>]
-  dbrover tunnel -via user@hop1:22[,user@hop2:22] -to host:port (-password-stdin | -key <path>)
+  dbrover tunnel -via user@hop1:22[,user@hop2:22] -to host:port (-password-stdin | -key <path>)\n                 [-known-hosts <path>] [-accept-host-key]
   dbrover secret (set|clear|status) [-service dbrover/agent] [-account api-key]  # 口令从 stdin 读
   dbrover backup (create|inspect) [-db <file> ...] [-out <文件.dbr>] [-resume] [-compress] [-passphrase-stdin]
   dbrover restore -file <文件.dbr> -db <file> -env ... -yes  # 同引擎恢复
   # 目标已有同名对象时，还要 -confirm-target <目标名>（库名或 SQLite 文件路径）
+  # 加密备份要 -passphrase-stdin（口令从 stdin 读，不接受命令行参数）
   dbrover migrate (plan|run) -db <源> -table <表> -to-db <目标> [-set col=type] [-yes]
+                 [-to-table <目标表名>] [-batch 1000] [-max-rows 0] [-probe]
 
 退出码:
   0  成功

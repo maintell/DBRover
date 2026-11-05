@@ -169,6 +169,48 @@ bin/dbrover.exe migrate plan -engine mysql -host H -user U -db S -table t -to-en
 # 打开 serve 打印的 http://127.0.0.1:7788/#t=<token> 即可操作
 ```
 
+### 6.1 CLI 参数
+
+每个命令的开关；与 `dbrover` 的 `-h` 输出、`cmd/dbrover/main.go` 里的定义一一对应（`TestReadmeCoversEveryFlag` 从源码 AST 取清单，缺一个就红）。
+
+| 命令 | 开关 | 说明 |
+|---|---|---|
+| 通用（`health` / `tables` / `exec` / `migrate` / `restore` 的连接侧） | `-db <file>` | 连接目标。SQLite 传文件路径，MySQL/PostgreSQL 传 DSN |
+| | `-env test\|staging\|prod` | 环境；决定默认只读与风险摩擦 |
+| | `-ro` / `-rw` | 显式指定只读 / 读写，覆盖环境默认 |
+| `health` | 无其它开关 | 连通性、版本、身份指纹 |
+| `tables` | 无其它开关 | 列出对象 |
+| `exec` | `-sql "..."` / `-file <path>` | 二选一，要执行的语句 |
+| | `-approve` | 已获得人工确认（F2 及以上必需） |
+| | `-max-rows 50` | 单条查询最大显示行数 |
+| `serve` | `-addr 127.0.0.1:7788` | 监听地址；默认仅回环 |
+| | `-token <token>` | 访问令牌，默认随机生成并打印 |
+| | `-allow-remote` | 允许监听非回环地址（**明文 HTTP**，只应放在受信网络或反代之后） |
+| | `-open` | 启动后用默认浏览器打开带 token 的地址 |
+| | `-audit <path>` | 审计日志（JSONL 追加写）；留空只保留内存 |
+| | `-audit-anchor <path>` | 审计锚点文件（链头封存，防整段重写；密钥存系统凭据库） |
+| | `-metrics <path>` | 指标留存文件（SQLite）；留空不留存趋势。面板打开时才采样，保留 7 天 |
+| `tunnel` | `-via user@hop:22[,...]` | 跳板链，多跳用逗号分隔 |
+| | `-to host:port` | 目标地址 |
+| | `-password-stdin` / `-key <path>` | 跳板认证二选一 |
+| | `-known-hosts <path>` | 主机密钥信任库（JSON） |
+| | `-accept-host-key` | 首次连接时接受并记录跳板主机密钥 |
+| `secret` | `-service` / `-account` | 凭据库里的条目名；口令一律从 stdin 读 |
+| `backup create\|inspect` | `-db <file>`（可多次） | 要备份的连接 |
+| | `-out <文件.dbr>` | 输出文件 |
+| | `-resume` | 接着未完成的备份继续（读 `<文件>.progress`） |
+| | `-compress` | 每段 gzip |
+| | `-passphrase-stdin` | 加密口令从 stdin 读（不接受命令行参数） |
+| `restore` | `-file <文件.dbr>` | 备份文件 |
+| | `-yes` | 确认要写目标库 |
+| | `-confirm-target <名字>` | 目标已有同名对象时必须原样写出目标名才允许覆盖 |
+| `migrate plan\|run` | `-table <表>` / `-to-db <目标>` | 源表与目标连接 |
+| | `-to-table <名>` | 目标表名，默认同名 |
+| | `-set col=type`（可多次） | 跨引擎类型的显式决定 |
+| | `-batch 1000` | 每批行数 |
+| | `-max-rows 0` | >0 时只搬这么多行（演练） |
+| | `-probe` | 读源表实际最大字符长度，判定「声明收窄」是否真会丢数据 |
+| | `-yes` | 确认执行（`run` 需要） |
 ## 7. 开发与验证
 
 ```powershell
