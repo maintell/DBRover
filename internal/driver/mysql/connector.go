@@ -134,8 +134,10 @@ func (c *Connector) Capabilities() model.Capabilities {
 		Explain:        true, // EXPLAIN
 		SlowQueryStats: false,
 		// 会话列表走 information_schema.processlist；终止走 KILL。
-		SessionMgmt:      true,
-		KillSession:      true,
+		SessionMgmt: true,
+		KillSession: true,
+		// 连接数与缓存命中走 SHOW GLOBAL STATUS + @@max_connections。
+		Metrics:          true,
 		LockGraph:        false,
 		Backup:           false,
 		BulkLoad:         false,

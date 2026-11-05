@@ -155,8 +155,10 @@ func (c *Connector) Capabilities() model.Capabilities {
 		Explain:        true, // EXPLAIN
 		SlowQueryStats: false,
 		// 会话列表走 pg_stat_activity；终止走 pg_terminate_backend。
-		SessionMgmt:      true,
-		KillSession:      true,
+		SessionMgmt: true,
+		KillSession: true,
+		// 连接数与缓存命中走 pg_stat_database + pg_settings。
+		Metrics:          true,
 		LockGraph:        false,
 		Backup:           false,
 		BulkLoad:         false,

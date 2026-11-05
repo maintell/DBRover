@@ -265,11 +265,15 @@ type Capabilities struct {
 	AddTrigger bool `json:"add_trigger"`
 	// IndexValidity 表示 DescribeTable 会给出 Index.Valid（目前只有 PostgreSQL）。
 	// 套件据此要求「声明了就真给」，避免字段写完没人查、上层拿到一片 nil。
-	IndexValidity    bool `json:"index_validity"`
-	Explain          bool `json:"explain"`
-	SlowQueryStats   bool `json:"slow_query_stats"`
-	SessionMgmt      bool `json:"session_mgmt"`
-	KillSession      bool `json:"kill_session"`
+	IndexValidity  bool `json:"index_validity"`
+	Explain        bool `json:"explain"`
+	SlowQueryStats bool `json:"slow_query_stats"`
+	SessionMgmt    bool `json:"session_mgmt"`
+	KillSession    bool `json:"kill_session"`
+	// Metrics 表示驱动实现了 driver.MetricsProvider（连接数、缓存命中）。
+	// 与 SessionMgmt 分开：会话列表与性能计数器是两套系统表，能列会话不代表
+	// 拿得到计数器，反过来也一样。
+	Metrics          bool `json:"metrics"`
 	LockGraph        bool `json:"lock_graph"`
 	Backup           bool `json:"backup"`
 	BulkLoad         bool `json:"bulk_load"`

@@ -112,6 +112,8 @@ func Run(t *testing.T, cfg Config) {
 	t.Run("SessionsReported", func(t *testing.T) { testSessionsReported(t, cfg) })
 	// 分区信息：真建一张分区表再读详情，顺便确认普通表不会被报出分区。
 	t.Run("PartitionsReported", func(t *testing.T) { testPartitionsReported(t, cfg) })
+	// 性能面板的计数：声明了 Metrics 就必须真给，且缓存计数只增不减。
+	t.Run("MetricsReported", func(t *testing.T) { testMetricsReported(t, cfg) })
 	// 检查约束：加一条再读回来（能加不能看，等于没有）。
 	t.Run("ChecksReported", func(t *testing.T) { testChecksReported(t, cfg) })
 	// 检索契约写的是「名称 + 注释」，注释这一半必须有真库验证。

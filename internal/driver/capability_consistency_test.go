@@ -125,3 +125,26 @@ func TestRoutineCapabilityIsHonest(t *testing.T) {
 		}
 	}
 }
+
+// TestMetricsCapabilityIsHonest 钉住「性能面板」这句话的真值。
+//
+// PG 走 pg_stat_database + pg_settings，MySQL 走 SHOW GLOBAL STATUS +
+// @@max_connections；SQLite 没有服务端的全局计数器（进程内单文件）。
+// 翻 true 的顺序与其它能力位一致：先实现 → drivertest 的 MetricsReported
+// 真机跑通 → 再回来改这张表。
+func TestMetricsCapabilityIsHonest(t *testing.T) {
+	want := map[model.Engine]bool{
+		model.EngineSQLite:   false, // 没有服务端全局计数器
+		model.EngineMySQL:    true,  // SHOW GLOBAL STATUS
+		model.EnginePostgres: true,  // pg_stat_database
+	}
+	for _, c := range []driver.Connector{sqlite.New(), mysql.New(), pg.New()} {
+		exp, ok := want[c.Engine()]
+		if !ok {
+			t.Fatalf("新增引擎 %s 没写进这张表：性能指标能力要有明确预期", c.Engine())
+		}
+		if got := c.Capabilities().Metrics; got != exp {
+			t.Errorf("%s: Capabilities.Metrics = %v，期望 %v（先实现 MetricsProvider + MetricsReported 再翻）", c.Engine(), got, exp)
+		}
+	}
+}

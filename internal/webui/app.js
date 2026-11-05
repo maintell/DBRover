@@ -37,6 +37,7 @@ const API = {
   health: '/api/v1/connections/:id/health',
   tables: '/api/v1/connections/:id/tables',
   search: '/api/v1/connections/:id/search',
+  metrics: '/api/v1/connections/:id/monitor/metrics',
   sessions: '/api/v1/connections/:id/monitor/sessions',
   killSession: '/api/v1/connections/:id/monitor/sessions/:sid/kill',
   rows: '/api/v1/connections/:id/tables/:name/rows',
@@ -346,6 +347,8 @@ async function loadIdentity(id) {
     if ($('btn-new-routine')) $('btn-new-routine').hidden = !caps.add_routine;
     // 会话列表只有网络型引擎有（SQLite 是单写者、没有会话概念）。
     if ($('btn-sessions')) $('btn-sessions').hidden = !caps.session_mgmt;
+    // 性能面板同理：没有服务端全局计数器的引擎上不摆（SQLite）。
+    if ($('btn-metrics')) $('btn-metrics').hidden = !caps.metrics;
     const ident = h.identity || {};
     const host = ident.hostname || '?';
     const fp = (ident.fingerprint || '').slice(0, 8);
@@ -3205,6 +3208,100 @@ $('btn-new-seq').onclick = () => showCreateSequence();
 $('btn-new-type').onclick = () => showCreateType();
 $('btn-new-routine').onclick = () => showCreateRoutine();
 $('btn-sessions').onclick = () => showSessions();
+
+// ---- 指标（FR-MON-01）----
+//
+// 面板打开时拉一次快照，之后每 5 秒拉一次（docs/09 §2：只有面板保持打开才轮询）。
+// 停止条件写在定时器自己身上：结果区里已经没有这个面板就停。这样任何切视图的路径
+// 都不需要记得清理定时器——漏一处就会一直打库，而那是「监控把库拖慢」的典型成因。
+let metricsTimer = null;
+
+function stopMetricsRefresh() {
+  if (metricsTimer) {
+    clearInterval(metricsTimer);
+    metricsTimer = null;
+  }
+}
+
+async function showMetrics(auto) {
+  if (!state.current) return;
+  if (!auto) setStatus('读指标…');
+  let out;
+  try {
+    out = await api(path(API.metrics, { id: state.current.id }));
+  } catch (e) {
+    stopMetricsRefresh();
+    showNotice('读指标失败：' + e.message + (e.hint ? '（' + e.hint + '）' : ''), 'error');
+    setStatus('失败');
+    return;
+  }
+  renderMetrics(out);
+  if (auto) return;
+  setStatus('指标已更新');
+  stopMetricsRefresh();
+  metricsTimer = setInterval(() => {
+    if (!$('metrics-panel') || !state.current) {
+      stopMetricsRefresh();
+      return;
+    }
+    showMetrics(true);
+  }, 5000);
+}
+
+// renderMetrics 把两张卡画成表格：结论一律来自服务端规则，这里不做二次判断。
+function renderMetrics(out) {
+  const wrap = document.createElement('div');
+  wrap.id = 'metrics-panel';
+  wrap.className = 'panel';
+
+  const head = document.createElement('div');
+  head.className = 'head';
+  head.textContent = '指标（每 5 秒刷新，关闭面板即停止采集）';
+  wrap.appendChild(head);
+
+  if (out.degraded) {
+    const d = document.createElement('div');
+    d.className = 'notice';
+    d.textContent = out.degraded;
+    wrap.appendChild(d);
+  }
+
+  const status = out.status || 'unknown';
+  const rows = [];
+  rows.push(['状态', status === 'warn' ? '警告' : (status === 'ok' ? '正常' : '未知')]);
+  rows.push(['连接与负载', out.verdict || '—']);
+  rows.push([
+    '缓存命中率',
+    (typeof out.cache_hit_ratio === 'number')
+      ? (out.cache_hit_ratio * 100).toFixed(1) + '%'
+      : '未知（这个引擎没有缓存计数）',
+  ]);
+  if (out.uptime_seconds > 0) {
+    const d = Math.floor(out.uptime_seconds / 86400);
+    const h = Math.floor((out.uptime_seconds % 86400) / 3600);
+    rows.push(['实例已运行', d + ' 天 ' + h + ' 小时']);
+  }
+  if ((out.details || []).length) {
+    rows.push(['需要注意', out.details.join('；')]);
+  }
+
+  const table = document.createElement('table');
+  const tbody = document.createElement('tbody');
+  for (const [k, v] of rows) {
+    const tr = document.createElement('tr');
+    const th = document.createElement('th');
+    th.textContent = k;
+    th.style.textAlign = 'left';
+    tr.appendChild(th);
+    tr.appendChild(cell(String(v)));
+    tbody.appendChild(tr);
+  }
+  table.appendChild(tbody);
+  wrap.appendChild(table);
+  $('results').replaceChildren(wrap);
+}
+
+$('btn-metrics').onclick = () => showMetrics(false);
 // 对象搜索：输入停 250ms 再查，避免每敲一个字符打一次库。
 let objSearchTimer = null;
 if ($('obj-search')) {

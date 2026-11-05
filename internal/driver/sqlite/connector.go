@@ -80,11 +80,13 @@ func (c *Connector) Capabilities() model.Capabilities {
 		SlowQueryStats:    false,
 		SessionMgmt:       false,
 		KillSession:       false,
-		LockGraph:         false,
-		Backup:            false, // 备份/恢复尚未实现
-		BulkLoad:          false,
-		KeysetPagination:  true,
-		DDLTransactional:  true,
+		// SQLite 没有服务端的全局计数器（进程内单文件），没有连接数上限可谈。
+		Metrics:          false,
+		LockGraph:        false,
+		Backup:           false, // 备份/恢复尚未实现
+		BulkLoad:         false,
+		KeysetPagination: true,
+		DDLTransactional: true,
 		// SQLite 不能改列类型、可空性与默认值——都只能重建表。
 		AlterColumnType:        false,
 		AlterColumnNullability: false,

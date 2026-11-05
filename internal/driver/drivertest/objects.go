@@ -509,6 +509,64 @@ func testPartitionsReported(t *testing.T, cfg Config) {
 	}
 }
 
+// testMetricsReported 验证性能面板的计数真能读到（FR-MON-01）。
+//
+// 判据不是「有没有数字」，而是三件事：上限是正数、连接数至少含自己这条、
+// **缓存计数不会倒退**。第三条最要紧——把两个计数器接反（命中与未命中互换）
+// 或取错库（PG 的 pg_stat_database 忘了按 datname 收窄）时，命中率会算成一个
+// 看起来合理却完全错误的值，只有单调性还守得住。
+func testMetricsReported(t *testing.T, cfg Config) {
+	c := open(t, cfg, false)
+	if !c.Capabilities().Metrics {
+		t.Skip("这个引擎没有性能指标")
+	}
+	mp, ok := c.(driver.MetricsProvider)
+	if !ok {
+		t.Fatal("能力位声明了 Metrics，但驱动没有实现 MetricsProvider")
+	}
+	ctx := context.Background()
+	before, err := mp.Counters(ctx)
+	if err != nil {
+		t.Fatalf("Counters: %v", err)
+	}
+	if before.MaxConnections <= 0 {
+		t.Errorf("连接上限应为正数，实际 %d", before.MaxConnections)
+	}
+	if before.Connections < 1 {
+		t.Errorf("连接数至少含自己这条，实际 %d", before.Connections)
+	}
+	if before.CollectedAt.IsZero() {
+		t.Error("CollectedAt 未填：上层无法判断这份读数有多旧")
+	}
+
+	// 造一点真实访存，再看计数器是否只增不减。
+	s := session(t, c)
+	defer func() { _ = s.Close() }()
+	// 先删再建：这条用例会重复跑（同一实例连续两次全量），残留表会让第二次直接红。
+	mustExec(t, s, "DROP TABLE IF EXISTS dbv_metrics")
+	mustExec(t, s, "CREATE TABLE dbv_metrics (id INT NOT NULL PRIMARY KEY, v VARCHAR(32))")
+	for i := 0; i < 20; i++ {
+		mustExec(t, s, "INSERT INTO dbv_metrics (id, v) VALUES (?, 'x')", i)
+	}
+	if rows := queryAll(t, s, "SELECT id FROM dbv_metrics ORDER BY id"); len(rows) != 20 {
+		t.Fatalf("准备数据失败：%d 行", len(rows))
+	}
+
+	after, err := mp.Counters(ctx)
+	if err != nil {
+		t.Fatalf("Counters（第二次）: %v", err)
+	}
+	if after.CacheHits < before.CacheHits {
+		t.Errorf("缓存命中计数倒退了：%d -> %d", before.CacheHits, after.CacheHits)
+	}
+	if after.CacheMisses < before.CacheMisses {
+		t.Errorf("缓存未命中计数倒退了：%d -> %d", before.CacheMisses, after.CacheMisses)
+	}
+	if after.CacheHits+after.CacheMisses == 0 {
+		t.Error("跑了一轮读写之后缓存计数仍是 0：缓存指标恐怕取错了地方")
+	}
+}
+
 // testSessionsReported 验证会话列表与终止（FR-MON-02）。
 //
 // 做法是造一条「正在跑」的会话（在另一条物理连接上跑一条慢查询），再从会话列表

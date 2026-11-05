@@ -201,6 +201,20 @@
         }
       }
     },
+    "/api/v1/connections/{id}/monitor/metrics": {
+      "get": {
+        "summary": "性能面板：连接与负载、缓存命中",
+        "description": "FR-MON-01 的两张卡。结论（status / verdict / details）由规则产出：连接数超过上限八成、缓存命中率低于 90% 各触发一条警告。采集带 3 秒超时，超时**不报错**——返回 200 + degraded 说明，因为监控拿不到数字不该看起来像库挂了。只读，无副作用。",
+        "parameters": [
+          { "name": "id", "in": "path", "required": true, "schema": { "type": "string" } }
+        ],
+        "responses": {
+          "200": { "description": "ok（degraded 非空表示本次没采到）" },
+          "400": { "description": "这个引擎没有性能指标（CAPABILITY_UNSUPPORTED）" },
+          "404": { "description": "连接不存在" }
+        }
+      }
+    },
     "/api/v1/connections/{id}/monitor/sessions": {
       "get": {
         "summary": "会话列表（FR-MON-02）",

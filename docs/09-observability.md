@@ -253,3 +253,29 @@ CREATE TABLE slow_query_hourly (
 | 10 | 关闭面板后停止采集 | 集成（断言无新查询） |
 | 11 | 指标留存 7 天后自动清理 | 单测 |
 | 12 | 巡检报告可导出且分级正确 | 手动 |
+
+---
+
+## 9. 实现状态（滚动更新）
+
+与 `docs/06` / `docs/07` 同一套规则：上面写的是**目标契约**，这里写「已经做到哪一步」。两者不一致即缺陷——要么补代码，要么把契约降级并说明理由。
+
+### 9.1 已实现
+
+| 能力 | 契约位置 | 实现 | 验证 |
+|---|---|---|---|
+| 连接与负载 / 缓存命中 | §3.1 的两张卡 | `driver.MetricsProvider`（可选接口，判据是 `Capabilities().Metrics`）+ `service.Executor.Metrics`。PG 走 `pg_stat_database`（**按 `current_database()` 收窄**——它是集群级的，把所有库加起来会得到一个看不出是哪个库在打磁盘的混合命中率）+ `pg_settings.max_connections`；MySQL 走一次 `SHOW GLOBAL STATUS` 挑三项 + `@@max_connections`。**结论由规则产出**：连接数过八成上限、缓存命中率低于 90% 各触发一条警告 | `TestSummarizeCountersRules`（四种构造数据 + 命中率算法 + 「两边都是 0 时不给命中率」）、`drivertest` 的 `MetricsReported`（真机：上限为正、连接数含自己这条、**缓存计数不倒退**）、`TestUIMetricsPanel` |
+| 采集超时降级 | §2.1 / 验收 8 | 采集带 3 秒超时（`metricsCollectionTimeout`）。超时**不报错**：返回 200 + `degraded` 说明，界面照常画面板并标注。理由：监控拿不到数字不该看起来像库挂了 | `TestCollectMetricsDegradesOnTimeout`（假 provider 阻塞 → 断言不返回错误、标注降级、不编造读数）、`TestCollectMetricsPassesThrough` |
+| 面板刷新与停止 | §2.1 / 验收 10 | 打开面板拉一次快照，之后每 5 秒一次；**停止条件写在定时器自己身上**（结果区里没有 `#metrics-panel` 就 `clearInterval`）。这样任何切视图的路径都不必记得清理——漏一处就是「监控把库拖慢」 | `TestUIMetricsPanel`（钉住判断语句与 `clearInterval`） |
+
+### 9.2 尚未实现
+
+| 缺口 | 契约位置 | 影响 | 处置 |
+|---|---|---|---|
+| 慢查询 Top N 与指纹聚合 | §3.2 / FR-MON-04 | 面板没有「慢查询」这张卡；`SlowQueryStats` 能力位仍为 false | 必须先把「累计值 vs 窗口值」的**差分采样**做出来（§6.2）——目录里的数字是自实例启动以来的累计量，直接展示会让用户看到「这条 SQL 跑了 120 万次」 |
+| QPS | §3.1 / FR-MON-01 | 没有吞吐数字 | 同上：累计计数要两次采样差分。PG 的语句计数在 `pg_stat_statements`（需扩展），未装时只能给事务数 |
+| 锁与阻塞链 | §3.4 / FR-MON-03 | 没有阻塞视图；`LockGraph` 仍为 false | 需要构造真实锁的集成用例（与 `docs/07` 验收 11 的 MDL 卡点同源） |
+| 容量视图 | §3.5 / FR-MON-06 | 没有表体量与增长 | 依赖各引擎的体积查询，且大表统计要手动触发（一次可能扫几千行系统表） |
+| 时序留存 / 巡检 / 告警 | §4 / §5 / §7 | FR-MON-05 / 07 / 08 全未做 | 单独立项：本地时序文件 + 7 天清理、Runbook 执行器、阈值告警与抑制 |
+
+**验收现状**：12 项里第 2（结论由规则产出）、8（超时降级不报错）已由真实用例覆盖；第 1、10 只有界面门禁，缺「2s 内出首屏」的计时用例与「关闭后无新查询」的集成断言。
