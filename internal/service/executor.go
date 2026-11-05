@@ -127,6 +127,8 @@ type Executor struct {
 	slow slowSampler
 	// qps 保存上一次的累计语句数，用来算 QPS（同样需要两次采样）。
 	qps qpsSampler
+	// alerts 保存「连续几次」与抑制窗口（FR-MON-08，只在运行时生效）。
+	alerts alertState
 	// WarmRelations 为 true 时，执行前会查目标表主键以精确分级到 R1。
 	WarmRelations bool
 	// cursors 持有流式查询的游标，生命周期由执行器管理。

@@ -50,6 +50,9 @@ func TestUIMetricsPanel(t *testing.T) {
 		"没有开启指标留存。",
 		// 巡检（FR-MON-07）：结论来自服务端规则，界面只负责摆清级别。
 		"healthCheck: '/api/v1/connections/:id/monitor/health-check'",
+		// 告警（FR-MON-08）：空列表也要说明「只在运行时生效」。
+		"alerts: '/api/v1/connections/:id/monitor/alerts'",
+		"function alertSection(alerts)",
 		"function showHealth()",
 		"unknown: '未知'",
 		// 链而不是平表：从持有者往下展开（FR-MON-03 要的是「谁卡住了谁」）。

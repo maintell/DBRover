@@ -216,6 +216,19 @@
         }
       }
     },
+    "/api/v1/connections/{id}/monitor/alerts": {
+      "get": {
+        "summary": "本地告警",
+        "description": "FR-MON-08，P2。已实现两条规则：**连接占用连续 3 次采样 >80%**（抑制 30 分钟）、**阻塞链深度 >3**（抑制 5 分钟）。**只在应用运行时生效**：状态在内存里，关掉应用就不再评估——响应里的 note 会把这点讲明，避免被当成常驻监控。未实现：>5 分钟长事务（MySQL 侧没有事务起始时间）、慢查询总耗时占比 >50%（要先有引擎侧的语句总耗时）。",
+        "parameters": [
+          { "name": "id", "in": "path", "required": true, "schema": { "type": "string" } }
+        ],
+        "responses": {
+          "200": { "description": "ok（items 为空表示本次没有触发）" },
+          "404": { "description": "连接不存在" }
+        }
+      }
+    },
     "/api/v1/connections/{id}/monitor/health-check": {
       "get": {
         "summary": "巡检：一键健康检查",

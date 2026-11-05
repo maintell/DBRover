@@ -43,6 +43,7 @@ const API = {
   locks: '/api/v1/connections/:id/monitor/locks',
   history: '/api/v1/connections/:id/monitor/history',
   healthCheck: '/api/v1/connections/:id/monitor/health-check',
+  alerts: '/api/v1/connections/:id/monitor/alerts',
   sessions: '/api/v1/connections/:id/monitor/sessions',
   killSession: '/api/v1/connections/:id/monitor/sessions/:sid/kill',
   rows: '/api/v1/connections/:id/tables/:name/rows',
@@ -3298,7 +3299,14 @@ async function showMetrics(auto) {
   } catch (e) {
     hist = null;
   }
-  renderMetrics(out, slow, sizes, locks, hist);
+  // 告警（FR-MON-08）：只在应用运行时生效，空列表也要说清楚这点。
+  let alerts = null;
+  try {
+    alerts = await api(path(API.alerts, { id: state.current.id }));
+  } catch (e) {
+    alerts = null;
+  }
+  renderMetrics(out, slow, sizes, locks, hist, alerts);
   if (auto) return;
   setStatus('指标已更新');
   stopMetricsRefresh();
@@ -3312,7 +3320,7 @@ async function showMetrics(auto) {
 }
 
 // renderMetrics 把两张卡画成表格：结论一律来自服务端规则，这里不做二次判断。
-function renderMetrics(out, slow, sizes, locks, hist) {
+function renderMetrics(out, slow, sizes, locks, hist, alerts) {
   const wrap = document.createElement('div');
   wrap.id = 'metrics-panel';
   wrap.className = 'panel';
@@ -3366,6 +3374,7 @@ function renderMetrics(out, slow, sizes, locks, hist) {
   if (sizes) wrap.appendChild(sizeSection(sizes));
   if (locks) wrap.appendChild(lockSection(locks));
   if (hist) wrap.appendChild(historySection(hist));
+  if (alerts) wrap.appendChild(alertSection(alerts));
   $('results').replaceChildren(wrap);
 }
 
@@ -3448,6 +3457,40 @@ function slowSection(slow) {
 //
 // 只给「最低 / 平均 / 最高 + 点数」，不画图：这几个数回答的是「最近稳不稳」，
 // 画一条没有坐标轴的折线反而更难读。没开留存时如实说没开，不画一条平线糊弄。
+// alertSection 画本地告警（FR-MON-08）。
+//
+// 「没有告警」必须配一句「只在应用运行时生效」：不然用户会以为关掉应用之后它还在盯着。
+function alertSection(alerts) {
+  const box = document.createElement('div');
+  const head = document.createElement('div');
+  head.className = 'head';
+  const items = (alerts && alerts.items) || [];
+  head.textContent = '告警（' + items.length + '）';
+  box.appendChild(head);
+  if (!items.length) {
+    const n = document.createElement('div');
+    n.className = 'notice';
+    n.textContent = '本次没有触发告警。' + ((alerts && alerts.note) || '');
+    box.appendChild(n);
+    return box;
+  }
+  const t = document.createElement('table');
+  const tb = document.createElement('tbody');
+  for (const it of items) {
+    const tr = document.createElement('tr');
+    tr.appendChild(cell(it.rule));
+    tr.appendChild(cell(it.detail));
+    tr.appendChild(cell(new Date(it.fired_at).toLocaleTimeString()));
+    tb.appendChild(tr);
+  }
+  t.appendChild(tb);
+  box.appendChild(t);
+  const n = document.createElement('div');
+  n.className = 'notice';
+  n.textContent = (alerts && alerts.note) || '';
+  box.appendChild(n);
+  return box;
+}
 function historySection(hist) {
   const box = document.createElement('div');
   const head = document.createElement('div');
