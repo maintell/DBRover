@@ -94,7 +94,7 @@ Content-Type: application/x-ndjson
 | `GET` | `/api/v1/connections/{id}/tables/{name}/rows` | 表数据浏览，**键集分页**（`limit`、`after`、`where`、`order`） |
 | `GET` | `/api/v1/connections/{id}/tables/{name}/schema` | 列、索引、外键、检查约束、分区、主键与建表原文；表不存在 → 404。分区与约束取不到时只让那一块空着（它们只是详情的一部分，不该让整页打不开）。`?kind=trigger` / `?kind=sequence` 时只回对象定义（`{object, ddl, capabilities}`）——这两类对象没有列结构 |
 | `GET` | `/api/v1/connections/{id}/export` | 流式导出 CSV / NDJSON / SQL / Markdown。`format=sql`：建表 + `INSERT` 的可回放脚本（**同引擎**回放）；`format=markdown`：GitHub 风格表格，表头必写、`NULL` 与空串 `''` 分开（与界面一致），`|` 与换行转义；`format=xlsx`：真 Excel 工作簿（`application/vnd.openxmlformats-officedocument.spreadsheetml.sheet`，文件名 `<表>.xlsx`），数字保持数字 |
-| `POST` | `/api/v1/connections/{id}/exec` | 执行 SQL（一次性）。`max_rows` 默认 1000、封顶 10 万；多条语句默认**遇错即停**（已成功的语句结果照常返回），`stop_on_error=false` 时继续跑后面的、每条结果独立（`docs/05` §2.1） |
+| `POST` | `/api/v1/connections/{id}/exec` | 执行 SQL（一次性）。`max_rows` 默认 1000、封顶 10 万；多条语句默认**遇错即停**（已成功的语句结果照常返回），`stop_on_error=false` 时继续跑后面的、每条结果独立（`docs/05` §2.1）；`cursor` 是光标的 UTF-8 字节偏移，给了只执行光标所在那条语句（切分在服务端做）。请求体字段以 `openapi.json` 为唯一真相，由 `TestSpecExecRequestMatchesService` 双向比对 |
 | `POST` | `/api/v1/connections/{id}/query` | 打开**流式游标**，只接受单条只读语句；`max_rows` 同样封顶 10 万 |
 | `GET` | `/api/v1/results/{cid}/page` | 按页拉取，`limit` 默认 200、上限 2000（超过按 2000 处理） |
 | `DELETE` | `/api/v1/results/{cid}` | 主动关闭游标 |

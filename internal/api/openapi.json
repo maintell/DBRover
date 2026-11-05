@@ -536,7 +536,15 @@
                     "type": "string",
                     "description": "服务端在 428 响应里签发的审批凭证，绑定语句指纹与 10 分钟有效期。不接受布尔值。"
                   },
-                  "max_rows": { "type": "integer" }
+                  "stop_on_error": {
+                    "type": "boolean",
+                    "description": "默认 true（遇错即停，已成功语句的结果照常返回）；显式传 false 时继续执行后面的语句，失败那条带自己的 err。省略与 true 等价（docs/05 §2.1）。"
+                  },
+                  "cursor": {
+                    "type": "integer",
+                    "description": "编辑器里光标的 UTF-8 字节偏移；给了就只执行光标所在的那条语句（切分在服务端做）。"
+                  },
+                  "max_rows": { "type": "integer", "description": "单条语句最多取多少行，默认 1000、封顶 10 万（docs/05 §8）" }
                 }
               }
             }

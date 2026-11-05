@@ -260,6 +260,15 @@
 
 ### 修复
 
+- **`/exec` 的 OpenAPI 契约漏了两个请求字段**（文档与实现不一致）：`execRequest` 有
+  `sql` / `approval_token` / `stop_on_error` / `max_rows` / `cursor` 五个字段，而 `openapi.json`
+  只声明了前三个 + `max_rows`——`stop_on_error`（docs/05 §2.1 新增）与 `cursor`（光标定位）都漏了。
+  `decode` 用 `DisallowUnknownFields`，按 spec 生成的客户端既不知道这两个能力，多传又会被拒成
+  unknown field。补 `openapi.json` 的两个字段（含语义说明）、docs/12 的 `/exec` 行补 `cursor`。
+- 新增 `TestSpecExecRequestMatchesService`：从 `execRequest` 的 json tag 用 reflect 取真实字段，
+  与 spec 的 `requestBody.properties` **双向比对**（沿用 `TestSpecSchemaPlanMatchesService` 的
+  办法，不手抄清单）。变异验证两个方向都真红：① 去掉 spec 里的 `stop_on_error` → 红；
+  ② 往 spec 塞一个 `phantom_field` → 红；还原复绿。
 - **复查 ADR-0008 的「拉不到镜像」卡点，把结论精确化**（只读排查，不动代码）：
   2026-11-05 在 debug-ubuntu 上用 SSH 工具复测，排除了三个旧假设——① 不是磁盘：docker
   `data-root` 在 `/data/docker`，`df -h /data` 有 713G 空闲（此前看到 89% 占用是查了系统盘 `/`）；
