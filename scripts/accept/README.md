@@ -34,7 +34,8 @@ docker run -d --name dbrover-pg  -e POSTGRES_PASSWORD=testpass     -e POSTGRES_D
 - 每个脚本自己 `Start-Process bin\dbrover.exe serve` 并在 `finally` 里停掉，不依赖外部服务。
 - 失败一律 `throw`，不做「打印一行警告继续跑」——验收脚本的意义就是能红。
 - 跑完记得删测试容器：`docker rm -f dbrover-my dbrover-pg`
-- 这一轮的实际耗时（bebe831，本机）：`bulk-20k-sqlite` 约 10s，其余每条 1–6s；12 次全跑不到 1 分钟。慢的是容器启动，不是脚本。
+- 这一轮的实际耗时（bdbdc1a，本机）：`bulk-20k-sqlite` 约 10s，其余每条 1–6s；12 次全跑不到 1 分钟。慢的是容器启动，不是脚本。
+- **最近一次全量回归（bdbdc1a）**：`go test ./...`（PG 17 + MySQL 5.7 真机）全绿 + 这 12 次验收全绿。踩过一个坑：起 MySQL 容器时漏了 `MYSQL_DATABASE=acc`，5 个脚本以 `DB_CONNECT_NO_DATABASE` 报错——**那不是回归，是环境少建了库**；起容器命令见本文上方。
 - `go test ./...` 那一条慢得多（约 7 分钟，`internal/service` 与 `internal/agent/eval` 各占几分钟），它跑的是真机用例不是脚本，两者互补：脚本验「端到端能不能用」，用例验「每个边界对不对」。。
 
 ## 全量真机套件（不是这些脚本，是 `go test`）
