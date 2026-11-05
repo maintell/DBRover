@@ -270,6 +270,9 @@ type Capabilities struct {
 	SlowQueryStats bool `json:"slow_query_stats"`
 	SessionMgmt    bool `json:"session_mgmt"`
 	KillSession    bool `json:"kill_session"`
+	// Capacity 表示驱动实现了 driver.CapacityProvider（表体量 Top N）。
+	// 与 Metrics 分开：体量查的是目录与统计视图，与计数器不是同一套系统表。
+	Capacity bool `json:"capacity"`
 	// Metrics 表示驱动实现了 driver.MetricsProvider（连接数、缓存命中）。
 	// 与 SessionMgmt 分开：会话列表与性能计数器是两套系统表，能列会话不代表
 	// 拿得到计数器，反过来也一样。

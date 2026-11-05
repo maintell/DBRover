@@ -138,7 +138,9 @@ func (c *Connector) Capabilities() model.Capabilities {
 		SessionMgmt: true,
 		KillSession: true,
 		// 连接数与缓存命中走 SHOW GLOBAL STATUS + @@max_connections。
-		Metrics:          true,
+		Metrics: true,
+		// 表体量走 information_schema.TABLES。
+		Capacity:         true,
 		LockGraph:        false,
 		Backup:           false,
 		BulkLoad:         false,

@@ -216,6 +216,21 @@
         }
       }
     },
+    "/api/v1/connections/{id}/monitor/tables": {
+      "get": {
+        "summary": "表体量 Top N",
+        "description": "FR-MON-06 的体量部分：按总字节倒序。PG 用 pg_table_size / pg_indexes_size / pg_total_relation_size（目录计算，不扫表），MySQL 用 information_schema.TABLES 的 DATA_LENGTH + INDEX_LENGTH。**只给体量、不给增长**——增长要本地时序留存。ROWS 是引擎的估算值（MySQL InnoDB 的 TABLE_ROWS 尤其如此），-1 表示没给。",
+        "parameters": [
+          { "name": "id", "in": "path", "required": true, "schema": { "type": "string" } },
+          { "name": "limit", "in": "query", "schema": { "type": "integer", "default": 10, "maximum": 200 } }
+        ],
+        "responses": {
+          "200": { "description": "ok" },
+          "400": { "description": "这个引擎没有表体量视图，或 limit 非法" },
+          "404": { "description": "连接不存在" }
+        }
+      }
+    },
     "/api/v1/connections/{id}/monitor/metrics": {
       "get": {
         "summary": "性能面板：连接与负载、缓存命中",

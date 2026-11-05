@@ -35,6 +35,10 @@ func TestUIMetricsPanel(t *testing.T) {
 		"function slowSection(slow)",
 		"首次采样，暂无增量",
 		"slow.available === false",
+		// 表体量（FR-MON-06）：只给体量不给增长。
+		"tableSizes: '/api/v1/connections/:id/monitor/tables'",
+		"function sizeSection(sizes)",
+		"function formatBytes(v)",
 	} {
 		if !strings.Contains(src, want) {
 			t.Errorf("性能面板缺少 %q", want)

@@ -39,6 +39,7 @@ const API = {
   search: '/api/v1/connections/:id/search',
   metrics: '/api/v1/connections/:id/monitor/metrics',
   slowQueries: '/api/v1/connections/:id/monitor/slow-queries',
+  tableSizes: '/api/v1/connections/:id/monitor/tables',
   sessions: '/api/v1/connections/:id/monitor/sessions',
   killSession: '/api/v1/connections/:id/monitor/sessions/:sid/kill',
   rows: '/api/v1/connections/:id/tables/:name/rows',
@@ -3267,7 +3268,16 @@ async function showMetrics(auto) {
       slow = null;
     }
   }
-  renderMetrics(out, slow);
+  // 表体量同理：单独能力、单独降级，失败不影响上面两张卡。
+  let sizes = null;
+  if (caps.capacity) {
+    try {
+      sizes = await api(path(API.tableSizes, { id: state.current.id }));
+    } catch (e) {
+      sizes = null;
+    }
+  }
+  renderMetrics(out, slow, sizes);
   if (auto) return;
   setStatus('指标已更新');
   stopMetricsRefresh();
@@ -3281,7 +3291,7 @@ async function showMetrics(auto) {
 }
 
 // renderMetrics 把两张卡画成表格：结论一律来自服务端规则，这里不做二次判断。
-function renderMetrics(out) {
+function renderMetrics(out, slow, sizes) {
   const wrap = document.createElement('div');
   wrap.id = 'metrics-panel';
   wrap.className = 'panel';
@@ -3334,6 +3344,7 @@ function renderMetrics(out) {
   table.appendChild(tbody);
   wrap.appendChild(table);
   if (slow) wrap.appendChild(slowSection(slow));
+  if (sizes) wrap.appendChild(sizeSection(sizes));
   $('results').replaceChildren(wrap);
 }
 
@@ -3408,6 +3419,54 @@ function slowSection(slow) {
   return box;
 }
 
+// sizeSection 画表体量 Top N（FR-MON-06）。
+//
+// 只给体量不给增长：增长要有本地时序留存，那是另一件事（docs/09 §9.2）。
+function sizeSection(sizes) {
+  const box = document.createElement('div');
+  const head = document.createElement('div');
+  head.className = 'head';
+  const items = (sizes && sizes.items) || [];
+  head.textContent = '表体量（' + items.length + '）';
+  box.appendChild(head);
+  if (!items.length) return box;
+
+  const t = document.createElement('table');
+  const thead = document.createElement('thead');
+  const htr = document.createElement('tr');
+  for (const label of ['表', '合计', '数据', '索引', '行（估算）']) {
+    const th = document.createElement('th');
+    th.textContent = label;
+    htr.appendChild(th);
+  }
+  thead.appendChild(htr);
+  t.appendChild(thead);
+  const tb = document.createElement('tbody');
+  for (const it of items) {
+    const tr = document.createElement('tr');
+    tr.appendChild(cell((it.schema ? it.schema + '.' : '') + it.name));
+    tr.appendChild(cell(formatBytes(it.total_bytes)));
+    tr.appendChild(cell(formatBytes(it.data_bytes)));
+    tr.appendChild(cell(formatBytes(it.index_bytes)));
+    tr.appendChild(cell(it.rows >= 0 ? String(it.rows) : '—'));
+    tb.appendChild(tr);
+  }
+  t.appendChild(tb);
+  box.appendChild(t);
+  return box;
+}
+
+function formatBytes(v) {
+  if (typeof v !== 'number' || !isFinite(v)) return '—';
+  const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+  let n = v;
+  let i = 0;
+  while (n >= 1024 && i < units.length - 1) {
+    n = n / 1024;
+    i++;
+  }
+  return (i === 0 ? n.toFixed(0) : n.toFixed(1)) + ' ' + units[i];
+}
 function formatMS(v) {
   if (typeof v !== 'number' || !isFinite(v)) return '—';
   return v >= 100 ? v.toFixed(0) : v.toFixed(1);

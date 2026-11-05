@@ -170,3 +170,24 @@ func TestSlowQueryCapabilityIsHonest(t *testing.T) {
 		}
 	}
 }
+
+// TestCapacityCapabilityIsHonest 钉住「表体量视图」的真值。
+//
+// PG 走 pg_total_relation_size / pg_indexes_size（目录计算），MySQL 走
+// information_schema.TABLES；SQLite 要 dbstat 虚拟表（需编译期开启），v1 不给。
+func TestCapacityCapabilityIsHonest(t *testing.T) {
+	want := map[model.Engine]bool{
+		model.EngineSQLite:   false,
+		model.EngineMySQL:    true,
+		model.EnginePostgres: true,
+	}
+	for _, c := range []driver.Connector{sqlite.New(), mysql.New(), pg.New()} {
+		exp, ok := want[c.Engine()]
+		if !ok {
+			t.Fatalf("新增引擎 %s 没写进这张表：容量视图能力要有明确预期", c.Engine())
+		}
+		if got := c.Capabilities().Capacity; got != exp {
+			t.Errorf("%s: Capabilities.Capacity = %v，期望 %v", c.Engine(), got, exp)
+		}
+	}
+}

@@ -266,6 +266,7 @@ CREATE TABLE slow_query_hourly (
 |---|---|---|---|
 | 连接与负载 / 缓存命中 | §3.1 的两张卡 | `driver.MetricsProvider`（可选接口，判据是 `Capabilities().Metrics`）+ `service.Executor.Metrics`。PG 走 `pg_stat_database`（**按 `current_database()` 收窄**——它是集群级的，把所有库加起来会得到一个看不出是哪个库在打磁盘的混合命中率）+ `pg_settings.max_connections`；MySQL 走一次 `SHOW GLOBAL STATUS` 挑三项 + `@@max_connections`。**结论由规则产出**：连接数过八成上限、缓存命中率低于 90% 各触发一条警告 | `TestSummarizeCountersRules`（四种构造数据 + 命中率算法 + 「两边都是 0 时不给命中率」）、`drivertest` 的 `MetricsReported`（真机：上限为正、连接数含自己这条、**缓存计数不倒退**）、`TestUIMetricsPanel` |
 | 采集超时降级 | §2.1 / 验收 8 | 采集带 3 秒超时（`metricsCollectionTimeout`）。超时**不报错**：返回 200 + `degraded` 说明，界面照常画面板并标注。理由：监控拿不到数字不该看起来像库挂了 | `TestCollectMetricsDegradesOnTimeout`（假 provider 阻塞 → 断言不返回错误、标注降级、不编造读数）、`TestCollectMetricsPassesThrough` |
+| 表体量 Top N | §3.5 / FR-MON-06（体量部分） | `driver.CapacityProvider`（判据 `Capabilities().Capacity`）。PG 用 `pg_table_size` / `pg_indexes_size` / `pg_total_relation_size`——都是 **O(1) 的目录计算，不扫表**；MySQL 用 `information_schema.TABLES` 并**排除系统库**（它们总是排在前几名，会把业务表挤掉）。数据与索引分开给：只报总量的话，「为什么这张表这么大」还得再点进去看一次。**增长未做**：需要本地时序留存（FR-MON-05） | `TestCapacityCapabilityIsHonest`（SQLite false / 两引擎 true）、`TestUIMetricsPanel`（界面接线）；真机 MySQL 见上 |
 | QPS | §3.1 / FR-MON-01 | `driver.Counters.Statements`（累计语句数，-1 表示这个实例没给）+ 服务层第二份采样状态，两次相减除以时间跨度。MySQL 取 `Questions`；PG 取 `SUM(calls)`（**要有 pg_stat_statements**，没装时留 -1，界面不显示这一行而不是显示 0）。首次采样不给数字、计数器重置时跳过——与慢查询同一套规矩 | `TestApplyQPSSkipsFirstSample`（首次不给、2 秒 200 条 = 100 QPS、清零后跳过）；真机 MySQL：第二次采样出现 QPS |
 | 终止会话的确认与审计 | §3.3 / 验收 6 | 确认框带**该会话当时在跑的语句**（超 400 字符截断，并**先转义再拼 HTML**——语句来自数据库，不能当可信文本拼）；终止**记审计**：`action=monitor.kill_session`、`risk=R4`、`friction=F2`、`sql` 是被终止会话当时的语句（已脱敏），失败时 `outcome=error` 且带原因。终止**不走执行门**（它不是 SQL，走的是驱动的专门方法），审计在 API 层自己写，id 复用同一个生成器以免审计里出现两种 id 形态 | `TestUISessionsPanel`（确认框含语句、含转义函数）；真机 MySQL：后台跑 `SELECT SLEEP(90)` → 终止 → `/audit` 出现 `monitor.kill_session` 且 `sql=SELECT SLEEP(90)`；内置浏览器确认框显示同一句 SQL |
 | 面板刷新与停止 | §2.1 / 验收 10 | 打开面板拉一次快照，之后每 5 秒一次；**停止条件写在定时器自己身上**（结果区里没有 `#metrics-panel` 就 `clearInterval`）。这样任何切视图的路径都不必记得清理——漏一处就是「监控把库拖慢」 | `TestUIMetricsPanel`（钉住判断语句与 `clearInterval`） |
@@ -276,7 +277,7 @@ CREATE TABLE slow_query_hourly (
 |---|---|---|---|
 | 慢查询 Top N（窗口增量） | §3.2 / 验收 3、4 | `driver.SlowQueryProvider`（判据 `Capabilities().SlowQueryStats`）+ `service.Executor.SlowQueries`。**差分在服务层**：`Executor` 每条连接一份 `slowSampler`，保存上一次的累计值，本次相减得到窗口增量；计数器被清过（`pg_stat_statements_reset` / `TRUNCATE performance_schema`）时差成负数，按新增处理而不是显示负数。**首次采样只能给累计值并标 `first_sample`**。排序用**窗口内**总耗时重排。降级：扩展/表不存在 → `available=false` + `hint`（PG 给出 preload + 重启 + `CREATE EXTENSION` 三步；MySQL 给出 performance_schema 的检查点）；超时 → `degraded` | `TestDiffSlowQueriesIsWindowDelta`（两次采样：累计 → 增量、窗口里没跑过的不出现、按窗口总耗时重排、平均耗时）、`TestDiffSlowQueriesSurvivesCounterReset`（清零后不显示负数）；真机验证见下 |
 | 锁与阻塞链 | §3.4 / FR-MON-03 | 没有阻塞视图；`LockGraph` 仍为 false | 需要构造真实锁的集成用例（与 `docs/07` 验收 11 的 MDL 卡点同源） |
-| 容量视图 | §3.5 / FR-MON-06 | 没有表体量与增长 | 依赖各引擎的体积查询，且大表统计要手动触发（一次可能扫几千行系统表） |
+| 容量增长（时间维度） | §3.5 / FR-MON-06 | 体量 Top N 已做（见 §9.1），**增长曲线没有** | 需要本地时序留存（FR-MON-05）：先把每次采样的体量存下来，才谈得上「一周涨了多少」 |
 | 时序留存 / 巡检 / 告警 | §4 / §5 / §7 | FR-MON-05 / 07 / 08 全未做 | 单独立项：本地时序文件 + 7 天清理、Runbook 执行器、阈值告警与抑制 |
 
 **验收现状**：12 项里第 2（结论由规则产出）、8（超时降级不报错）已由真实用例覆盖；第 1、10 只有界面门禁，缺「2s 内出首屏」的计时用例与「关闭后无新查询」的集成断言。

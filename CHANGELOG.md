@@ -180,6 +180,8 @@
 
 - **QPS（两次采样差分）**（FR-MON-01 收尾）：`driver.Counters.Statements` 是累计语句数（MySQL `Questions`、PG `SUM(calls)`，**-1 表示这个实例没给**）；服务层第二份采样状态，两次相减除以时间跨度。首次采样不给数字（不拿「自启动以来的平均值」冒充），计数器被重置时跳过（显示负数比不显示更糟）。PG 没装 `pg_stat_statements` 时留 -1，界面**不显示这一行**而不是显示 0——0 在差分里意味着「这段时间一条都没跑」，那是另一回事。
 
+- **表体量 Top N**（FR-MON-06 的体量部分）：`driver.CapacityProvider`（判据 `Capabilities().Capacity`）。PG 用 `pg_table_size` / `pg_indexes_size` / `pg_total_relation_size`——都是 **O(1) 的目录计算，不扫表**；MySQL 用 `information_schema.TABLES` 并排除系统库（它们总排在前几名，会把业务表挤掉）。数据与索引分开给，否则「为什么这张表这么大」还得再点进去看一次。**增长没做**：那需要本地时序留存（FR-MON-05），先把每次采样的体量存下来才谈得上「一周涨了多少」。界面接在指标面板里，能力位为假时不显示。
+
 ### 安全
 
 - **大整数不再静默丢精度**：`BIGINT` 超过 2^53 时，界面保持字符串、服务端按列类型还原；客户端若把它写成 JSON 数字，直接 `400 NUMBER_PRECISION_LOSS` 并提示改用字符串，而不是把丢了低位的值写进库。此前界面 `coerce()` 用 `Number()` 转换整数列，编辑 `9223372036854775807` 会变成 `...5808`。

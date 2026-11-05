@@ -159,7 +159,9 @@ func (c *Connector) Capabilities() model.Capabilities {
 		SessionMgmt: true,
 		KillSession: true,
 		// 连接数与缓存命中走 pg_stat_database + pg_settings。
-		Metrics:          true,
+		Metrics: true,
+		// 表体量走 pg_total_relation_size / pg_indexes_size（目录计算，不扫表）。
+		Capacity:         true,
 		LockGraph:        false,
 		Backup:           false,
 		BulkLoad:         false,

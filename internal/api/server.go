@@ -175,6 +175,7 @@ func (s *Server) routes() []route {
 		{http.MethodGet, "/api/v1/connections/{id}/search", false, s.handleSearch},
 		{http.MethodGet, "/api/v1/connections/{id}/monitor/metrics", false, s.handleMetrics},
 		{http.MethodGet, "/api/v1/connections/{id}/monitor/slow-queries", false, s.handleSlowQueries},
+		{http.MethodGet, "/api/v1/connections/{id}/monitor/tables", false, s.handleTableSizes},
 		{http.MethodGet, "/api/v1/connections/{id}/monitor/sessions", false, s.handleSessions},
 		{http.MethodPost, "/api/v1/connections/{id}/monitor/sessions/{sid}/kill", false, s.handleKillSession},
 		{http.MethodGet, "/api/v1/connections/{id}/tables/{name}/rows", false, s.handleTableRows},
