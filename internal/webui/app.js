@@ -3428,9 +3428,6 @@ function slowSection(slow) {
   return box;
 }
 
-// sizeSection 画表体量 Top N（FR-MON-06）。
-//
-// 只给体量不给增长：增长要有本地时序留存，那是另一件事（docs/09 §9.2）。
 // lockSection 画锁等待（FR-MON-03）。
 //
 // 空列表是**健康状态**，要明确写出来：只画一张空表，看的人分不清是「没有阻塞」
@@ -3440,7 +3437,10 @@ function lockSection(locks) {
   const head = document.createElement('div');
   head.className = 'head';
   const items = (locks && locks.items) || [];
-  head.textContent = '锁等待（' + items.length + '）';
+  // 按**会话**计数而不是按边：同一个会话可能同时被多个持有者挡着（一条边一行的话，
+  // 「6」和下面 3 行对不上，看的人会以为漏画了）。
+  const waiters = new Set(items.map((it) => it.waiting_id));
+  head.textContent = '锁等待（' + waiters.size + ' 个会话在等）';
   box.appendChild(head);
   if (!items.length) {
     const n = document.createElement('div');
@@ -3450,29 +3450,46 @@ function lockSection(locks) {
     return box;
   }
 
-  const t = document.createElement('table');
-  const thead = document.createElement('thead');
-  const htr = document.createElement('tr');
-  for (const label of ['等待者', '被谁挡住', '已等(秒)', '等待中的语句']) {
-    const th = document.createElement('th');
-    th.textContent = label;
-    htr.appendChild(th);
-  }
-  thead.appendChild(htr);
-  t.appendChild(thead);
-  const tb = document.createElement('tbody');
+  // 把**边**串成**链**：同一条阻塞链从「持有者」往下展开，人一眼看得出是谁卡住了谁。
+  const byBlocker = new Map();
+  const waiting = new Set();
   for (const it of items) {
-    const tr = document.createElement('tr');
-    tr.appendChild(cell(it.waiting_id));
-    tr.appendChild(cell(it.blocking_id));
-    tr.appendChild(cell(it.wait_seconds >= 0 ? String(it.wait_seconds) : '—'));
-    tr.appendChild(cell(it.waiting_sql || ''));
-    tb.appendChild(tr);
+    waiting.add(it.waiting_id);
+    if (!byBlocker.has(it.blocking_id)) byBlocker.set(it.blocking_id, []);
+    byBlocker.get(it.blocking_id).push(it);
   }
-  t.appendChild(tb);
-  box.appendChild(t);
+  // 根 = 自己没在等别人的持有者。环里没有根，所以下面还有一条兜底。
+  const roots = [...byBlocker.keys()].filter((id) => !waiting.has(id));
+
+  const list = document.createElement('div');
+  // 按**会话 id** 去重，不按「id + 深度」：一个会话只可能在等一个人，按深度去重
+  // 会把同一会话在另一个深度再画一遍（真机上就是这样多出一行重复的等待者）。
+  const seen = new Set();
+  const walk = (id, depth, secs) => {
+    // 环形等待（A 等 B、B 等 A）会把递归转死，深度与已访问双重封顶。
+    if (depth > 8 || seen.has(id)) return;
+    seen.add(id);
+    const row = document.createElement('div');
+    row.className = 'notice';
+    row.style.marginLeft = (depth * 18) + 'px';
+    row.textContent = depth === 0
+      ? '持有 #' + id
+      : '#' + id + ' 在等（' + (secs >= 0 ? secs + ' 秒' : '时长未知') + '）';
+    list.appendChild(row);
+    for (const edge of (byBlocker.get(id) || [])) {
+      if (edge.waiting_sql) row.title = '阻塞方语句：' + (edge.blocking_sql || '—');
+      walk(edge.waiting_id, depth + 1, edge.wait_seconds);
+    }
+  };
+  for (const r of roots) walk(r, 0, -1);
+  // 全是环时一个根都没有，兜底把还没画过的会话展开，否则整段会消失。
+  for (const it of items) walk(it.waiting_id, 1, it.wait_seconds);
+  box.appendChild(list);
   return box;
 }
+// sizeSection 画表体量 Top N（FR-MON-06）。
+//
+// 只给体量不给增长：增长要有本地时序留存，那是另一件事（docs/09 §9.2）。
 function sizeSection(sizes) {
   const box = document.createElement('div');
   const head = document.createElement('div');

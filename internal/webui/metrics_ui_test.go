@@ -44,6 +44,11 @@ func TestUIMetricsPanel(t *testing.T) {
 		"locks: '/api/v1/connections/:id/monitor/locks'",
 		"function lockSection(locks)",
 		"当前没有锁等待。",
+		// 链而不是平表：从持有者往下展开（FR-MON-03 要的是「谁卡住了谁」）。
+		"'持有 #' + id",
+		// 按会话计数：同一个会话可能被多个持有者挡着，按边计数会和行数对不上。
+		"' 个会话在等）'",
+		"在等（'",
 		// 新实例上「0 天 0 小时」等于没说：按最大量级给两个单位。
 		"return m + ' 分钟'",
 	} {
