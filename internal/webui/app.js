@@ -807,7 +807,7 @@ function renderToolbar() {
     const insBtn = document.createElement('button');
     insBtn.id = 'btn-insert-row';
     insBtn.textContent = '新增行';
-    insBtn.title = '插入一行：留空的列走默认值或自增';
+    insBtn.title = '插入一行：每列可选不写（走默认值或自增）、NULL、或一个值';
     insBtn.onclick = () => showInsertRow();
     bar.appendChild(insBtn);
   }
@@ -1094,9 +1094,12 @@ async function submitChanges() {
 
 // showInsertRow 插入一行。
 //
-// 「留空 = 不写这一列」是这里唯一的一条规则，它能同时覆盖自增主键与有默认值的
-// 列——刻意不做「空输入框就是 NULL」：那会把用户想要的默认值写成 NULL，而且与
-// 网格里「NULL 与空串是两件事」的约定冲突。要显式写 NULL 或空串，插完在网格里改。
+// 每一列有三态：**不写**（走默认值或自增）、**NULL**、**值**（可以是空串）。这三件
+// 事在数据库里完全不同，靠「输入框留空」猜意图必然出错——留空既可能是「我要默认
+// 值」也可能是「我要空串」。所以状态由下拉框显式给，输入框只管内容。
+//
+// 默认是「不写」：它是唯一不会悄悄改掉默认值或自增的选择。在输入框里打字会把状态
+// 自动切到「值」——打了字就说明要写，绝不能让输入被静默丢掉。
 async function showInsertRow() {
   if (!state.current || !state.tableName) return;
   const cols = (state.columns || []).filter((c) => !c.is_generated);
@@ -1109,21 +1112,59 @@ async function showInsertRow() {
       const type = (c.type && c.type.raw) || '';
       const hint = c.default ? '默认 ' + c.default : (c.nullable ? '可空' : '必填');
       return '<label class="field">' + c.name + '（' + type + ' · ' + hint + '）</label>' +
-        '<input id="ins-' + i + '" style="width:100%" autocomplete="off" spellcheck="false">';
+        '<div class="toolbar">' +
+        '<select id="ins-mode-' + i + '" style="width:6.5rem;flex:none">' +
+        '<option value="skip">不写</option>' +
+        '<option value="null">NULL</option>' +
+        '<option value="value">值</option>' +
+        '</select>' +
+        '<input id="ins-' + i + '" style="flex:1" autocomplete="off" spellcheck="false">' +
+        '</div>';
     })
     .join('');
-  const ok = await dialog('新增一行', body +
-    '<p>留空 = 不写这一列（走默认值或自增）。要显式写 NULL 或空串，插入后在网格里改。</p>',
+  const answer = dialog('新增一行', body +
+    '<p>每列三选一：<b>不写</b>（走默认值或自增）、<b>NULL</b>、<b>值</b>。' +
+    '选「值」后留空 = 空串，与 NULL 不是一回事；在输入框里打字会自动切到「值」。</p>',
     '生成预案');
-  if (!ok) return;
-  const after = {};
+  // dialog() 是同步写好 DOM 再等按钮的，所以这里能立刻取到元素绑事件。
+  const inputOf = (i) => $('ins-' + i);
+  const modeOf = (i) => $('ins-mode-' + i);
   cols.forEach((c, i) => {
-    const v = $('ins-' + i).value;
-    if (v !== '') after[c.name] = v;
+    const sel = modeOf(i);
+    const inp = inputOf(i);
+    if (!sel || !inp) return;
+    const sync = () => { inp.style.opacity = sel.value === 'value' ? '1' : '0.55'; };
+    sel.onchange = sync;
+    inp.oninput = () => {
+      if (sel.value !== 'value') sel.value = 'value';
+      sync();
+    };
+    sync();
   });
+  if (!(await answer)) return;
+
+  const after = {};
+  const nullOnRequired = [];
+  cols.forEach((c, i) => {
+    const sel = modeOf(i);
+    const mode = sel ? sel.value : 'skip';
+    if (mode === 'null') {
+      // 显式 NULL：JSON null 在服务端会被当作「这一列写成 NULL」，与「没有这个键」
+      // （不写，走默认值）是两条不同的语句。
+      if (!c.nullable) { nullOnRequired.push(c.name); return; }
+      after[c.name] = null;
+    } else if (mode === 'value') {
+      after[c.name] = inputOf(i) ? inputOf(i).value : '';
+    }
+  });
+  if (nullOnRequired.length) {
+    // 交给引擎报也拦得住，但那时用户已经看不到自己刚填的内容了，说不清是哪一列。
+    showNotice('这些列是 NOT NULL，不能写 NULL：' + nullOnRequired.join('、'), 'warn');
+    return;
+  }
   if (!Object.keys(after).length) {
     // 服务端的 insert 要求至少给一列（整行都用默认值它拼不出语句），这里先说清楚。
-    showNotice('至少填一列：整行都用默认值的插入暂不支持。', 'warn');
+    showNotice('至少要给一列：整行都「不写」（全靠默认值）的插入服务端拼不出语句。', 'warn');
     return;
   }
   await submitRowChange({ op: 'insert', after }, '新增这行');

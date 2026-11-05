@@ -30,11 +30,18 @@ func TestUIRowActions(t *testing.T) {
 		"pks.includes(name.toLowerCase())",
 		// 只读连接不摆行级入口。
 		"state.current.access_mode !== 'read-only'",
-		// 新增行：按钮、对话框、「留空=不写这一列」这条规则、以及空提交的拦截。
+		// 新增行：按钮、对话框、每列的三态选择器，以及两处拦截。
 		"id = 'btn-insert-row'",
 		"function showInsertRow(",
-		"留空 = 不写这一列",
-		"至少填一列",
+		// 三态必须显式给：靠「输入框留空」猜意图会把「要默认值」和「要空串」混成一件事。
+		`'<option value="skip">不写</option>'`,
+		`'<option value="null">NULL</option>'`,
+		`'<option value="value">值</option>'`,
+		// 在输入框里打字就切到「值」：不能让已经输入的内容被静默丢掉。
+		"if (sel.value !== 'value') sel.value = 'value'",
+		// NOT NULL 列上选 NULL 在界面上就拦住（交给引擎报时用户已经看不到填的内容）。
+		"这些列是 NOT NULL，不能写 NULL",
+		"至少要给一列",
 	} {
 		if !strings.Contains(src, want) {
 			t.Errorf("行级操作缺少 %q", want)
