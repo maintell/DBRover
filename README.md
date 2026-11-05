@@ -175,6 +175,7 @@ bin/dbrover.exe migrate plan -engine mysql -host H -user U -db S -table t -to-en
 pwsh -File scripts/check.ps1     # gofmt + vet + build + test + test -race（不依赖真机）
 
 # 有真机时跑全量（连接器一致性套件、跨引擎迁移、结构变更真机用例都在内）
+# MySQL 实例必须是 utf8mb4——套件刻意写中文与 emoji 验类型保真，latin1 下报 1366
 $env:DBRover_TEST_MYSQL='root:testpass@HOST:13306'
 $env:DBRover_TEST_PG='postgres:testpass@HOST:15432'
 go test ./... -count=1 -timeout 1800s

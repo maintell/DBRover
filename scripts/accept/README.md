@@ -49,7 +49,17 @@ go test ./... -count=1 -timeout 1800s
 
 **空实例上应当直接可跑**：真机用例会自己建 `dbrover_test`（`openReal` 与 `rowsTargets` 都做了）。这条是 2026-11-05 修的——此前必须先手工 `CREATE DATABASE`，否则整包跑在第一条真机用例上就红，而单独跑某一条又可能是绿的，极难排查。
 
-排错顺序：先看是不是「库不存在」（我们的事），再看是不是容器没起来（环境的事）。
+排错顺序：先看是不是「库不存在」（我们的事），再看是不是容器没起来（环境的事），最后看**字符集**。
+
+**MySQL 测试实例必须是 utf8mb4**。套件里有用例刻意写中文与 emoji（`hello 世界 🚀`）来验类型保真，实例是 `latin1` 时会报 `Error 1366: Incorrect string value: '\xE4\xB8\x96...'`——读起来像编码 bug，其实是容器少带了参数。起容器时带上：
+
+```bash
+docker run -d --name dbrover-my -e MYSQL_ROOT_PASSWORD=testpass -e MYSQL_DATABASE=acc \
+  -p 13306:3306 mysql:5.7.38 \
+  --character-set-server=utf8mb4 --collation-server=utf8mb4_unicode_ci
+```
+
+核对一句：`SELECT @@character_set_server` 必须是 `utf8mb4`。
 
 ## 引擎名
 
