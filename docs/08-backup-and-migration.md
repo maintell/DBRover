@@ -376,4 +376,7 @@ dbrover backup create -db demo.db -env local -out demo.dbr   # 写容器（全�
 dbrover backup inspect demo.dbr                              # 只读头，列出对象
 ```
 
-还没有 HTTP 端点与定时计划；容器里的段是脚本，恢复目前要手工取出来回放。
+还没有 HTTP 端点与定时计划（这两个属于「长任务化」，见 [docs/12](12-api-contract.md) §2.6——那一段整体已标注未实现）。
+
+容器里的段就是脚本，**但不需要手工回放**：`dbrover restore -file <文件.dbr> -db <file> -env … [-confirm-target 名]`
+会按容器重建对象并校验（见上表「恢复」行）；只有跨引擎与 MySQL 覆盖这两条没做。

@@ -6,6 +6,10 @@
 
 ### 新增
 
+- **脚本级「遇错继续」与「执行全部」**（docs/05 §2.1）：工具栏新增「执行全部」（`Ctrl+Shift+Enter`）与「遇错继续」勾选框。服务端 `stop_on_error` 默认 `true`（遇错即停，已成功语句的结果照常返回），显式 `false` 时继续跑后面的、每条结果独立；`stop_on_error` 用指针解析，零值不会被当成「继续」。不选文字时「执行」只跑光标所在那条语句，正是「遇错继续」此前无法体现的原因。验收脚本 `scripts/accept/stop-on-error.ps1`（三段断言，不需要外部数据库）。
+- **多语句结果分块 + 点标题跳回编辑器**（docs/05 §3.2）：多条语句时每块顶部是「第 N 条 · 语句前 60 字符」（换行压成一行、超长截断），点标题选中编辑器里对应语句（`indexOf` 定位服务端切出的原文，前端不重做方言切分）；单条语句不画标题。
+- **读路径的大整数保真**：三个驱动的 cursor 统一走 `driver.StringifyLargeInts`，超过 2^53 的整数以十进制字符串回传（2^53 以内仍是数字，否则排序与聚合全按文本处理）。真机用例 `LargeIntsAsStrings` 含反向断言（小整数不许被字符串化）。
+- **`INTERNAL/500` 有了真正的产出路径**：`recoverPanic` 包在最外层，panic 变成结构化错误 + `request_id`，栈打到 stderr；同时保留 `http.Flusher`（NDJSON 不会因此退化成「攒完再发」）。
 - **文档基线**：14 份设计文档 + 7 份 ADR（技术栈 / Agent 工具边界 / Plan-Apply 分离 / 环境模型 / 跨引擎差异归能力与方言 / 依赖检查归驱动 / 非关系型连接器模型）。
 - **方言层**（`internal/driver/dialect`）：词法分析、语句切分、指纹归一化、语句分类、条件分析、标识符引用。覆盖 PostgreSQL / MySQL / SQL Server / Oracle / SQLite 五种方言，含 dollar-quote、`DELIMITER`、`GO`、Oracle `/`、嵌套块注释、`]]` 转义。
 - **风险与摩擦**（`internal/policy`）：语句风险 `R0`–`R4`；打扰强度 `F0`–`F5`，由「环境 × 风险」矩阵决定，含变更集路径、脚本长度、影响行数、备份缺失等修正项。
@@ -212,6 +216,13 @@
   - **巡检漏评估缓存**：`CacheHitRatio` 为空时一条结论都不出，报告可能「整体正常」却从未看缓存；补 unknown 项。
   - **文档自相矛盾与过度承诺**：§9.2 把两条已实现能力列在「尚未实现」表、并称巡检「不能导出」（已实现）；§3.2 承诺的 P95/最大单次/首末次未做也未标注；docs/12 说 metrics 端点「只读无副作用」（实际会写留存）；docs/06 与代码注释都写着「可搜索」。全部按实情改。
 
+### 修复
+
+- **多语句脚本的结果只剩最后一条**（高，两次同一个坑）：`renderTable` 的 `append` 参数语义是「往同一张表追加行」，多语句结果传 `false` 会让它对结果区 `replaceChildren`，前面几条被最后一条悄悄顶掉；改动之后又把标题加进块、再把块直接交给 `renderTable`，标题同样被清空（症状是标题永远不出现且不报错）。现在每条语句一个独立容器、表格画在块内单独一层。新增 `TestRenderExecPerStatementBlock` 锁**隔离**（含反向断言），已做变异验证。
+- **失败时抹掉已成功的结果、序号从 0 起**（高）：失败提示走 `showNotice`（它自己会 `replaceChildren`），且文案用 `r.index` 原值。现在失败块追加在已完成结果之后，「第 N 条」按 1 起；只有失败恰好是最后一条时才说「后面的语句没有执行」——勾了「遇错继续」时那句话是假的。
+- **错误码表与代码双向漂移**（中）：`INTERNAL/500` 文档有、代码从不产出；`DB_NOT_FOUND` 与 `DB_CONNECT_NO_DATABASE` 是同一情况的两个名字；`TASK_CONFLICT` 属于未实现的任务端点。补上 `recoverPanic`（panic → 结构化 500 + `request_id`，栈打 stderr；包一层后仍实现 `http.Flusher`，头已发出则不追加错误体），删掉两个从不产出的码，并加 `TestDocErrorCodesExistInCode` 双向核对（变异验证：表里加一行 `PHANTOM_CODE` 即红）。
+- **两处文档过时说法**：`docs/02` 说「Origin 白名单还没有实现」（实际 `originAllowed` 已实现且有 `origin_test.go`）；`docs/08` 结尾说「恢复目前要手工取出来回放」（实际有 `dbrover restore -file … -confirm-target`）。
+
 ### 安全
 
 - **大整数不再静默丢精度**：`BIGINT` 超过 2^53 时，界面保持字符串、服务端按列类型还原；客户端若把它写成 JSON 数字，直接 `400 NUMBER_PRECISION_LOSS` 并提示改用字符串，而不是把丢了低位的值写进库。此前界面 `coerce()` 用 `Number()` 转换整数列，编辑 `9223372036854775807` 会变成 `...5808`。
@@ -227,7 +238,7 @@
 - **审计本地锚点**（`serve -audit-anchor <path>`）：每写 1 条（首条立即封）与每 100 条，把「条数 + 链头」连同 HMAC-SHA256 写进独立文件，密钥存系统凭据库。整段重写成一条自洽的新链时，链校验过得去、锚点过不去。
 - **口令不进审计**：`CREATE/ALTER USER … IDENTIFIED BY`、`SET PASSWORD`、`ALTER ROLE … PASSWORD`、连接串里的 `password=` 一律脱敏成 `'***'`，账号名与动作保留。
 - **明文口令门禁**：带口令建连接后，连接列表、审计接口、审计文件三处原始字节都不得含该口令（`TestNoPlaintextPassword`，含变异验证）。
-- **两处 `[hidden]` 被 CSS 覆盖**的修复不再复现：取消按钮与待提交条都显式写了 `#x[hidden]{display:none}`。### 已知限制
+- **两处 `[hidden]` 被 CSS 覆盖**的修复不再复现：取消按钮与待提交条都显式写了 `#x[hidden]{display:none}`。
 
 ### 已知限制
 

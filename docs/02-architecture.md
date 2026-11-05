@@ -80,7 +80,12 @@
 - 所有请求校验 `X-DBRover-Token`。
 - 绑定非回环地址需要显式 `-allow-remote`，否则拒绝启动。
 
-> **v1 实现口径（安全相关，必须说清）**：**TLS 未实现**。`-allow-remote` 打开之后服务就是明文 HTTP，只应放在受信网络或反向代理之后；`Origin` 白名单也还没有实现。这两条是目标，不是现状。
+> **v1 实现口径（安全相关，必须说清）**：**TLS 未实现**。`-allow-remote` 打开之后服务就是明文 HTTP，
+> 只应放在受信网络或反向代理之后——这一条是目标，不是现状。
+>
+> **`Origin` 校验已实现**（此前这里写着「还没有实现」，是过时说法）：`api.originAllowed`
+> 只放行「不带 `Origin`」（curl / 桌面壳）与「同源」，其余返回 403 `ORIGIN_NOT_ALLOWED`；
+> 刻意不接受 `null`（它来自 `file://` 或沙箱 iframe）。用例：`internal/api/origin_test.go`。
 
 ---
 
