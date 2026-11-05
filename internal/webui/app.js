@@ -3582,7 +3582,7 @@ function sizeSection(sizes) {
   const t = document.createElement('table');
   const thead = document.createElement('thead');
   const htr = document.createElement('tr');
-  for (const label of ['表', '合计', '数据', '索引', '行（估算）']) {
+  for (const label of ['表', '合计', '数据', '索引', '行（估算）', '增长']) {
     const th = document.createElement('th');
     th.textContent = label;
     htr.appendChild(th);
@@ -3597,6 +3597,12 @@ function sizeSection(sizes) {
     tr.appendChild(cell(formatBytes(it.data_bytes)));
     tr.appendChild(cell(formatBytes(it.index_bytes)));
     tr.appendChild(cell(it.rows >= 0 ? String(it.rows) : '—'));
+    // 增长要有两段历史才算得出来：一个点只能说明「现在是多大」，编个 0 出来更糟。
+    tr.appendChild(cell(
+      typeof it.growth_bytes === 'number'
+        ? (it.growth_bytes >= 0 ? '+' : '') + formatBytes(Math.abs(it.growth_bytes)) +
+          ' / ' + it.growth_hours.toFixed(1) + 'h'
+        : '需要更多采样'));
     tb.appendChild(tr);
   }
   t.appendChild(tb);

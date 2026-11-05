@@ -4,6 +4,10 @@ import (
 	"fmt"
 	"net/http"
 	"strconv"
+	"time"
+
+	"github.com/maintell/DBRover/internal/driver"
+	"github.com/maintell/DBRover/internal/service"
 )
 
 // handleTableSizes 给出表体量 Top N（FR-MON-06）。
@@ -38,5 +42,31 @@ func (s *Server) handleTableSizes(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadGateway, "DB_METADATA_FAILED", "connection", err.Error(), "", true)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"items": items})
+	// 顺手把体量记进留存并算增长（FR-MON-06 的增长部分，ADR-0016 的存储）。
+	// 增长只在**两个以上采样点**时给：一个点只能说明现在多大，编个 0 出来更糟。
+	type sizeItem struct {
+		driver.TableSize
+		GrowthBytes *int64  `json:"growth_bytes,omitempty"`
+		GrowthHours float64 `json:"growth_hours,omitempty"`
+	}
+	out := make([]sizeItem, 0, len(items))
+	now := time.Now()
+	for _, it := range items {
+		if s.metrics != nil {
+			_ = s.metrics.Record(e.conn.ID, now, map[string]float64{service.MetricSizePrefix + it.Name: float64(it.TotalBytes)})
+		}
+		row := sizeItem{TableSize: it}
+		if s.metrics != nil {
+			if pts, serr := s.metrics.Series(e.conn.ID, service.MetricSizePrefix+it.Name, now.Add(-7*24*time.Hour)); serr == nil {
+				if delta, hours, ok := service.GrowthOf(pts, it.TotalBytes); ok {
+					row.GrowthBytes = &delta
+					row.GrowthHours = hours
+				}
+			}
+		}
+		out = append(out, row)
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"items": out, "growth_available": s.metrics != nil,
+	})
 }

@@ -42,6 +42,8 @@ func TestUIMetricsPanel(t *testing.T) {
 		"tableSizes: '/api/v1/connections/:id/monitor/tables'",
 		"function sizeSection(sizes)",
 		"function formatBytes(v)",
+		// 体量增长要有历史才算得出来，没有就说「需要更多采样」。
+		"需要更多采样",
 		"function formatUptime(s)",
 		// 锁等待（FR-MON-03）：空列表要写成「没有等待」，别让人分不清是不是没接上。
 		"locks: '/api/v1/connections/:id/monitor/locks'",

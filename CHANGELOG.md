@@ -196,6 +196,8 @@
 
 - **README 补 CLI 参数表 + 一条防漂移门禁**：`serve -metrics`、`-audit`、`-allow-remote`、`-token`，`tunnel -known-hosts`/`-accept-host-key`，`migrate -to-table`/`-batch`/`-probe` 等 13 个开关在 README 里根本没有条目——AGENTS.md 要求「README 参数表必须覆盖代码里每个开关」，而这条一直靠人记。新增 `TestReadmeCoversEveryFlag`：从 `cmd/dbrover/main.go` 的 AST 取开关名，README 里必须逐个出现。**第一版门禁是假绿的**：纯子串匹配把 `-metrics-removed` 里的 `-metrics` 当成「写了」，变异验证才发现，改成带边界匹配后才真会红。CLI 的 `-h` 文本也一并补齐（`-known-hosts`、`-accept-host-key`、`-to-table`、`-batch`、`-probe`、`-max-rows` 原来只在代码里有）。
 
+- **表体量增长**（FR-MON-06 的第二半）：每次读表体量顺手把结果记进指标留存（`size:<表名>` 这个 metric），并按窗口内最早采样点算 `growth_bytes` / `growth_hours`。**两个点以上才给**——一个点只能说明「现在是多大」，编个 0 出来更糟；界面在没有历史时显示「需要更多采样」。存的是同一张 `metric_sample`（ADR-0016 的结构没变，只是多了一种 metric 名），不新增表、不升 schema 版本。真机 MySQL：两次采样相隔 0.037 小时，`增长=0 / 小时=0.037`（16KB 的页没涨，机制正确）；数学口径由 `TestGrowthOf` 钉住。
+
 ### 安全
 
 - **大整数不再静默丢精度**：`BIGINT` 超过 2^53 时，界面保持字符串、服务端按列类型还原；客户端若把它写成 JSON 数字，直接 `400 NUMBER_PRECISION_LOSS` 并提示改用字符串，而不是把丢了低位的值写进库。此前界面 `coerce()` 用 `Number()` 转换整数列，编辑 `9223372036854775807` 会变成 `...5808`。
