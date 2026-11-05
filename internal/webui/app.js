@@ -2567,14 +2567,33 @@ function renderTable(container, columns, rows, append, allowEdit) {
 
 // attachEdit 让单元格可编辑，并在失焦时把改动记进待提交列表。
 // isNull 为 true 时额外记住「原值是 NULL」，用于生成 before=null。
+const longTextLimit = 200;
+
 function attachEdit(td, key, column, origValue, isNull) {
   if (!key) return;
-  td.contentEditable = 'true';
   td.dataset.col = column.name;
   td.dataset.kind = cellKind(column);
   td.dataset.orig = isNull ? '' : String(origValue);
   if (isNull) td.dataset.orignull = '1';
+
+  // 长文本**不在格子里直接改**：格子里显示的是截断摘要，而失焦时提交的是格子的
+  // textContent——那会把截断后的文本当成新值写回去，是一次静默的数据截断。
+  // 所以这类格子不可编辑，改走右键里的「长文本编辑器」（全文在框里）。
+  const full = isNull ? '' : String(origValue === null || origValue === undefined ? '' : origValue);
+  if (!isNull && full.length > longTextLimit) {
+    td.dataset.full = full;
+    paintLongText(td, full);
+    td.classList.add('longtext');
+    return;
+  }
+  td.contentEditable = 'true';
   td.classList.add('editable');
+}
+
+// paintLongText 把长文本画成「前 200 字符 + 总长度」。
+function paintLongText(td, text) {
+  td.textContent = text.slice(0, longTextLimit) + ' …（' + text.length + ' 字符）';
+  td.title = '长文本：点右键用「长文本编辑器」看全文并修改';
 }
 
 // 事件委托：只挂一次，避免每格一个监听器。
@@ -2664,6 +2683,10 @@ document.addEventListener('contextmenu', (ev) => {
   if (writable && (td.dataset.kind || '') === 'json') {
     actions.push({ label: 'JSON 编辑器', run: () => openJsonEditor(td) });
   }
+  // 长文本同理：格子里是截断摘要，改要在全文框里改。只读连接也给看全文的入口。
+  if (td.dataset.full !== undefined) {
+    actions.push({ label: '长文本编辑器', run: () => openTextEditor(td, writable) });
+  }
   if (writable) {
     actions.push({ label: '删除本行', id: 'row-del', run: () => deleteRow(tr) });
     actions.push({ label: '复制本行', id: 'row-copy', run: () => copyRow(tr) });
@@ -2729,7 +2752,15 @@ function setCellText(td, text) {
   const oldValue = wasNull ? null : coerce(kind, td.dataset.orig || '');
   if (sameValue(oldValue, text)) return;
 
-  td.textContent = text;
+  // 写回后按长度重画：长文本仍要截断显示，否则一格里塞满整段正文。
+  if (text.length > longTextLimit) {
+    td.dataset.full = text;
+    paintLongText(td, text);
+    td.classList.add('longtext');
+  } else {
+    delete td.dataset.full;
+    td.textContent = text;
+  }
   td.dataset.orignull = '0';
   td.classList.add('dirty');
   // 这次改动的 before/after 已经算好，别让紧随其后的失焦再记一遍。
@@ -2741,6 +2772,22 @@ function setCellText(td, text) {
   updatePendingBar();
 }
 
+
+// openTextEditor 是长文本的专用编辑器（docs/06 §1.4）：等宽、给全文、可搜索。
+//
+// 只读连接也给这个入口，但框是只读的——「看全文」本身不写数据。
+async function openTextEditor(td, writable) {
+  const full = td.dataset.full !== undefined ? td.dataset.full : (td.textContent || '');
+  const answer = dialog('长文本',
+    '<p>格子里显示的是前 ' + longTextLimit + ' 个字符，这里是全文。' +
+    (writable ? '改完点保存，走与单元格编辑同一条待提交路径。' : '只读连接：只能看，不能改。') + '</p>' +
+    '<textarea id="long-text" spellcheck="false" style="width:100%;height:260px;font-family:ui-monospace,Consolas,monospace"></textarea>',
+    writable ? '保存' : '关闭');
+  $('long-text').value = full;
+  if (!writable) $('long-text').readOnly = true;
+  if (!(await answer) || !writable) return;
+  setCellText(td, $('long-text').value);
+}
 // openJsonEditor 是 JSON 列的专用编辑器（docs/06 §1.4）：等宽字体、可格式化、会校验。
 //
 // 校验不通过时**不关对话框**：把原文留在框里重开一次，而不是丢掉用户刚写的东西。
