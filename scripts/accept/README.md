@@ -117,16 +117,20 @@ docker run -d --name dbrover-my -e MYSQL_ROOT_PASSWORD=testpass -e MYSQL_DATABAS
 
 `-Engine` 接受 `mysql` / `postgres`；写 `pg` 会被脚本规范化成 `postgres`（服务端只认规范值，早先直接用 `pg` 会得到 `DB_CONNECT_FAILED: 暂不支持的引擎`）。这条是实际跑脚本时踩出来的，别改成只认 `pg`。
 
-## 本机可跑的两条（2026-11-05，HEAD 192f7c8）
+## 本机可跑的验收（`run-local.ps1` 一条命令）
 
-真机通道这一轮不可用（本机无 docker，debug-ubuntu 的 SSH 连不上），所以只跑了不需要外部数据库的两条；
-**5 个真机脚本 + 全量真机 `go test` 待通道恢复后补跑**，不要把它们当成已验过。
+下面 6 条不需要外部数据库，约 15 秒跑完；它们是「每次改完随时能红」的回归网，
+**与真机验收互补、不互相替代**。真机全量套件与 11 次真机脚本的结果见上方
+「最新一次全量真机回归（34a2a73）」。
 
 | 脚本 | 引擎 | 结果 |
 |---|---|---|
 | `bulk-20k-sqlite.ps1` | SQLite | 通过：20000 行 / 20 条进度 / 中止保留 6000 行 / 重提补齐（幂等） |
-| `stop-on-error.ps1` | SQLite | 通过：默认 2 条结果（第 2 条失败、第 3 条未跑）→ 继续 3 条结果 → `/query` 多语句 `EXEC_INVALID` → 单条可开游标取页 |
-| `backup-schema-only.ps1` | SQLite | 通过：full 675 B / schema 587 B；恢复出 2 表 + `idx_a_v` 且 0 行；`data` 与缺 `-env` 的恢复各给出明确拒绝理由 |
+| `stop-on-error.ps1` | SQLite | 通过：默认 2 条结果 → 继续 3 条结果 → `/query` 多语句 `EXEC_INVALID` → 单条可开游标取页 |
+| `backup-schema-only.ps1` | SQLite | 通过：full 675 B / schema 587 B；恢复出 2 表 + `idx_a_v` 且 0 行 |
+| `export-formats.ps1` | SQLite | 通过：五格式 + SQL 回放（生成列由目标端算出 2 / 4） |
+| `monitor-degrade.ps1` | SQLite | 通过：不支持端点 400 + 巡检 4 项全 unknown + 不冒充 ok |
+| `security-smoke.ps1` | SQLite | 通过：回环 / token / Origin / 口令不回显 / 只读 403 / 审计脱敏 / 审计链篡改 `broken_at` |
 
 ## 最近一次全跑（2026-11-05，HEAD bebe831）
 
