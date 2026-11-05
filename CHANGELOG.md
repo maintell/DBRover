@@ -6,6 +6,15 @@
 
 ### 新增
 
+- **全量真机回归终于跑通（本会话一直缺的那块）**：debug-ubuntu 上起一次性 MySQL 5.7.38 / PG 17.11 容器，
+  `go test ./... -count=1`（14 个包全绿，`internal/service` 227s / `agent/eval` 91s / `driver/pg` 62s /
+  `api` 50s / `driver/mysql` 46s）+ 11 次真机验收脚本全绿（`precision` / `bulk-engines` / `fk-add` /
+  `timezone` / `deps-drop` 各两引擎 + `compare-cross`）。这把此前只在 SQLite 上验过的
+  `LargeIntsAsStrings`（大整数保真）、生成列、跨引擎迁移、结构变更、监控采集、Agent 评测集
+  全部在真实 MySQL 与 PostgreSQL 上跑过。MySQL 容器按踩过的坑带 `MYSQL_DATABASE=acc` 与
+  utf8mb4；容器用后 `docker rm -f` 清掉，他人的 6 个容器一个没动。
+  **通道说明**：此前误判「SSH 不可用」是因为一直用主机名直连；实际上 `ssh-tools` / `mysql-tools`
+  是按需工具，`debug-ubuntu`（root@192.168.2.88）早已配置好。真机验收不需要额外机器。
 - **本机端到端验收收成 6 条**（`scripts/accept/run-local.ps1`，一条命令、约 15 秒）：分批批量 2 万行、
   脚本语义（遇错继续 / 默认停止 / `/query` 多语句被拒）、结构备份 `-type schema`、导出五格式 + SQL 脚本回放、
   监控降级（引擎不支持时端点 400 / 巡检全 `unknown` / 不冒充 `ok`）、安全红线（回环、token、Origin、

@@ -74,6 +74,18 @@ PASS  security-smoke.ps1          1.8s
 - 跑完记得删测试容器：`docker rm -f dbrover-my dbrover-pg`
 - 这一轮的实际耗时（bdbdc1a，本机）：`bulk-20k-sqlite` 约 10s，其余每条 1–6s；12 次全跑不到 1 分钟。慢的是容器启动，不是脚本。
 - **73b8714 的竞态检查**：`CGO_ENABLED=1 go test -race ./...`（PG 17 + MySQL 5.7 真机）全绿，`internal/service` 358s。新增的并发状态（慢查询采样器 / QPS 采样器 / 告警状态 / 指标留存互斥）在真实并发路径下没有报告数据竞争。注意 `-race` **必须** `CGO_ENABLED=1`（测试专用；发布构建仍是 `CGO_ENABLED=0`）。
+- **最新一次全量真机回归（34a2a73，2026-11-05）**：`go test ./...`（MySQL 5.7.38 @13306 + PostgreSQL 17.11 @15432，
+  均为 debug-ubuntu 上的一次性容器）**14 个包全绿**：`internal/service` 227s、`internal/agent/eval` 91s、
+  `driver/pg` 62s、`api` 50s、`driver/mysql` 46s、`agent` 26s、`driver/sqlite` 23s，其余均绿。
+  这一轮终于把此前一直缺真机的用例跑到了：`drivertest/LargeIntsAsStrings`（大整数保真，MySQL/PG 两引擎真库往返）、
+  生成列、迁移跨引擎、结构变更真机用例、监控采集、Agent 评测集三引擎。
+
+  同时 **11 次真机验收脚本全绿**：`precision` / `bulk-engines` / `fk-add` / `timezone` / `deps-drop`
+  各跑 MySQL 与 PostgreSQL 两遍（10 次）+ `compare-cross` 一次。第一遍批量执行时把 `-Engine` 等参数
+  拼进字符串再传给 `pwsh -File` 被吞掉（10 个都报「Missing an argument for parameter 'Engine'」），
+  改成字面量参数后全绿——**脚本参数要写字面量，不要用变量拼命令**。
+  容器用后 `docker rm -f dbrover-my dbrover-pg` 清干净，他人的 6 个容器一个没动。
+
 - **最近一次全量回归（44ddc60）**：`go test ./...`（PG 17 + MySQL 5.7 真机）全绿 + 这 12 次验收全绿。这一轮覆盖了监控子系统的全部改动与「独立审计后的 8 处修复」（含慢查询采样基线、`size:` 键加 schema、采集超时降级）。踩过一个坑：起 MySQL 容器时漏了 `MYSQL_DATABASE=acc`，5 个脚本以 `DB_CONNECT_NO_DATABASE` 报错——**那不是回归，是环境少建了库**；起容器命令见本文上方。
 - `go test ./...` 那一条慢得多（约 7 分钟，`internal/service` 与 `internal/agent/eval` 各占几分钟），它跑的是真机用例不是脚本，两者互补：脚本验「端到端能不能用」，用例验「每个边界对不对」。。
 
