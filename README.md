@@ -110,6 +110,8 @@ DBRover 面向同时维护多种数据库的工程师：一个人可能上午在
 
 **阶段：M2 完成，M3 切片一、二完成，备份与迁移已落地**。查询、数据编辑、结构设计、导出、结构比对、备份恢复、跨引擎迁移、Agent 都可用；SQL Server / Oracle 与 NoSQL 引擎未做（卡在镜像与实例）。
 
+本机可跑的端到端验收已收成 6 条（`scripts/accept/run-local.ps1`：分批批量、脚本语义、结构备份、导出五格式与 SQL 回放、监控降级、安全红线），不需要外部数据库；`scripts/check.ps1` 是发版前的静态与单测门禁。真机 MySQL/PG 的全量套件与 5 个真机脚本待实例通道恢复后补跑。
+
 | 模块 | 状态 |
 |---|---|
 | `internal/model` | 领域模型、能力声明（含 `IndexValidity` / `AlterColumnNullability` / `AlterColumnDefault` / `AddCheck` / `AddTrigger` / `Sequences` / `MaterializedViews` / `UserTypes` / `Routines` / `AddRoutine`）、环境严格度、元数据模型 |
@@ -122,7 +124,7 @@ DBRover 面向同时维护多种数据库的工程师：一个人可能上午在
 | `internal/agent` | Provider 抽象（OpenAI 兼容）、14 个工具、权限三模式与环境上限、执行循环（步数/时长/循环/失败上限）、审批门（预案只由服务端保管）、三路上下文召回、长会话压缩、评测集 |
 | `internal/infra/tunnel` | SSH 隧道与跳板链：多跳、密码/私钥/agent 认证、主机密钥 TOFU |
 | `internal/webui` | **临时界面**：免构建的内嵌 Web UI（连接、对象树、SQL、结果网格、字段编辑、筛选排序、结构变更与比对、批量修改、导出、审批弹窗、Agent 面板） |
-| `cmd/dbrover` | CLI：`version` / `health` / `tables` / `exec` / `serve`（`-open`、`-audit-anchor`）/ `tunnel` / `secret` / **`backup create|inspect`** / **`restore`** / **`migrate plan|run`**（`-probe` 按实际值判长度） |
+| `cmd/dbrover` | CLI：`version` / `health` / `tables` / `exec` / `serve`（`-open`、`-audit-anchor`）/ `tunnel` / `secret` / **`backup create|inspect`**（`-type full|schema`） / **`restore`** / **`migrate plan|run`**（`-probe` 按实际值判长度） |
 
 > `internal/webui` 是为了「能点着验收」而做的最小实现，**不是最终前端**。最终前端仍是 [ADR-0001](docs/adr/0001-tech-stack.md) 规定的 React + TypeScript + Vite 栈；先做无构建版本是因为本机磁盘紧张，不装 node_modules。
 
@@ -225,7 +227,10 @@ $env:DBRover_TEST_PG='postgres:testpass@HOST:15432'
 go test ./... -count=1 -timeout 1800s
 
 # 端到端验收脚本（自己起 serve、跑真实引擎、失败即红）
-pwsh -File scripts/accept/bulk-20k-sqlite.ps1
+# 不需要真机的 6 条一条命令跑完：
+pwsh -File scripts/accept/run-local.ps1
+
+# 需要真机时（起容器、用完 docker rm -f）
 pwsh -File scripts/accept/compare-cross.ps1
 ```
 
