@@ -6,6 +6,12 @@
 
 ### 新增
 
+- **最终 HEAD 的真机回归锚定（a2b427a）**：此前真机记录停在 34a2a73，但此后又有 8 个提交
+  （监控面板 MutationObserver、OpenAPI 请求体契约、多处文档）。收口时在最终 HEAD 上重跑三项，
+  全部通过：`go test ./...`（14 包全绿）、`CGO_ENABLED=1 go test -race ./...`（14 包全绿、
+  无数据竞争）、11 次真机脚本全绿。验收 README 的「约定」段加一条**最终权威记录**，
+  明确判断「当前代码是否经真机验证」以它为准，早前各条只记阶段进度。容器用后清理，
+  他人容器未动。
 - **真机 `-race` 全绿**（AGENTS.md 发版门禁里最后一块）：`CGO_ENABLED=1 go test -race ./...` 带
   `DBRover_TEST_MYSQL` / `DBRover_TEST_PG` 指向真机实例（MySQL 5.7.38 + PG 17.11 一次性容器），
   14 个包全绿、无数据竞争，`internal/service` 370s / `agent/eval` 109s / `api` 73s /
