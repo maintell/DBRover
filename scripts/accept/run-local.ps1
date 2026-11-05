@@ -8,7 +8,8 @@ $ErrorActionPreference = 'Stop'
 $scripts = @(
   'bulk-20k-sqlite.ps1',
   'stop-on-error.ps1',
-  'backup-schema-only.ps1'
+  'backup-schema-only.ps1',
+  'export-formats.ps1'
 )
 
 $fail = 0
@@ -37,4 +38,4 @@ if ($fail -gt 0) {
   Write-Output ('共 ' + $fail + ' 个脚本失败')
   exit 1
 }
-Write-Output '全部通过（3 个脚本，覆盖分批批量、脚本语义、结构备份）'
+Write-Output '全部通过（4 个脚本，覆盖分批批量、脚本语义、结构备份、导出五格式与 SQL 回放）'
