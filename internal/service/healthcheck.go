@@ -116,6 +116,9 @@ func assess(in healthInput) *HealthReport {
 			} else {
 				add("缓存命中率", "ok", fmt.Sprintf("%.1f%%", *m.CacheHitRatio*100))
 			}
+		} else {
+			// 没这条结论时，报告会「整体正常」却从未评估缓存——沉默比 unknown 更误导。
+			add("缓存命中率", "unknown", "拿不到缓存计数")
 		}
 	}
 

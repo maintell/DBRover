@@ -2773,7 +2773,8 @@ function setCellText(td, text) {
 }
 
 
-// openTextEditor 是长文本的专用编辑器（docs/06 §1.4）：等宽、给全文、可搜索。
+// openTextEditor 是长文本的专用编辑器（docs/06 §1.4）：等宽、给全文。
+// 「可搜索」还没做（docs/06 §8.2 已标注），别在这里写下不存在的承诺。
 //
 // 只读连接也给这个入口，但框是只读的——「看全文」本身不写数据。
 async function openTextEditor(td, writable) {
@@ -3384,18 +3385,30 @@ async function showMetrics(auto) {
   if (!auto) setStatus('读指标…');
   const cid = state.current.id;
   const caps = (state.current && state.current.capabilities) || {};
+  // 请求在飞的时候用户可能已经切走：记下结果区当时的首个子节点，回来对不上就丢弃。
+  // 否则一次慢响应会把用户刚打开的面板整块覆盖掉，而且定时器会因为面板「复活」
+  // 一直轮询（docs/09 验收 10 要的是「关闭即停」）。
+  const startedWith = $('results').firstChild;
+  // 慢查询与体量按 §2.1 节流：5 秒这一档只刷轻量的指标/锁/告警，重查询每 6 拍
+  // （约 30 秒）一次。
+  state.metricsTick = (state.metricsTick || 0) + 1;
+  const heavy = !auto || state.metricsTick % 6 === 1;
   // 六块数据各读各的，**并发发**：串行发等于把「最慢的那个 × 6」当成首屏时间，
   // 而 docs/09 验收 1 要求面板 2 秒内出结论。远端库上每个端点都可能要 1 秒。
   // 谁失败谁降级——只有指标本身是必须的。
   const settled = await Promise.allSettled([
     api(path(API.metrics, { id: cid })),
-    caps.slow_query_stats ? api(path(API.slowQueries, { id: cid })) : Promise.resolve(null),
-    caps.capacity ? api(path(API.tableSizes, { id: cid })) : Promise.resolve(null),
+    caps.slow_query_stats && heavy ? api(path(API.slowQueries, { id: cid })) : Promise.resolve(null),
+    caps.capacity && heavy ? api(path(API.tableSizes, { id: cid })) : Promise.resolve(null),
     caps.lock_graph ? api(path(API.locks, { id: cid })) : Promise.resolve(null),
     api(path(API.history, { id: cid }) + '?metric=qps&minutes=60'),
     api(path(API.alerts, { id: cid })),
   ]);
   const pick = (r) => (r.status === 'fulfilled' ? r.value : null);
+  if ($('results').firstChild !== startedWith) {
+    // 视图已经被换掉了：这一次结果作废，别再盖回去。
+    return;
+  }
   if (settled[0].status !== 'fulfilled') {
     stopMetricsRefresh();
     const e = settled[0].reason || {};

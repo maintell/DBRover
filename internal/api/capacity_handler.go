@@ -1,6 +1,7 @@
 package api
 
 import (
+	"errors"
 	"fmt"
 	"net/http"
 	"strconv"
@@ -38,6 +39,13 @@ func (s *Server) handleTableSizes(w http.ResponseWriter, r *http.Request) {
 		limit = n
 	}
 	items, err := e.exec.Capacity(r.Context(), limit)
+	if errors.Is(err, service.ErrCollectTimeout) {
+		// docs/09 §2.1：超时不算错误，记一次降级。
+		writeJSON(w, http.StatusOK, map[string]any{
+			"items": []any{}, "growth_available": false, "degraded": err.Error(),
+		})
+		return
+	}
 	if err != nil {
 		writeError(w, http.StatusBadGateway, "DB_METADATA_FAILED", "connection", err.Error(), "", true)
 		return
@@ -52,12 +60,18 @@ func (s *Server) handleTableSizes(w http.ResponseWriter, r *http.Request) {
 	out := make([]sizeItem, 0, len(items))
 	now := time.Now()
 	for _, it := range items {
+		// 键必须带 schema：同一连接里两个 schema 有同名表时，只用表名会把两条序列
+		// 写成同一条（metric_sample 的主键是 connection_id + metric + ts）。
+		key := service.MetricSizePrefix + it.Name
+		if it.Schema != "" {
+			key = service.MetricSizePrefix + it.Schema + "." + it.Name
+		}
 		if s.metrics != nil {
-			_ = s.metrics.Record(e.conn.ID, now, map[string]float64{service.MetricSizePrefix + it.Name: float64(it.TotalBytes)})
+			_ = s.metrics.Record(e.conn.ID, now, map[string]float64{key: float64(it.TotalBytes)})
 		}
 		row := sizeItem{TableSize: it}
 		if s.metrics != nil {
-			if pts, serr := s.metrics.Series(e.conn.ID, service.MetricSizePrefix+it.Name, now.Add(-7*24*time.Hour)); serr == nil {
+			if pts, serr := s.metrics.Series(e.conn.ID, key, now.Add(-7*24*time.Hour)); serr == nil {
 				if delta, hours, ok := service.GrowthOf(pts, it.TotalBytes); ok {
 					row.GrowthBytes = &delta
 					row.GrowthHours = hours

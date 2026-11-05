@@ -1,8 +1,11 @@
 package api
 
 import (
+	"errors"
 	"fmt"
 	"net/http"
+
+	"github.com/maintell/DBRover/internal/service"
 )
 
 // handleLockWaits 给出锁等待的「谁在等谁」（FR-MON-03）。
@@ -26,6 +29,11 @@ func (s *Server) handleLockWaits(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	items, err := e.exec.LockWaits(r.Context())
+	if errors.Is(err, service.ErrCollectTimeout) {
+		// 超时不算错误（docs/09 §2.1）；空列表 + degraded 说明，而不是 502。
+		writeJSON(w, http.StatusOK, map[string]any{"items": []any{}, "degraded": err.Error()})
+		return
+	}
 	if err != nil {
 		writeError(w, http.StatusBadGateway, "DB_METADATA_FAILED", "connection", err.Error(), "", true)
 		return

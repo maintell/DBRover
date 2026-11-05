@@ -68,6 +68,8 @@
 
 ### 3.2 慢查询
 
+> **实现口径**：面板只给「总耗时 / 次数 / 平均 / 行数」四列；下面表格里的 P95、最大单次、首次/末次出现**尚未实现**（见 §9.2）。
+
 **指纹聚合**（`sql_hash`）后展示：
 
 | 列 | 说明 |
@@ -281,12 +283,11 @@ CREATE TABLE slow_query_hourly (
 
 | 缺口 | 契约位置 | 影响 | 处置 |
 |---|---|---|---|
-| 慢查询 Top N（窗口增量） | §3.2 / 验收 3、4 | `driver.SlowQueryProvider`（判据 `Capabilities().SlowQueryStats`）+ `service.Executor.SlowQueries`。**差分在服务层**：`Executor` 每条连接一份 `slowSampler`，保存上一次的累计值，本次相减得到窗口增量；计数器被清过（`pg_stat_statements_reset` / `TRUNCATE performance_schema`）时差成负数，按新增处理而不是显示负数。**首次采样只能给累计值并标 `first_sample`**。排序用**窗口内**总耗时重排。降级：扩展/表不存在 → `available=false` + `hint`（PG 给出 preload + 重启 + `CREATE EXTENSION` 三步；MySQL 给出 performance_schema 的检查点）；超时 → `degraded` | `TestDiffSlowQueriesIsWindowDelta`（两次采样：累计 → 增量、窗口里没跑过的不出现、按窗口总耗时重排、平均耗时）、`TestDiffSlowQueriesSurvivesCounterReset`（清零后不显示负数）；真机验证见下 |
-| 锁等待（谁在等谁） | §3.4 / FR-MON-03（等待关系部分） | `driver.LockGraphProvider`（判据 `Capabilities().LockGraph`）。返回**边**而不是树。PG 用 `pg_blocking_pids`——PG 自己算好的「谁挡住了我」，比拿 `pg_locks` 自己拼准确（软阻塞与并行 worker 都在里面）；MySQL 用 `innodb_lock_waits` + `innodb_trx`，**等待时长取 `trx_wait_started`**（用事务开始时间会把「等了 2 秒」说成「等了 40 分钟」）。界面把空列表写成「当前没有锁等待」——只画空表，人分不清是没阻塞还是没接上 | `TestLockGraphCapabilityIsHonest`、`TestUIMetricsPanel`；真机 MySQL：造一个真实行锁等待 → `/monitor/locks` 返回 `5 → 4`、已等 7 秒；**内置浏览器**两种状态都看过——加锁前「锁等待（0）当前没有锁等待」，造锁后自动刷新成「锁等待（1） 5 / 4 / 9 / UPDATE acct.t …」 |
 | 阻塞链的树形视图与 metadata lock | §3.4 / FR-MON-03 | 只有边、界面上只有平表；**metadata lock 那一层没有** | 树可以由边算出来（按 `blocking_id` 串），留到界面重做时一起；MDL 要 MySQL 8 的 `performance_schema.metadata_locks`，与 `docs/07` 验收 11 是同一个卡点 |
 | 容量增长的可视化 | §3.5 / FR-MON-06 | 增长的**数值**已给出（每次读体量时顺手存进留存，按最早点算差值与跨度）；**没有曲线图**，也没有「按天聚合」 | 曲线要前端画图，等正式前端；聚合要等比降采样，等有「看一周」的真实需求 |
-| 巡检报告的导出与 Runbook 编排 | §5 / 验收 12 | 巡检能跑、分级正确，但**报告只能看不能导出**，也没有「自定义检查项 / 按 Runbook 编排」 | 导出复用已有的导出通道即可；自定义项要先把检查项做成数据而不是代码 |
+| 巡检的自定义检查项与 Runbook 编排 | §5 / 验收 12 | 五项检查与报告导出（`?format=markdown`）都已实现；**没有「自定义检查项」与「按 Runbook 编排」** | 自定义项要先把检查项做成数据（而不是代码分支）；编排要先把 Runbook 定义落成文件 |
 | 告警的另两条规则与外部推送 | §7 / FR-MON-08 | 已做「连接占用连续 3 次 >80%」与「阻塞链深度 >3」；**>5 分钟长事务**与**慢查询总耗时占比 >50%** 未做，也没有外部推送（v1 明确不做） | 长事务要 MySQL 侧的事务起始时间（`innodb_trx.trx_started`，现在没查）；占比要先有引擎侧的语句总耗时 |
+| 慢查询的 P95 / 最大单次 / 首末次 | §3.2 的列表头 | §3.2 的表格承诺了「P95、最大单次耗时、首次/末次出现」，实现只给了总耗时 / 次数 / 平均 / 行数——**那三列没有**。另外「按窗口内总耗时重排」只在驱动按**累计**取回的 TOP-N 子集内成立：新近爆发但历史排名靠后的语句根本不在结果里 | 补字段要驱动侧多给（PG 的 `stddev_exec_time` / `max_exec_time`；MySQL 的 `SUM_*` 需要更多列）；「新近爆发」需要按窗口取数而不是按累计取数，属于采样策略变更 |
 | 慢查询的小时聚合 | §4 的 `slow_query_hourly` | 表已设计但没写：面板给的是**窗口增量**，没有按小时落盘 | 与本片的 `metric_sample` 同源，加一张表 + 一个聚合任务即可，等有「看一周慢查询」的真实需求再做 |
 
 **验收现状**：12 项里 2、3、4、5、6、8、11、12 已由真实用例或真机验证覆盖；第 1 的预算现在由「六块数据并发取」保证（实测六端点合计 37–50ms，本机），但**没有精确的 click→render 计时工具**，仍缺一条自动化计时断言；第 7 只有等待关系与链深（没有树形与 MDL 层）；第 10 的停止条件写在定时器自己身上，只有界面门禁，缺「关闭后无新查询」的集成断言；第 9 卡在 Oracle 实例。

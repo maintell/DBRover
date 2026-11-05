@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -22,5 +23,9 @@ func (e *Executor) LockWaits(ctx context.Context) ([]driver.LockWait, error) {
 	}
 	cctx, cancel := context.WithTimeout(ctx, 3*time.Second)
 	defer cancel()
-	return lp.LockWaits(cctx)
+	items, err := lp.LockWaits(cctx)
+	if err != nil && (errors.Is(err, context.DeadlineExceeded) || errors.Is(cctx.Err(), context.DeadlineExceeded)) {
+		return nil, fmt.Errorf("%w：锁等待采集超过 3 秒", ErrCollectTimeout)
+	}
+	return items, err
 }

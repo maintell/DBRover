@@ -26,7 +26,7 @@ func (c *Connector) Counters(ctx context.Context) (driver.Counters, error) {
 	}
 	defer func() { _ = rows.Close() }()
 
-	var out driver.Counters
+	out := driver.Counters{Statements: -1}
 	for rows.Next() {
 		var name, val string
 		if err := rows.Scan(&name, &val); err != nil {

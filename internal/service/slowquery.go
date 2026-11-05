@@ -118,7 +118,16 @@ func (e *Executor) diffSlow(stats []driver.QueryStat, limit int) *SlowQueriesRes
 		}
 		items = append(items, it)
 	}
-	e.slow.prev, e.slow.at = cur, now
+	// 基线**只增不删**：巡检只取 5 条、面板取 20 条，若按本次结果覆盖整张表，
+	// 下一次面板读就会把另外 15 条当成「第一次见到」而拿累计值冒充窗口增量
+	// （first_sample 还是 false，等于骗人）。合并的代价只是表里留一些陈旧的指纹。
+	if e.slow.prev == nil {
+		e.slow.prev = make(map[string]prevStat, len(cur))
+	}
+	for k, v := range cur {
+		e.slow.prev[k] = v
+	}
+	e.slow.at = now
 
 	res := &SlowQueriesResult{Items: items, FirstSample: !had, CollectedAt: now, Available: true}
 	if had {
