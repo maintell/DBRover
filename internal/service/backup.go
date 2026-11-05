@@ -61,6 +61,12 @@ type BackupHeader struct {
 	CreatedAt     string `json:"created_at"`
 	Engine        string `json:"engine"`
 	Catalog       string `json:"catalog,omitempty"`
+	// Type 是这个容器装了什么：`full`（结构 + 数据）或 `schema`（只有结构）。
+	//
+	// 记在头里而不是只记在请求里：恢复与 inspect 都要知道「这个文件里有没有数据」——
+	// 一个只有结构的备份拿去恢复，得到的是空表，而用户在 inspect 时就应该看见这一点。
+	// 老容器没有这个字段（omitempty），按 full 处理。
+	Type string `json:"type,omitempty"`
 	// SourceID 是备份来源的身份串（由调用方提供：sqlite 用绝对路径、网络引擎用
 	// host:port/库名）。恢复时用它挡住「往源库上恢复」这种误操作。
 	//
@@ -89,6 +95,9 @@ type BackupRequest struct {
 	Resume bool
 	// SourceID 写进容器头，用于恢复时识别源库（见 BackupHeader.SourceID）。
 	SourceID string
+	// Type 决定每段写什么：空或 `full` 写「建表 + INSERT」，`schema` 只写建表与索引。
+	// 其它取值一律拒绝（含 `data`：只灌数据要求目标端结构已存在且完全一致，v1 不做）。
+	Type string
 	// Compress 对每段做 gzip。文本型 SQL 通常能压到原来的 1/5～1/10。
 	Compress bool
 	// Passphrase 非空时加密每段（AES-256-GCM，密钥由 PBKDF2 派生）。
@@ -98,6 +107,37 @@ type BackupRequest struct {
 	// afterSection 是测试用的失败注入点：每写完一张表调用一次，返回错误即中断。
 	// 用它模拟「中途被 kill」，比真的杀进程稳定，且能精确控制断在第几张表。
 	afterSection func(table string) error
+}
+
+// 备份类型。
+const (
+	// BackupTypeFull 是结构 + 数据（默认）。
+	BackupTypeFull = "full"
+	// BackupTypeSchema 只有结构：建表 + 索引，不读任何行。
+	//
+	// 用途是「建空库」「结构比对」「把结构带走给人看」——这些场景拿一个带全量数据的
+	// 文件既慢又危险（多一份业务数据落在磁盘上）。
+	BackupTypeSchema = "schema"
+	// BackupTypeData 只用于给出一句明确的拒绝理由，不做实现。
+	BackupTypeData = "data"
+)
+
+// normalizeBackupType 把请求里的类型收敛成 full / schema。
+//
+// 为什么对 `data` 单独给一句理由：只说「不支持」的话，用户会以为是参数写法不对，
+// 反复试；说清「要目标端结构已存在且完全一致」才知道该怎么做。
+func normalizeBackupType(t string) (string, error) {
+	switch strings.ToLower(strings.TrimSpace(t)) {
+	case "", BackupTypeFull:
+		return BackupTypeFull, nil
+	case BackupTypeSchema:
+		return BackupTypeSchema, nil
+	case BackupTypeData:
+		return "", errors.New("备份类型 data（仅数据）未实现：它要求目标端结构已存在且完全一致，v1 还没有这个能力；" +
+			"要灌数据请先恢复结构再用 /exec 或 dbrover exec 手工导")
+	default:
+		return "", fmt.Errorf("不认识的备份类型 %q：只支持 full（默认）与 schema", t)
+	}
 }
 
 // Backup 把库（或指定表）写成一个 DBR 容器。
@@ -143,7 +183,10 @@ func (e *Executor) Backup(ctx context.Context, req BackupRequest, w io.Writer) (
 
 	for _, name := range tables {
 		var sec bytes.Buffer
-		if _, err := e.Export(ctx, ExportRequest{Table: name, Format: ExportSQL}, &sec); err != nil {
+		if _, err := e.Export(ctx, ExportRequest{
+			Table: name, Format: ExportSQL,
+			SchemaOnly: header.Type == BackupTypeSchema,
+		}, &sec); err != nil {
 			return nil, fmt.Errorf("导出 %s: %w", name, err)
 		}
 		if err := writeBackupSection(w, sec.Bytes(), req.Compress, key); err != nil {
@@ -231,8 +274,18 @@ func BackupSummary(h *BackupHeader) string {
 	if h.Flags&backupFlagEncrypted != 0 {
 		packed += " · 已加密"
 	}
-	fmt.Fprintf(&b, "DBR 备份 v%d · %s · %s%s · %d 个对象\n",
-		h.FormatVersion, h.Engine, h.CreatedAt, packed, len(h.Objects))
+	// 类型必须露出来：一个只有结构的备份拿去恢复会得到空表，用户在 inspect 这一步
+	// 就该看见「这里面没有数据」，而不是恢复之后才发现。老容器没有 Type 字段，按 full 说。
+	kind := h.Type
+	if kind == "" {
+		kind = BackupTypeFull
+	}
+	label := "结构 + 数据"
+	if kind == BackupTypeSchema {
+		label = "仅结构（无数据）"
+	}
+	fmt.Fprintf(&b, "DBR 备份 v%d · %s · %s · %s%s · %d 个对象\n",
+		h.FormatVersion, h.Engine, label, h.CreatedAt, packed, len(h.Objects))
 	for _, o := range h.Objects {
 		fmt.Fprintf(&b, "  %s %s\n", o.Kind, o.Name)
 	}
@@ -339,6 +392,13 @@ func (e *Executor) BackupToFile(ctx context.Context, req BackupRequest, path str
 			return nil, fmt.Errorf("读取已写入的头部失败（需整库重跑）：%w", err)
 		}
 		header = existing
+		// 续跑沿用文件里的类型：段格式必须与已写入的段一致，中途改类型会把
+		// 「建表 + INSERT」与「只有建表」混进同一个文件。
+		if t, terr := normalizeBackupType(req.Type); terr != nil {
+			return nil, terr
+		} else if header.Type != "" && t != header.Type {
+			return nil, fmt.Errorf("续跑不能改备份类型：文件里是 %s，本次要求 %s", header.Type, t)
+		}
 
 		if err := f.Truncate(pos); err != nil {
 			return nil, fmt.Errorf("截断到最后一条检查点: %w", err)
@@ -403,7 +463,10 @@ func (e *Executor) BackupToFile(ctx context.Context, req BackupRequest, path str
 			continue
 		}
 		var sec bytes.Buffer
-		if _, err := e.Export(ctx, ExportRequest{Table: name, Format: ExportSQL}, &sec); err != nil {
+		if _, err := e.Export(ctx, ExportRequest{
+			Table: name, Format: ExportSQL,
+			SchemaOnly: header.Type == BackupTypeSchema,
+		}, &sec); err != nil {
 			return nil, fmt.Errorf("导出 %s: %w", name, err)
 		}
 		if err := writeBackupSection(f, sec.Bytes(), header.Flags&backupFlagCompressed != 0, writeKey); err != nil {
@@ -428,6 +491,10 @@ func (e *Executor) BackupToFile(ctx context.Context, req BackupRequest, path str
 
 // backupPlan 解析要导的表并构造头部（两条写入路径共用）。
 func (e *Executor) backupPlan(ctx context.Context, req BackupRequest) ([]string, *BackupHeader, error) {
+	kind, err := normalizeBackupType(req.Type)
+	if err != nil {
+		return nil, nil, err
+	}
 	tables := req.Tables
 	if len(tables) == 0 {
 		objs, err := e.conn.Meta().Objects(ctx, "", "", model.KindTable, model.KindView)
@@ -445,6 +512,7 @@ func (e *Executor) backupPlan(ctx context.Context, req BackupRequest) ([]string,
 		FormatVersion: backupFormatVersion,
 		CreatedAt:     time.Now().UTC().Format(time.RFC3339),
 		Engine:        string(e.conn.Engine()),
+		Type:          kind,
 		SourceID:      req.SourceID,
 	}
 	for _, name := range tables {

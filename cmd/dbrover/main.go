@@ -91,7 +91,7 @@ func usage() {
   dbrover serve  [-addr 127.0.0.1:7788] [-token <token>] [-allow-remote] [-open] [-audit <path>] [-audit-anchor <path>] [-metrics <path>]
   dbrover tunnel -via user@hop1:22[,user@hop2:22] -to host:port (-password-stdin | -key <path>)\n                 [-known-hosts <path>] [-accept-host-key]
   dbrover secret (set|clear|status) [-service dbrover/agent] [-account api-key]  # 口令从 stdin 读
-  dbrover backup (create|inspect) [-db <file> ...] [-out <文件.dbr>] [-resume] [-compress] [-passphrase-stdin]
+  dbrover backup (create|inspect) [-db <file> ...] [-out <文件.dbr>] [-type full|schema] [-resume] [-compress] [-passphrase-stdin]
   dbrover restore -file <文件.dbr> -db <file> -env ... -yes  # 同引擎恢复
   # 目标已有同名对象时，还要 -confirm-target <目标名>（库名或 SQLite 文件路径）
   # 加密备份要 -passphrase-stdin（口令从 stdin 读，不接受命令行参数）
@@ -151,13 +151,11 @@ func (c *connFlags) bind(fs *flag.FlagSet) {
 	fs.BoolVar(&c.rw, "rw", false, "显式声明读写：生产/预发默认只读，需写操作时用本开关")
 }
 
-func (c *connFlags) open() (driver.Connector, model.Environment, model.AccessMode, error) {
-	if c.ro && c.rw {
-		return nil, "", "", errors.New("-ro 与 -rw 不能同时使用")
-	}
-	engine := normalizeEngine(c.engine)
-	env := model.ParseEnvironment(c.env)
-
+// accessMode 按「环境默认 + -ro/-rw 覆盖」算出访问模式。
+//
+// 抽出来是为了让写操作能在**打开连接之前**就用它拦住：只读连接打开一个不存在的
+// SQLite 文件会先报「文件不存在」，用户于是去查路径，真正的原因却是「环境默认只读」。
+func (c *connFlags) accessMode(env model.Environment) model.AccessMode {
 	// 默认跟随环境：生产/预发/未声明 → 只读；测试/本地 → 读写。
 	// 需要写生产时必须显式 -rw，这是刻意抬高摩擦。
 	mode := model.DefaultAccessMode(env)
@@ -167,6 +165,17 @@ func (c *connFlags) open() (driver.Connector, model.Environment, model.AccessMod
 	if c.rw {
 		mode = model.AccessReadWrite
 	}
+	return mode
+}
+
+func (c *connFlags) open() (driver.Connector, model.Environment, model.AccessMode, error) {
+	if c.ro && c.rw {
+		return nil, "", "", errors.New("-ro 与 -rw 不能同时使用")
+	}
+	engine := normalizeEngine(c.engine)
+	env := model.ParseEnvironment(c.env)
+
+	mode := c.accessMode(env)
 
 	cfg := driver.ConnectConfig{
 		Name:        "cli",
@@ -700,6 +709,7 @@ func cmdBackup(args []string) error {
 		cf.bind(fs)
 		out := fs.String("out", "", "输出文件（.dbr）")
 		resume := fs.Bool("resume", false, "接着上次未完成的备份继续（需要 <文件>.progress）")
+		typ := fs.String("type", "full", "备份类型：full（结构+数据，默认）或 schema（只有建表与索引，不读数据）")
 		compress := fs.Bool("compress", false, "对每段做 gzip（文本型 SQL 通常能压到 1/5～1/10）")
 		passStdin := fs.Bool("passphrase-stdin", false, "从标准输入读加密口令（不从命令行参数读）")
 		if err := fs.Parse(args[1:]); err != nil {
@@ -727,6 +737,7 @@ func cmdBackup(args []string) error {
 		}
 		h, err := ex.BackupToFile(context.Background(), service.BackupRequest{
 			Resume:     *resume,
+			Type:       *typ,
 			SourceID:   cf.sourceID(),
 			Compress:   *compress,
 			Passphrase: pass,
@@ -739,7 +750,7 @@ func cmdBackup(args []string) error {
 			}
 			return fmt.Errorf("%w\n提示：修复后用同样的命令加 -resume 可续跑（检查点：%s.progress）", err, *out)
 		}
-		fmt.Printf("已写入 %s：%d 个对象（%s）\n", *out, len(h.Objects), h.Engine)
+		fmt.Printf("已写入 %s：%d 个对象（%s，类型 %s）\n", *out, len(h.Objects), h.Engine, h.Type)
 		return nil
 
 	default:
@@ -773,6 +784,13 @@ func cmdRestore(args []string) error {
 		return err
 	}
 	defer func() { _ = f.Close() }()
+
+	// 恢复是写操作：先把「当前连接根本不能写」这件事说清楚。
+	// 否则只读连接打开一个不存在的 SQLite 文件会先报「文件不存在」，
+	// 用户去查路径，真正的原因却是「-env 没给，默认按只读处理」。
+	if mode := cf.accessMode(model.ParseEnvironment(cf.env)); !mode.AllowsWrite() {
+		return fmt.Errorf("恢复会写目标库，但当前连接是只读（-env %s 默认只读）：加 -env local（或 -rw）再试", cf.env)
+	}
 
 	conn, env, mode, err := cf.open()
 	if err != nil {

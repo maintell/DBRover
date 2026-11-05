@@ -21,6 +21,7 @@ docker run -d --name dbrover-pg  -e POSTGRES_PASSWORD=testpass     -e POSTGRES_D
 | 脚本 | 验什么 | 需要真机 |
 |---|---|---|
 | `bulk-20k-sqlite.ps1` | 分批批量修改：2 万行 20 批、NDJSON 进度逐条到达、`curl --max-time` 中途断开只保留已提交的批、预案仍有效可重新提交补齐 | 不需要 |
+| `backup-schema-only.ps1` | 结构备份（docs/08 §2.1）：`-type schema` 真的不含数据（体积比 full 小、段里没有 INSERT）、恢复后两张表与独立索引都在且行数为 0、`-type data` 被拒并说明未实现、恢复不带 `-env` 时报的是「连接只读」而不是「文件不存在」 | 不需要 |
 | `stop-on-error.ps1` | 脚本语义（docs/05 §2.1）：默认遇错即停（前两条结果各自带回、第三条不跑）、`stop_on_error=false` 时三条都跑且失败那条只标自己；顺带钉住 `/query` 只接单条只读语句（多语句 400 `EXEC_INVALID`）与单条能开游标取页 | 不需要 |
 | `bulk-engines.ps1 -Engine mysql -Port 13306 -User root` | 同上但 3000 行 3 批，重点是**逐批都是「改成相同值」**时 `RowsAffected` 仍等于本批主键数（MySQL 的 `clientFoundRows`）；另含复合主键表 1500 行（批大小自动降到 200） | MySQL 或 PostgreSQL |
 | `precision.ps1 -Engine mysql -Port 13306 -User root` | `BIGINT` 上下界与 `NUMERIC(38,10)` 极值在「独立 SQL → 表浏览接口 → 原样写回 → 改成新精度值」全链路逐字符一致；反向验证 JSON 数字形态的大整数被 `400 NUMBER_PRECISION_LOSS` 拒绝 | MySQL 或 PostgreSQL |
@@ -77,6 +78,7 @@ docker run -d --name dbrover-my -e MYSQL_ROOT_PASSWORD=testpass -e MYSQL_DATABAS
 |---|---|---|
 | `bulk-20k-sqlite.ps1` | SQLite | 通过：20000 行 / 20 条进度 / 中止保留 6000 行 / 重提补齐（幂等） |
 | `stop-on-error.ps1` | SQLite | 通过：默认 2 条结果（第 2 条失败、第 3 条未跑）→ 继续 3 条结果 → `/query` 多语句 `EXEC_INVALID` → 单条可开游标取页 |
+| `backup-schema-only.ps1` | SQLite | 通过：full 675 B / schema 587 B；恢复出 2 表 + `idx_a_v` 且 0 行；`data` 与缺 `-env` 的恢复各给出明确拒绝理由 |
 
 ## 最近一次全跑（2026-11-05，HEAD bebe831）
 

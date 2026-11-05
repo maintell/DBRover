@@ -156,6 +156,7 @@ bin/dbrover.exe serve -addr 127.0.0.1:7788 -audit ./audit.jsonl
 
 # 备份与恢复（容器格式：头 + 每张表一段 SQL；可选 gzip / AES-256-GCM）
 bin/dbrover.exe backup create -db demo.db -env local -out demo.dbr -compress
+bin/dbrover.exe backup create -db demo.db -env local -out demo-schema.dbr -type schema  # 只要结构
 bin/dbrover.exe backup inspect demo.dbr          # 只读头，不连库
 bin/dbrover.exe restore -file demo.dbr -db dst.db -env local -yes
 
@@ -198,6 +199,7 @@ bin/dbrover.exe migrate plan -engine mysql -host H -user U -db S -table t -to-en
 | `secret` | `-service` / `-account` | 凭据库里的条目名；口令一律从 stdin 读 |
 | `backup create\|inspect` | `-db <file>`（可多次） | 要备份的连接 |
 | | `-out <文件.dbr>` | 输出文件 |
+| | `-type full\|schema` | 备份类型：`full`（结构 + 数据，默认）或 `schema`（只有建表与索引，不读任何行；用途是建空库 / 结构比对） |
 | | `-resume` | 接着未完成的备份继续（读 `<文件>.progress`） |
 | | `-compress` | 每段 gzip |
 | | `-passphrase-stdin` | 加密口令从 stdin 读（不接受命令行参数） |

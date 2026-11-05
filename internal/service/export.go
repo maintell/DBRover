@@ -65,6 +65,39 @@ type ExportRequest struct {
 	// PageSize 是每次从游标取多少行。它是内存上限的唯一来源：
 	// 导出永远不把整表读进内存，而不是「先加载再写文件」。
 	PageSize int
+	// SchemaOnly 只要结构（建表 + 索引），不读任何行。
+	//
+	// 只对 sql 格式有意义：其它格式没有「结构」这个概念。它的用途是
+	// `backup -type schema`（建空库、结构比对），所以必须与 sql 导出**共用同一段**
+	// DDL 生成逻辑——另写一份迟早与导出分叉（索引漏补、引号风格不同）。
+	SchemaOnly bool
+}
+
+// writeSQLPreamble 写 sql 导出的前导：说明注释 + 建表语句 + 该方言需要单补的索引。
+//
+// 抽出来是因为有两条路径要用它：正常导出（结构 + 数据）与只要结构的导出。
+// 复制一份的话，SQLite 的独立索引这种「容易漏」的细节迟早只在一处被修。
+func (e *Executor) writeSQLPreamble(ctx context.Context, bw *bufio.Writer, table string, td *model.TableDetail) error {
+	fmt.Fprintf(bw, "-- DBRover 导出：%s（%s）\n-- 同引擎回放；跨引擎请先核对类型映射。\n\n",
+		table, e.conn.Engine())
+	ddl, err := e.TableDDL(ctx, model.ObjectRef{Kind: model.KindTable, Name: table})
+	if err != nil {
+		return fmt.Errorf("导出需要建表语句：%w", err)
+	}
+	bw.WriteString(strings.TrimRight(ddl, "; \n") + ";\n")
+	// SQLite 的建表语句不含独立索引，要单独补；漏了就等于静默丢掉唯一性与
+	// 查询性能。MySQL / PG 的 DDL 已经带上索引，再补会撞名（真机验证过）。
+	// 约束背后的索引一律跳过：它随建表语句一起重建。
+	if !e.dialect.DDLIncludesIndexes() {
+		for _, ix := range td.Indexes {
+			if ix.Primary || ix.Constraint || len(ix.Columns) == 0 {
+				continue
+			}
+			bw.WriteString(e.dialect.CreateIndexSQL(quotePath(e, table), ix.Name, ix.Columns, ix.Unique) + ";\n")
+		}
+	}
+	bw.WriteString("\n")
+	return nil
 }
 
 // ExportResult 是导出统计。
@@ -127,6 +160,22 @@ func (e *Executor) Export(ctx context.Context, req ExportRequest, w io.Writer) (
 		q += " ORDER BY " + strings.Join(order, ", ")
 	}
 
+	// 只要结构：不建会话、不取游标，写完结建语句就返回（`backup -type schema` 走这里）。
+	// 放在这儿而不是写完之后再截断：截断要靠字符串匹配删 INSERT，删错一行就是数据错乱。
+	if req.SchemaOnly {
+		if format != ExportSQL {
+			return nil, fmt.Errorf("%w: 只要结构时只能用 sql 格式", ErrExportFormat)
+		}
+		sbw := bufio.NewWriterSize(w, 64*1024)
+		if err := e.writeSQLPreamble(ctx, sbw, req.Table, td); err != nil {
+			return nil, err
+		}
+		if err := sbw.Flush(); err != nil {
+			return nil, err
+		}
+		return &ExportResult{Columns: len(names), Duration: time.Since(started)}, nil
+	}
+
 	sess, err := e.conn.Acquire(ctx)
 	if err != nil {
 		return nil, err
@@ -145,25 +194,9 @@ func (e *Executor) Export(ctx context.Context, req ExportRequest, w io.Writer) (
 
 	// SQL 脚本先写头与建表语句：拿到文件就能直接回放，不用另找结构。
 	if format == ExportSQL {
-		fmt.Fprintf(bw, "-- DBRover 导出：%s（%s）\n-- 同引擎回放；跨引擎请先核对类型映射。\n\n",
-			req.Table, e.conn.Engine())
-		ddl, derr := e.TableDDL(ctx, model.ObjectRef{Kind: model.KindTable, Name: req.Table})
-		if derr != nil {
-			return nil, fmt.Errorf("导出需要建表语句：%w", derr)
+		if err := e.writeSQLPreamble(ctx, bw, req.Table, td); err != nil {
+			return nil, err
 		}
-		bw.WriteString(strings.TrimRight(ddl, "; \n") + ";\n")
-		// SQLite 的建表语句不含独立索引，要单独补；漏了就等于静默丢掉唯一性与
-		// 查询性能。MySQL / PG 的 DDL 已经带上索引，再补会撞名（真机验证过）。
-		// 约束背后的索引一律跳过：它随建表语句一起重建。
-		if !e.dialect.DDLIncludesIndexes() {
-			for _, ix := range td.Indexes {
-				if ix.Primary || ix.Constraint || len(ix.Columns) == 0 {
-					continue
-				}
-				bw.WriteString(e.dialect.CreateIndexSQL(table, ix.Name, ix.Columns, ix.Unique) + ";\n")
-			}
-		}
-		bw.WriteString("\n")
 	}
 
 	switch format {
