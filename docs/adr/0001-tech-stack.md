@@ -1,6 +1,6 @@
 # ADR-0001 · 技术栈与进程模型
 
-- 状态：**建议（待确认）**
+- 状态：**已采纳（2026-11-06，桌面壳部分由 [ADR-0017](0017-desktop-shell-and-settings.md) 落地）**
 - 日期：2026-11-02
 - 影响面：全项目
 
@@ -71,7 +71,7 @@
 
 **Monaco 而非 CodeMirror**：SQL 高亮的方言覆盖、补全 API、性能（大文件）都更成熟；且用户对 VS Code 的交互有肌肉记忆。
 
-### 7. 桌面壳：Wails v2（建议）
+### 7. 桌面壳：Wails v2（已采纳）
 
 | 维度 | Wails v2 | Tauri 2 |
 |---|---|---|
@@ -85,7 +85,7 @@
 
 **关键前提**：因为核心是 loopback 服务、UI 是 SPA，**壳可替换**。若 Wails 在 macOS/Linux 打包失败，换 Tauri 或「托盘 + 系统浏览器」只影响壳层。因此这个决策的风险低。
 
-**当前状态（2026-11-03）**：壳仍未做；但「轻量形态」已经可用——`dbrover serve -open` 启动后等 `/api/v1/health` 就绪，再用系统默认浏览器打开带 token 的地址（各平台一条命令，不引依赖）。它不构成对 Wails 决策的替代，只是让「没有壳时也能用」这件事先成立；Wails 是否上，仍待确认。
+**当前状态（2026-11-06）**：已按 [ADR-0017](0017-desktop-shell-and-settings.md) 采纳 Wails v2，落地 `cmd/dbrover-desktop`——Windows 优先、独立 module、桌面窗口不监听端口，与 `serve` 共用同一份 `api.Server` 与 `internal/webui`。`dbrover serve -open` 仍保留为轻量形态（各平台一条命令、不引依赖）。macOS / Linux 桌面壳因 Wails 需要 CGO、与本仓库免 CGO 交叉编译矩阵冲突，本轮不发，见 ADR-0017 §7。
 
 ---
 
@@ -111,7 +111,7 @@
 | 项 | 方法 | 何时 |
 |---|---|---|
 | `go-ora` 能否覆盖 Oracle 主要场景 | 连真实实例，跑 `drivertest` 基础套件 | M1 内 POC |
-| Wails 在 macOS/Linux 的打包可行性 | CI 试构建一次 | M1 内 |
+| Wails 在 macOS/Linux 的打包可行性 | CI 试构建一次 | 推迟：ADR-0017 决定本轮只发 Windows（其余平台需 CGO） |
 | `modernc.org/sqlite` 在万级元数据对象下的查询性能 | 基准测试 | M1 |
 
 ---
@@ -121,3 +121,4 @@
 - [02-architecture](../02-architecture.md)
 - [ADR-0002](0002-agent-tool-boundary.md)
 - [ADR-0003](0003-plan-apply-separation.md)
+- [ADR-0017 桌面壳、进程模型与服务端设置](0017-desktop-shell-and-settings.md)

@@ -426,7 +426,9 @@ type Provider interface {
 
 ### 8.3 配置
 
-当前用进程环境变量，`dbrover serve` 启动时读取：
+配置有三个来源，优先级见下。界面「设置」面板写的是持久化设置（`GET/PATCH /api/v1/settings`，见 [docs/12 §2.8.1](12-api-contract.md)）；环境变量用于 CI 与临时覆盖；API Key 存 OS 凭据库。`desktop` 与 `serve` 共用同一份设置。
+
+`dbrover serve` / 桌面进程启动时读取环境变量：
 
 | 变量 | 必填 | 说明 |
 |---|---|---|
@@ -438,7 +440,8 @@ type Provider interface {
 | 项 | 状态 |
 |---|---|
 | 自定义 `base_url`（内网网关、代理） | ✅ 已实现 |
-| API Key 存 OS 凭据库 | ✅ Windows 凭据管理器（`internal/infra/secret`）。用法：`echo <key> \| dbrover secret set`（口令只从 stdin 读，不接受命令行参数），`dbrover secret status` 只报有没有、不打印值。`serve` 取 key 的顺序是「环境变量 → 凭据库」，所以 CI 仍可用环境变量临时覆盖。非 Windows 平台返回 `ErrUnsupported`，**不退化成明文文件** |
+| API Key 存 OS 凭据库 | ✅ Windows 凭据管理器（`internal/infra/secret`）。界面「设置」面板与 `echo <key> \| dbrover secret set` 写的是同一把 key；`GET /settings` 只回 `api_key_configured`，**永不回显值**。优先级：设置面板写入的 key / 环境变量 → 凭据库。非 Windows 平台返回 `ErrUnsupported`，**不退化成明文文件** |
+| 设置持久化（桌面/团队一致） | ✅ `internal/infra/settings` 单文件 JSON（0600）存非敏感项，base_url/model/context_tokens 作用于下一次会话（[ADR-0017](adr/0017-desktop-shell-and-settings.md)） |
 | 每个连接绑定默认 provider/model | ⛔ 未实现：一条 `serve` 只有一个模型配置 |
 | 每会话 token 消耗 | ⚠️ 服务端按轮汇总并返回（`usage`），未落库、未按连接汇总 |
 

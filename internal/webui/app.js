@@ -68,6 +68,9 @@ const API = {
   agentMessages: '/api/v1/agent/conversations/:id/messages',
   agentExport: '/api/v1/agent/conversations/:id/export',
   agentApproval: '/api/v1/agent/conversations/:id/approvals/:pid',
+  // ui2.js：设置面板与连接管理用的两条路径，同样由 TestWebuiUsesKnownPaths 守着。
+  settings: '/api/v1/settings',
+  conn: '/api/v1/connections/:id',
 };
 
 // path 把 :param 占位符替换为实际值。
@@ -184,6 +187,10 @@ async function applyStream(url, body, ctrl, onProgress) {
 // ---------- 令牌 ----------
 
 function readHashToken() {
+  // 桌面模式：令牌由 host.DesktopHandler 注入到 /bootstrap.js，不经过地址栏。
+  if (typeof window !== 'undefined' && window.DBRoverBootstrapToken) {
+    return window.DBRoverBootstrapToken;
+  }
   const m = location.hash.match(/[#&]t=([^&]+)/);
   if (!m) return '';
   const t = decodeURIComponent(m[1]);

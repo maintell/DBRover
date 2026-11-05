@@ -69,9 +69,44 @@ jobs:
             dbrover_*.tar.gz
           if-no-files-found: error
 
+  # 桌面壳（Wails v2 / WebView2）：只发 Windows，因为 macOS/Linux 的 Wails 需要
+  # CGO，与本仓库的 CGO_ENABLED=0 交叉编译矩阵冲突（ADR-0017 §7）。
+  # 与 CLI 同属一条流水线、一个并发组、一个 publish；不新建第二条发版路径。
+  desktop:
+    name: build desktop windows/amd64
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Build desktop shell
+        shell: pwsh
+        env:
+          CGO_ENABLED: '0'
+        run: |
+          $ErrorActionPreference = 'Stop'
+          New-Item -ItemType Directory -Force out | Out-Null
+          Push-Location cmd/dbrover-desktop
+          # -H=windowsgui：双击启动不弹控制台窗口。Wails 在 Windows 走 go-webview2
+          # （纯 Go syscall），CGO_ENABLED=0 即可，WebView2Loader 由 go-webview2 内嵌。
+          go build -trimpath -ldflags "-s -w -H=windowsgui" -o ../../out/dbrover-desktop.exe .
+          Pop-Location
+          $zip = "dbrover-desktop_$($env:GITHUB_REF_NAME)_windows_amd64.zip"
+          Compress-Archive -Path out/dbrover-desktop.exe -DestinationPath $zip
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dbrover-desktop-windows-amd64
+          path: dbrover-desktop_*.zip
+          if-no-files-found: error
+
   publish:
     name: publish release
-    needs: build
+    needs: [build, desktop]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4

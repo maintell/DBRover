@@ -144,9 +144,11 @@
 
 ### 4.5 桌面壳
 
-**选择：Wails v2**，理由见 [ADR-0001](adr/0001-tech-stack.md)。
+**选择：Wails v2（已采纳）**，理由见 [ADR-0001](adr/0001-tech-stack.md)，落地细节见 [ADR-0017](adr/0017-desktop-shell-and-settings.md)。
 
-关键点：因为核心是 loopback 服务、界面是纯 SPA，**壳是可替换的**。如果 Wails 在 macOS/Linux 的 CGO 打包出问题，换成 Tauri 或「托盘程序 + 系统浏览器」都只影响壳层，不影响内核与界面。
+桌面壳（`cmd/dbrover-desktop`，独立 Go module）与 `dbrover serve` 共用同一份 `api.Server` 与 `internal/webui`。桌面形态把 `s.Handler()` 交给 Wails 的 `assetserver.Options{Handler: ...}`（`Assets` 留空），WebView2 的请求在**进程内**派发，**不监听任何 TCP 端口**；令牌由进程内的 `/bootstrap.js` 注入窗口，不打印、不落盘。关窗即关闭连接、审计与留存并退出。
+
+关键点：因为核心是 HTTP Handler、界面是纯 SPA，**壳是可替换的**。如果 Wails 在 macOS/Linux 的 CGO 打包出问题，换成 Tauri 或「托盘程序 + 系统浏览器」都只影响壳层，不影响内核与界面。本轮按 ADR-0017 只发 Windows 桌面包（其余平台仍用 `dbrover serve -open`）。
 
 ---
 

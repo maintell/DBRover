@@ -34,8 +34,8 @@ DBRover/
 ├─ docs/                  # 设计与契约，中文
 │  └─ adr/
 ├─ cmd/
-│  ├─ dbrover/            # CLI / serve 入口（已实现 version/health/tables/exec）
-│  └─ dbrover-desktop/    # 桌面壳入口（待实现，Wails）
+│  ├─ dbrover/            # CLI / serve 入口
+│  └─ dbrover-desktop/    # 桌面壳（Wails v2，独立 module，见 ADR-0017）
 ├─ internal/
 │  ├─ api/                # HTTP/WS 层，只做协议转换（待实现）
 │  ├─ service/            # 业务编排，权限判断唯一位置（执行门已实现）
@@ -46,8 +46,9 @@ DBRover/
 │  │  ├─ sqlite/          # 已实现
 │  │  └─ pg/ mysql/ mssql/ oracle/ redis/ mongo/ es/   # 待实现
 │  ├─ policy/             # 风险分级 R0–R4、摩擦分级 F0–F5
+│  ├─ host/               # 两种形态共用的装配层（连接器工厂、审计/指标/设置、桌面 Handler）
 │  ├─ agent/              # Agent 运行时：Provider、工具面、执行循环（切片一已实现）
-│  ├─ infra/              # SSH 隧道、凭据库、元数据存储（待实现）
+│  ├─ infra/              # SSH 隧道、凭据库、服务端设置存储
 │  └─ model/              # 领域模型与 DTO
 ├─ web/                   # 前端（待实现）
 ├─ scripts/check.ps1      # 本地质量检查
@@ -124,7 +125,7 @@ pwsh -File scripts/check.ps1 -TmpDir $env:LOCALAPPDATA\Temp   # 临时目录所�
 - 打包发版**只由 tag 触发**（`v*` / `desktop-v*`），PR 只跑测试，不启动打包 runner。
 - 一条 tag 只应产生一条发布流水线，并发组固定不按事件区分。
 - 发版前的质量检查（格式、vet、单测、README/文档与代码一致性、CHANGELOG）**在本地完成**，不塞进 release job。
-- 产物：`dbrover`（多平台 CLI/serve）、`dbrover-desktop`（安装包）、容器镜像。
+- 产物：`dbrover`（多平台 CLI/serve）、`dbrover-desktop`（Windows 桌面 exe，由 release.yml 的 desktop job 产出）。
 
 **对应文件**
 

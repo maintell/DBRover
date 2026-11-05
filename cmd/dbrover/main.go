@@ -15,13 +15,8 @@ import (
 	"text/tabwriter"
 	"time"
 
-	"github.com/maintell/DBRover/internal/api"
 	"github.com/maintell/DBRover/internal/driver"
-	"github.com/maintell/DBRover/internal/driver/mysql"
-	"github.com/maintell/DBRover/internal/driver/pg"
-	"github.com/maintell/DBRover/internal/driver/redis"
-	"github.com/maintell/DBRover/internal/driver/sqlite"
-	"github.com/maintell/DBRover/internal/infra/secret"
+	"github.com/maintell/DBRover/internal/host"
 	"github.com/maintell/DBRover/internal/infra/tunnel"
 	"github.com/maintell/DBRover/internal/model"
 	"github.com/maintell/DBRover/internal/service"
@@ -216,7 +211,7 @@ func (c *connFlags) open() (driver.Connector, model.Environment, model.AccessMod
 		}
 	}
 
-	opened, err := openConnector(engine, cfg)
+	opened, err := host.OpenConnector(engine, cfg)
 	if err != nil {
 		return nil, "", "", err
 	}
@@ -369,42 +364,6 @@ func cmdExec(args []string) error {
 	return nil
 }
 
-// openConnector 是按引擎分发的连接器工厂。api 层只接受函数，不认识具体驱动。
-func openConnector(engine model.Engine, cfg driver.ConnectConfig) (any, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-	defer cancel()
-
-	switch engine {
-	case model.EngineSQLite:
-		c := sqlite.New()
-		if err := c.Open(ctx, cfg); err != nil {
-			return nil, err
-		}
-		return c, nil
-	case model.EngineMySQL, model.EngineMariaDB:
-		c := mysql.New()
-		if err := c.Open(ctx, cfg); err != nil {
-			return nil, err
-		}
-		return c, nil
-	case model.EnginePostgres:
-		c := pg.New()
-		if err := c.Open(ctx, cfg); err != nil {
-			return nil, err
-		}
-		return c, nil
-	case model.EngineRedis:
-		// 非关系型：实现的是 driver.KVConnector，不是 driver.Connector（ADR-0007）。
-		c := redis.New()
-		if err := c.Open(ctx, cfg); err != nil {
-			return nil, err
-		}
-		return c, nil
-	default:
-		return nil, fmt.Errorf("暂不支持的引擎: %s", engine)
-	}
-}
-
 func cmdServe(args []string) error {
 	fs := flag.NewFlagSet("serve", flag.ExitOnError)
 	addr := fs.String("addr", "127.0.0.1:7788", "监听地址（默认仅回环）")
@@ -418,46 +377,23 @@ func cmdServe(args []string) error {
 		return err
 	}
 
-	audit, err := service.NewAuditLog(*auditPath, 0)
+	// 装配与桌面壳共用同一份内核（host.New）：审计、锚点、指标留存、设置、
+	// Agent 配置的打开顺序与降级行为只有一处实现。
+	rt, err := host.New(host.Options{
+		Token: *token, AuditPath: *auditPath, AnchorPath: *anchorPath,
+		MetricsPath: *metricsPath,
+	})
 	if err != nil {
 		return err
 	}
-	defer func() { _ = audit.Close() }()
-
-	// 锚点必须在 Serve 之前挂上：之后再挂，前面写的事件就没有锚点保护。
-	if *anchorPath != "" {
-		key, err := anchorKey()
-		if err != nil {
-			return err
-		}
-		a, err := service.OpenAnchor(*anchorPath, key)
-		if err != nil {
-			return err
-		}
-		audit.SetAnchor(a)
-		fmt.Fprintf(os.Stderr, "审计锚点: %s（每 %d 条封存一次链头）\n", *anchorPath, 100)
-	}
-
-	s := api.New(*token, openConnector, audit)
-	defer s.Close()
-	// 指标留存是可选能力（ADR-0016）：不指定文件就不留存，历史端点会如实说
-	// available=false，而不是假装有数据。
-	if *metricsPath != "" {
-		st, err := service.OpenMetricStore(*metricsPath)
-		if err != nil {
-			return fmt.Errorf("打开指标留存: %w", err)
-		}
-		defer func() { _ = st.Close() }()
-		s.UseMetricStore(st)
-		fmt.Fprintf(os.Stderr, "指标留存: %s（面板打开时采样，保留 7 天）\n", *metricsPath)
-	}
-	s.SetAgentConfig(agentConfigFromEnv())
+	defer rt.Close()
+	s := rt.Server
 
 	fmt.Fprintf(os.Stderr, "dbrover 监听 http://%s\n", *addr)
 	fmt.Fprintf(os.Stderr, "界面: http://%s/#t=%s\n", *addr, s.Token())
 	fmt.Fprintf(os.Stderr, "API : curl -H 'X-DBRover-Token: %s' http://%s/api/v1/connections\n", s.Token(), *addr)
-	if p := audit.Path(); p != "" {
-		fmt.Fprintf(os.Stderr, "审计: %s\n", p)
+	if *auditPath != "" {
+		fmt.Fprintf(os.Stderr, "审计: %s\n", *auditPath)
 	}
 	if *openUI {
 		// 先等 /health 通，再开浏览器：浏览器常常比监听更快就绪，
@@ -475,44 +411,15 @@ func cmdServe(args []string) error {
 		}()
 	}
 
-	if cfg := agentConfigFromEnv(); cfg.Configured() {
-		fmt.Fprintf(os.Stderr, "Agent: %s（/api/v1/agent/conversations）\n", cfg.Model)
+	if rt.AgentConfig.Configured() {
+		fmt.Fprintf(os.Stderr, "Agent: %s（/api/v1/agent/conversations）\n", rt.AgentConfig.Model)
 	} else {
-		fmt.Fprintf(os.Stderr, "Agent: 未配置（设 DBRover_AGENT_BASE_URL 与 DBRover_AGENT_MODEL 后重启）\n")
+		fmt.Fprintf(os.Stderr, "Agent: 未配置（在设置面板里填模型服务，或设 DBROVER_AGENT_BASE_URL 与 DBROVER_AGENT_MODEL 后重启）\n")
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
 	return s.Serve(ctx, *addr, *allowRemote)
-}
-
-// agentConfigFromEnv 从环境变量读模型服务配置。
-//
-// 用环境变量而不是命令行参数：API Key 出现在命令行里会被进程列表与 shell 历史看到。
-// 但环境变量同样是明文，真正该做的是 OS 凭据库（docs/11 §8.3）——这一步还没做，
-// 已在那份文档里标为已知限制，不要因为「现在能用」就当作已完成。
-func agentConfigFromEnv() api.AgentConfig {
-	cfg := api.AgentConfig{
-		BaseURL: strings.TrimSpace(os.Getenv("DBROVER_AGENT_BASE_URL")),
-		Model:   strings.TrimSpace(os.Getenv("DBROVER_AGENT_MODEL")),
-		APIKey:  os.Getenv("DBROVER_AGENT_API_KEY"),
-	}
-	// 模型上下文窗口：给了才按「85% 上下文」压，没给就沿用字符预算。
-	// 解析失败不阻断启动——它只影响压缩时机，不该让 serve 起不来。
-	if raw := strings.TrimSpace(os.Getenv("DBROVER_AGENT_CONTEXT_TOKENS")); raw != "" {
-		if n, err := strconv.Atoi(raw); err == nil && n > 0 {
-			cfg.ContextTokens = n
-		}
-	}
-	// 环境变量优先（便于 CI 临时覆盖），否则去系统凭据库取。
-	// 环境变量里的 key 会跟着进程环境走（崩溃转储、子进程都看得到），
-	// 所以推荐 dbrover secret set 把 key 存进凭据库。
-	if cfg.APIKey == "" {
-		if v, err := secret.Load(secret.AgentAPIKeyService, secret.AgentAPIKeyAccount); err == nil {
-			cfg.APIKey = v
-		}
-	}
-	return cfg
 }
 
 // parseHops 解析 -via 参数：user@host:port[,user@host:port]。

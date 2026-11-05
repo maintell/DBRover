@@ -76,6 +76,8 @@ Content-Type: application/x-ndjson
 |---|---|---|
 | `GET` | `/api/v1/health` | 存活探测，**不需要 token** |
 | `GET` | `/api/v1/openapi.json` | 契约文件本身，**不需要 token** |
+| `GET` | `/api/v1/settings` | 读取全局设置（API Key 只回是否已配置） | ✅ |
+| `PATCH` | `/api/v1/settings` | 局部更新设置，详见 §2.8.1 | ✅ |
 | `POST` | `/api/v1/connections` | 创建并打开连接 |
 | `GET` | `/api/v1/connections` | 连接列表 |
 | `DELETE` | `/api/v1/connections/{id}` | 关闭并移除连接 |
@@ -363,10 +365,19 @@ POST /connections
 | `GET` | `/audit` | 查询（`from`、`to`、`actor`、`action`、`target`、`cursor`） |
 | `GET` | `/audit/verify` | 校验链完整性 |
 | `GET` | `/audit/export` | 导出 JSONL |
-| `GET/PATCH` | `/settings` | 全局设置 |
+| `GET/PATCH` | `/settings` | 全局设置（已实现，见 §2.8.1） |
 | `GET` | `/history` | 查询历史 |
 | `GET/POST` | `/favorites` | 收藏 |
 | `GET/PUT` | `/workspace` | 工作区布局 |
+
+#### 2.8.1 全局设置（能力契约）
+
+- **做什么**：`GET /api/v1/settings` 返回界面与模型服务设置；`PATCH /api/v1/settings` 做局部更新。设置持久化在**服务端**单文件 JSON（0600），桌面与 `serve` 共用同一份配置，因此两种模式、重启前后看到的是同一份设置。
+- **怎么触发**：界面「设置」面板读取 `GET`，改完点保存走 `PATCH`；也可直接 `curl -H 'X-DBRover-Token: <token>' -X PATCH -d '{...}' http://127.0.0.1:7788/api/v1/settings`。
+- **字段**：`theme`（`dark`/`light`）、`font_size`（12–20）、`editor_tab_size`（2–8）、`agent_base_url`、`agent_model`、`agent_context_tokens`（≥0，0=未知）、`api_key`（只写；写进 OS 凭据库，空串表示清除）。响应里 `api_key_configured` 只报「有没有」，**永不回显值**；设置文件里不含任何凭据字段。
+- **失败与降级**：非法字段或越界值返回 `400 REQUEST_INVALID` 且原设置不变；多余字段按 `decode` 的 `DisallowUnknownFields` 拒绝。设置文件损坏或不可读时 `host.Assemble` 明确告警并退回内存默认设置（本次不持久化），不让应用起不来。非 Windows 平台写 `api_key` 返回 400 并说明「不支持系统凭据库」，不退化成明文文件。
+- **对 Agent 的影响**：`agent_base_url` / `agent_model` / `agent_context_tokens` / `api_key` 覆盖环境变量与凭据库，作用于**下一次** Agent 会话；不放宽默认只读与写审批。
+- **验收**：`internal/api/settings_internal_test.go` 覆盖读、写往返、非法值拒绝、API Key 不出现在响应与文件里、PATCH 请求体与 `settings.Patch` 的 json 标签双向一致（变异验证）。
 
 ---
 

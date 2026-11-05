@@ -56,7 +56,7 @@ DBRover 面向同时维护多种数据库的工程师：一个人可能上午在
 
 ```
 ┌──────────────────────────────────────────────────────────────────┐
-│  UI  React 19 · TypeScript · Vite · Monaco · TanStack            │
+│  UI  internal/webui（免构建）· 桌面/团队共用一份                  │
 │  SQL工作台 │ 数据编辑 │ 结构设计 │ 迁移 │ 监控排障 │ AI 助手 │ 连接 │
 └──────────────────────────┬───────────────────────────────────────┘
                            │  loopback HTTP/JSON + WebSocket 事件流
@@ -120,13 +120,16 @@ DBRover 面向同时维护多种数据库的工程师：一个人可能上午在
 | `internal/driver` | Connector 契约（含 `Target()`：目标自报身份）+ `drivertest` 一致性套件（19 项，含表注释、声明长度、索引有效性、触发器/序列/类型/例程列表——例程那条还会把取到的定义回放一遍） |
 | `internal/driver/sqlite` `mysql` `pg` | 三个引擎完整实现，真机验收（SQLite / MySQL 5.7 / PostgreSQL 17） |
 | `internal/service` | 执行门；变更集与预案（乐观并发、回滚、一键撤销）；结构变更（建表/加列/删列/改列类型/可空/默认值/索引/外键/检查约束/视图/物化视图/序列/触发器/枚举类型/例程新建与整段替换）+ 收窄预检、孤儿预检、依赖阻断、等锁阻断；批量修改（分批、NDJSON 进度、可中止）；流式导出（CSV / NDJSON / SQL / Markdown / XLSX）；游标与键集分页；结构比对（含物化视图，一侧引擎没有这个概念时只记 `need_review`）；**备份**（容器 v1、gzip、AES-256-GCM、表级续跑）与**恢复**（同引擎、单事务、报告；目标非空时要写出目标名才允许覆盖）；**跨引擎迁移**（预检、建表、键集搬数据、行数+摘要校验、检查点续跑、外键与注释补建） |
-| `internal/api` | 回环 HTTP：token 鉴权、连接、`exec`/`query`（NDJSON 流）、键集分页、变更与结构预案、批量修改、外键预检、结构比对、导出多格式、备份/恢复/迁移端点、审计查询、`/agent/*`（会话、消息流、审批、工具清单、中止、压缩、导出）、OpenAPI 契约 |
+| `internal/api` | 回环 HTTP：token 鉴权、连接、`exec`/`query`（NDJSON 流）、键集分页、变更与结构预案、批量修改、外键预检、结构比对、导出多格式、备份/恢复/迁移端点、审计查询、`/agent/*`、**`GET/PATCH /settings`**、OpenAPI 契约 |
+| `internal/host` | 两种形态共用的装配层：`OpenConnector`、审计/锚点/指标/设置、`AgentConfig` 优先级、`DesktopHandler`（进程内资源处理器，无监听端口、令牌注入） |
+| `internal/infra/settings` | 服务端设置持久化：非敏感项单文件 JSON（0600），API Key 走 OS 凭据库，跨桌面/团队模式一致 |
+| `cmd/dbrover-desktop` | 桌面壳（独立 module，Wails v2 + WebView2）：原生窗口、关窗退出、失败回退 |
 | `internal/agent` | Provider 抽象（OpenAI 兼容）、14 个工具、权限三模式与环境上限、执行循环（步数/时长/循环/失败上限）、审批门（预案只由服务端保管）、三路上下文召回、长会话压缩、评测集 |
 | `internal/infra/tunnel` | SSH 隧道与跳板链：多跳、密码/私钥/agent 认证、主机密钥 TOFU |
 | `internal/webui` | **临时界面**：免构建的内嵌 Web UI（连接、对象树、SQL、结果网格、字段编辑、筛选排序、结构变更与比对、批量修改、导出、审批弹窗、Agent 面板） |
 | `cmd/dbrover` | CLI：`version` / `health` / `tables` / `exec` / `serve`（`-open`、`-audit-anchor`）/ `tunnel` / `secret` / **`backup create|inspect`**（`-type full|schema`） / **`restore`** / **`migrate plan|run`**（`-probe` 按实际值判长度） |
 
-> `internal/webui` 是为了「能点着验收」而做的最小实现，**不是最终前端**。最终前端仍是 [ADR-0001](docs/adr/0001-tech-stack.md) 规定的 React + TypeScript + Vite 栈；先做无构建版本是因为本机磁盘紧张，不装 node_modules。
+> `internal/webui` 是免构建的内嵌界面：桌面与团队模式**加载同一份** `index.html` / `app.js` / `ui2.js` / `style.css`。长期目标仍是 [ADR-0001](docs/adr/0001-tech-stack.md) 的 React + TypeScript + Vite 栈，本轮按 ADR-0017 在免构建版本上补齐设置、连接管理、多标签编辑器与视觉系统。
 
 > 跨引擎差异的写法约定见 [ADR-0005](docs/adr/0005-engine-differences-as-capabilities.md)：能力有无进 `Capabilities`，语句文本归 `dialect`，其余位置不得判断引擎名。
 >
@@ -134,7 +137,9 @@ DBRover 面向同时维护多种数据库的工程师：一个人可能上午在
 >
 > 非关系型引擎（Redis / Mongo / ES）不实现 `Connector`/`Metadata`，另用 `KVConnector` 一族接口，`api` 靠类型断言而不是引擎名选路径，见 [ADR-0007](docs/adr/0007-nosql-connector-model.md)。
 
-**尚未实现**：React 正式前端、桌面壳（Wails，待拍板）、SQL Server / Oracle（镜像拉不下来，见 [ADR-0008](docs/adr/0008-mssql-connector.md)）、MongoDB / Elasticsearch、引擎特有项（`EngineExtra`）表单、磁盘余量探测（只有 SQLite 能诚实实现——MySQL/PG 拿不到所在卷余量）、例程依赖检查、手写 SQL 反解回表单、Agent 的向量召回与 `/agent/providers`、测试数据生成。
+**两种形态都已具备**：`dbrover-desktop`（Wails v2 原生窗口，Windows）与 `dbrover serve -open`（浏览器）共用同一份内核与界面，详见 [ADR-0017](docs/adr/0017-desktop-shell-and-settings.md)。React 正式前端仍是长期目标，本轮复用免构建 `internal/webui` 完成设置面板、连接管理、多标签编辑器与整体视觉重做。
+
+**尚未实现**：React 正式前端、SQL Server / Oracle（镜像拉不下来，见 [ADR-0008](docs/adr/0008-mssql-connector.md)）、MongoDB / Elasticsearch、引擎特有项（`EngineExtra`）表单、磁盘余量探测（只有 SQLite 能诚实实现——MySQL/PG 拿不到所在卷余量）、例程依赖检查、手写 SQL 反解回表单、Agent 的向量召回与 `/agent/providers`、测试数据生成。
 
 
 ## 6. 快速开始
@@ -170,7 +175,14 @@ bin/dbrover.exe migrate run  -db demo.db -table t -to-db target.db -yes
 bin/dbrover.exe migrate plan -engine mysql -host H -user U -db S -table t -to-engine postgres -to-host H2 -to-user U2 -to-db D2 -probe
 
 # 打开 serve 打印的 http://127.0.0.1:7788/#t=<token> 即可操作
+
+# 桌面形态（Wails v2 原生窗口，Windows）：产物由 CI 发版，双击即用
+# dbrover-desktop.exe
 ```
+
+> 桌面与团队模式共用同一份设置：`GET/PATCH /api/v1/settings` 持久化在服务端，
+> 界面「设置」面板可改主题、字号、模型服务与 API Key（只进 OS 凭据库，不回显）。
+> 详见 [docs/12 §2.8.1](docs/12-api-contract.md) 与 [ADR-0017](docs/adr/0017-desktop-shell-and-settings.md)。
 
 ### 6.1 CLI 参数
 

@@ -377,3 +377,181 @@ label.inline {
 #btn-cancel[hidden] {
   display: none;
 }
+
+/* ==========================================================================
+   v2 · 视觉与布局层（追加式，不改上面已验收的规则）
+   深/浅两套令牌、分组工具条、标签栏、抽屉式设置与连接管理。
+   ========================================================================== */
+
+:root {
+  --ui-font-size: 13px;
+  --tab-size: 2;
+  --radius: 8px;
+  --shadow: 0 12px 32px rgba(0, 0, 0, .38);
+  --header-h: 46px;
+}
+
+body[data-theme="light"] {
+  --bg: #f4f6fa;
+  --panel: #ffffff;
+  --panel-2: #eef1f6;
+  --line: #d8dee8;
+  --fg: #1c2430;
+  --muted: #64708a;
+  --accent: #1f6feb;
+  --ok: #1a7f37;
+  --warn: #9a6700;
+  --shadow: 0 12px 32px rgba(20, 30, 50, .16);
+  background: var(--bg);
+  color: var(--fg);
+}
+
+body { font-size: var(--ui-font-size, 13px); }
+#sql { tab-size: var(--tab-size, 2); }
+
+/* 顶栏：品牌 + 分组工具，不再是一长串平铺按钮 */
+header.topbar {
+  flex-wrap: nowrap;
+  gap: 8px;
+  padding: 7px 12px;
+  min-height: var(--header-h);
+  overflow-x: auto;
+  scrollbar-width: thin;
+}
+header.topbar::-webkit-scrollbar { height: 4px; }
+.brand {
+  display: inline-flex; align-items: center; gap: 8px;
+  font-weight: 700; letter-spacing: .2px; white-space: nowrap;
+}
+.brand-mark {
+  display: inline-grid; place-items: center;
+  width: 24px; height: 24px; border-radius: 6px;
+  background: var(--accent); color: #fff; font-size: 11px; font-weight: 800;
+}
+body[data-theme="light"] .brand-mark { color: #fff; }
+.sep { width: 1px; align-self: stretch; background: var(--line); margin: 2px 2px; flex: none; }
+.tool-group { display: inline-flex; gap: 4px; flex: none; align-items: center; }
+.tool-group button { padding: 4px 8px; font-size: 12px; white-space: nowrap; }
+.conn-picker { display: inline-flex; flex: none; }
+.conn-picker select { min-width: 120px; max-width: 190px; font-size: 12px; padding: 4px 8px; }
+#schema-tools { border-left: 1px solid var(--line); padding-left: 8px; }
+.dot {
+  width: 8px; height: 8px; border-radius: 50%; background: var(--ok);
+  display: inline-block; flex: none;
+}
+header .grow { flex: 1 1 auto; }
+#btn-settings, #btn-connections { border-color: transparent; }
+#btn-settings:hover, #btn-connections:hover { border-color: var(--accent); }
+
+/* 标签栏 */
+.tabbar {
+  display: flex; align-items: center; gap: 2px;
+  padding: 4px 10px 0;
+  background: var(--panel);
+  border-bottom: 1px solid var(--line);
+  min-height: 34px;
+}
+.sql-tab {
+  border: 1px solid transparent; border-bottom: none;
+  border-radius: 6px 6px 0 0;
+  padding: 5px 12px; font-size: 12px;
+  background: transparent; color: var(--muted);
+  white-space: nowrap; max-width: 180px; overflow: hidden; text-overflow: ellipsis;
+}
+.sql-tab:hover { color: var(--fg); }
+.sql-tab.active {
+  background: var(--panel-2); color: var(--fg);
+  border-color: var(--line); font-weight: 600;
+}
+.tab-x {
+  border: none; background: transparent; color: var(--muted);
+  padding: 2px 6px; font-size: 14px; line-height: 1;
+}
+.tab-x:hover { color: var(--danger); }
+.tab-add { border: none; background: transparent; color: var(--muted); font-size: 16px; padding: 2px 10px; }
+.tab-add:hover { color: var(--accent); }
+.tabbar .grow { flex: 1; }
+.tab-clear { border: none; background: transparent; color: var(--muted); font-size: 11px; }
+
+/* 侧栏与工作区 */
+.side-head {
+  padding: 9px 12px; border-bottom: 1px solid var(--line);
+  color: var(--muted); font-size: 11px; letter-spacing: .4px;
+  display: flex; align-items: center; gap: 6px;
+}
+aside .obj-search { margin: 8px; width: calc(100% - 16px); }
+.object-tree { overflow: auto; flex: 1; }
+.cursor-pos { color: var(--muted); font-size: 11px; font-family: var(--mono); }
+.editor-wrap { padding: 10px 12px; background: var(--panel); }
+#sql { font-size: var(--ui-font-size, 13px); }
+.editor-toolbar { margin-top: 6px; }
+
+/* 抽屉：设置与连接管理 */
+.drawer {
+  position: fixed; inset: 0; z-index: 40;
+  background: rgba(0, 0, 0, .45);
+  display: flex; justify-content: flex-end;
+}
+.drawer[hidden] { display: none; }
+.drawer-panel {
+  width: min(460px, 92vw); height: 100%;
+  background: var(--panel); border-left: 1px solid var(--line);
+  box-shadow: var(--shadow);
+  display: flex; flex-direction: column;
+}
+.drawer-head {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 14px 18px; border-bottom: 1px solid var(--line);
+}
+.drawer-head h2 { margin: 0; font-size: 15px; }
+.drawer-body { flex: 1; overflow: auto; padding: 16px 18px; }
+.drawer-foot {
+  padding: 12px 18px; border-top: 1px solid var(--line);
+  display: flex; justify-content: flex-end;
+}
+
+/* 设置表单 */
+.set-group { margin-bottom: 22px; }
+.set-group h3 {
+  margin: 0 0 10px; font-size: 12px; color: var(--muted);
+  text-transform: uppercase; letter-spacing: .6px;
+  border-bottom: 1px solid var(--line); padding-bottom: 6px;
+}
+.set-row { display: flex; align-items: center; gap: 10px; margin: 8px 0; }
+.set-row > span:first-child { width: 92px; flex: none; color: var(--muted); font-size: 12px; }
+.set-row input, .set-row select { flex: 1; font-size: 12px; }
+.set-hint { color: var(--muted); font-size: 11px; line-height: 1.6; margin: 8px 0 0; }
+.keys { display: grid; gap: 8px; }
+.keys > div { display: flex; align-items: center; gap: 6px; font-size: 12px; }
+.keys span { color: var(--muted); margin-left: auto; }
+kbd {
+  font-family: var(--mono); font-size: 11px;
+  background: var(--panel-2); border: 1px solid var(--line);
+  border-bottom-width: 2px; border-radius: 4px; padding: 1px 6px;
+}
+
+/* 连接卡片 */
+.conn-card {
+  border: 1px solid var(--line); border-radius: var(--radius);
+  padding: 12px; margin-bottom: 10px; background: var(--panel-2);
+}
+.conn-card.current { border-color: var(--accent); box-shadow: inset 3px 0 0 var(--accent); }
+.conn-card-main { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.conn-card-main strong { font-size: 13px; }
+.conn-card-ops { display: flex; gap: 6px; margin-top: 10px; }
+.conn-card-ops button { font-size: 11px; padding: 3px 10px; }
+.conn-test { margin-top: 8px; font-size: 11px; color: var(--muted); }
+.conn-test.ok { color: var(--ok); }
+.conn-test.err { color: var(--danger); }
+.empty-state { text-align: center; color: var(--muted); padding: 40px 10px; }
+.empty-state strong { color: var(--fg); font-size: 14px; }
+.empty-state p { font-size: 12px; line-height: 1.6; }
+
+/* 弹窗卡片补强（.card p.danger 的红色定义保留在原层） */
+.card { border-radius: var(--radius); box-shadow: var(--shadow); }
+.card h2 { margin-top: 0; }
+
+@media (max-width: 900px) {
+  #schema-tools { display: none; }
+  aside { width: 200px; }
+}

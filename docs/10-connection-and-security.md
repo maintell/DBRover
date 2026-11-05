@@ -141,7 +141,7 @@
 
 **为什么不实现「降级到本地文件」**：那条路会让调用方以为凭据进了系统库、实际落在磁盘上，而且没人会再去 review 它。非 Windows 平台上 `secret.*` 直接返回 `ErrUnsupported`，功能不可用但不说谎——等有对应平台的验证环境再补。
 
-已接入的用法：`dbrover secret set|clear|status`（口令只从 stdin 读，绝不接受命令行参数——那会进进程列表与 shell 历史）。Agent 的 API Key 走这条路径，见 `docs/11 §8.3`。
+已接入的用法：`dbrover secret set|clear|status`（口令只从 stdin 读，绝不接受命令行参数——那会进进程列表与 shell 历史），以及界面「设置」面板写入的 API Key（`GET/PATCH /api/v1/settings`，见 `docs/12 §2.8.1`）。两者写的是凭据库里的同一把 key；设置面板的 `api_key` 字段**只写不读**，响应里只有 `api_key_configured` 布尔值。详见 `docs/11 §8.3` 与 [ADR-0017](adr/0017-desktop-shell-and-settings.md)。
 
 ### 3.2 规则
 

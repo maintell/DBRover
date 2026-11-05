@@ -86,6 +86,40 @@
     }
   },
   "paths": {
+    "/api/v1/settings": {
+      "get": {
+        "summary": "读取全局设置（API Key 只回是否已配置，不回显值）",
+        "responses": {
+          "200": {
+            "description": "ok",
+            "content": { "application/json": { "schema": { "type": "object" } } }
+          },
+          "500": { "description": "设置存储未装配" }
+        }
+      },
+      "patch": {
+        "summary": "局部更新全局设置",
+        "requestBody": {
+          "required": true,
+          "content": { "application/json": { "schema": {
+            "type": "object",
+            "properties": {
+              "theme": { "type": "string", "enum": ["dark", "light"] },
+              "font_size": { "type": "integer", "minimum": 12, "maximum": 20 },
+              "editor_tab_size": { "type": "integer", "minimum": 2, "maximum": 8 },
+              "agent_base_url": { "type": "string" },
+              "agent_model": { "type": "string" },
+              "agent_context_tokens": { "type": "integer", "minimum": 0 },
+              "api_key": { "type": "string", "description": "只写入 OS 凭据库，绝不落设置文件；空串表示清除" }
+            }
+          } } }
+        },
+        "responses": {
+          "200": { "description": "ok" },
+          "400": { "description": "REQUEST_INVALID：字段非法、越界或含未知字段" }
+        }
+      }
+    },
     "/api/v1/health": {
       "get": {
         "summary": "存活探测",

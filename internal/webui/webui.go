@@ -11,7 +11,7 @@ import (
 	"strings"
 )
 
-//go:embed index.html app.js style.css
+//go:embed index.html app.js ui2.js style.css bootstrap.js
 var assets embed.FS
 
 // Index 返回入口页面。非 /api 路径都落到这里（SPA 行为）。

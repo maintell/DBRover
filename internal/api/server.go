@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"github.com/maintell/DBRover/internal/driver"
+	"github.com/maintell/DBRover/internal/infra/settings"
 	"github.com/maintell/DBRover/internal/model"
 	"github.com/maintell/DBRover/internal/policy"
 	"github.com/maintell/DBRover/internal/service"
@@ -43,6 +44,10 @@ type Server struct {
 	audit  service.AuditSink
 	// metrics 是本地指标留存（ADR-0016）；nil 表示没开（-metrics 未指定）。
 	metrics *service.MetricStore
+	// settingsStore 与 settingsChanged 由 host 注入：api 不依赖具体存储，
+	// 也不反向 import host（分层铁律）。
+	settings     settings.Store
+	settingsHook func()
 
 	mu    sync.RWMutex
 	conns map[string]*entry
@@ -170,6 +175,9 @@ func (s *Server) routes() []route {
 	return []route{
 		{http.MethodGet, "/api/v1/health", true, s.handlePing},
 		{http.MethodGet, "/api/v1/openapi.json", true, s.handleSpec},
+		{http.MethodGet, "/api/v1/settings", false, s.handleSettingsGet},
+		{http.MethodPatch, "/api/v1/settings", false, s.handleSettingsPatch},
+
 		{http.MethodPost, "/api/v1/connections", false, s.handleCreateConnection},
 		{http.MethodGet, "/api/v1/connections", false, s.handleListConnections},
 		{http.MethodDelete, "/api/v1/connections/{id}", false, s.handleDeleteConnection},
@@ -238,7 +246,10 @@ func (s *Server) Handler() http.Handler {
 
 	// 静态资源与入口页免鉴权：页面本身不含任何数据，数据接口仍需令牌。
 	mux.HandleFunc("GET /app.js", webui.Asset("app.js"))
+	mux.HandleFunc("GET /ui2.js", webui.Asset("ui2.js"))
 	mux.HandleFunc("GET /style.css", webui.Asset("style.css"))
+	// 团队模式的空 bootstrap；桌面模式由 host.DesktopHandler 覆盖此路径注入令牌。
+	mux.HandleFunc("GET /bootstrap.js", webui.Asset("bootstrap.js"))
 	// 未知的 /api 路径必须返回 404，不能被 SPA 兜底吞成 200 的 HTML。
 	mux.HandleFunc("/api/", s.handleAPINotFound)
 	// SPA 兜底：注册为「任意方法」，否则会与更具体的 /api/ 模式冲突。
@@ -343,6 +354,27 @@ func (s *Server) withAuth(next http.Handler, public map[string]bool) http.Handle
 
 // originAllowed 只接受「不带 Origin」（curl/桌面壳）或「同源」。
 // 刻意不接受 "null"：它来自 file:// 或沙箱 iframe，属于不可信来源。
+// UseSettings 注入设置存储与「设置已变更」回调。回调由 host 提供，用来重建
+// Agent 配置；api 自己不 import host，保持 api → service 的单向依赖。
+func (s *Server) UseSettings(st settings.Store, onChange func()) {
+	s.mu.Lock()
+	s.settings = st
+	s.settingsHook = onChange
+	s.mu.Unlock()
+}
+
+func (s *Server) settingsStore() settings.Store {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.settings
+}
+
+func (s *Server) settingsChangedHook() func() {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.settingsHook
+}
+
 func (s *Server) originAllowed(r *http.Request) bool {
 	o := r.Header.Get("Origin")
 	if o == "" {
