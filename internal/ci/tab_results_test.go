@@ -7,15 +7,19 @@ import (
 	"testing"
 )
 
-// TestTabResultContractMatchesDocs 守住 ADR-0017 多标签编辑器「结果区」这一处
-// 文档与实现的一致性。批准的设计曾写过「每个标签独立的语句与结果」，而实现是
-// 「每个标签独立的语句 + 全局结果区只显示最近一次执行，切标签清空并提示重跑」：
-// 结果网格的行内编辑与审批按钮带事件绑定，渲染读的是 app.js 里共享的全局 state
-// （tableName / pending / editable / gridColumns / undo）。按标签快照结果若用
-// innerHTML 回放会变成死按钮；若与共享 state 混用，某个标签的编辑按钮会读到
-// 另一个标签的表名而误改数据。本轮追加式改动不重做结果区状态模型，因此文档把
-// 它写成已知限制。这条门禁把「设计/ADR 的降级口径」与「ui2.js 的清空行为」钉在
-// 一起：任一侧单方面改回过度承诺、或偷偷去掉清空，都会红。
+// TestTabResultContractMatchesDocs 守住 ADR-0017 多标签编辑器「每个标签独立的语句
+// 与结果」这一处文档与实现的一致性。
+//
+// 实现机制（ui2.js，追加层、app.js 零改动）：包装全局 renderExec，每次执行后把
+// #results 的活 DOM 节点引用存进当前标签；switchTab / addTab / closeTab 用
+// restoreTabResult 把对应标签的节点搬回 #results。SQL 执行结果由 renderExec 渲染成
+// 只读块（allowEdit=false、不设 dataset.key、不读 state.tableName/pending），搬活节点
+// 不会丢 onclick、也不会把可编辑网格的共享 state 带进某个标签。可编辑的表浏览网格走
+// loadTablePage、不经 renderExec，因此不参与标签隔离。
+//
+// 这条门禁把「设计/ADR 的承诺」与「ui2.js 的接关键」钉在一起：任一侧单方面退回
+// 「全局结果区/已知限制」、或偷偷删掉 renderExec 包装/restoreTabResult，都会红。
+// 端到端行为（两个标签各跑一条 SELECT、来回切、各自结果恢复）另由内置浏览器点验。
 func TestTabResultContractMatchesDocs(t *testing.T) {
 	root := repoRoot(t)
 	read := func(rel ...string) string {
@@ -27,42 +31,60 @@ func TestTabResultContractMatchesDocs(t *testing.T) {
 	}
 
 	ui2 := read("internal", "webui", "ui2.js")
+	appjs := read("internal", "webui", "app.js")
 	spec := read("docs", "superpowers", "specs", "2026-11-06-desktop-shell-and-ux-design.md")
 	adr := read("docs", "adr", "0017-desktop-shell-and-settings.md")
 
 	// 扫描覆盖自检：路径写错会读到空串，整条门禁会假绿。
-	for name, doc := range map[string]string{"ui2.js": ui2, "spec": spec, "ADR-0017": adr} {
+	for name, doc := range map[string]string{"ui2.js": ui2, "app.js": appjs, "spec": spec, "ADR-0017": adr} {
 		if len(doc) < 200 {
 			t.Errorf("%s 只读到 %d 字节，扫描恐怕失效", name, len(doc))
 		}
 	}
 
-	// 实现侧：切标签/新建/关闭都走 resultHint 清空结果区，而不是按标签快照结果 DOM。
-	for _, fn := range []string{"function switchTab(", "function addTab(", "function closeTab(", "function resultHint("} {
+	// 实现侧接关键：包装 renderExec 捕获活节点 + 按标签恢复。
+	for _, want := range []string{
+		"window.renderExec = function (out)",
+		"origRenderExec(out)",
+		"t.result = Array.prototype.slice.call(r.childNodes)",
+		"function restoreTabResult(",
+		"r.appendChild(t.result[k])",
+	} {
+		if !strings.Contains(ui2, want) {
+			t.Errorf("ui2.js 缺少 per-tab 结果接线 %q", want)
+		}
+	}
+	// 三个切标签入口都必须改为 restoreTabResult，不能留 resultHint 清空；否则切回去
+	// 只看到「执行以查看结果」，等于结果没按标签保存。
+	for _, fn := range []string{"function switchTab(", "function addTab(", "function closeTab(", "function restoreTabResult("} {
 		if !strings.Contains(ui2, fn) {
 			t.Errorf("ui2.js 缺少 %q", fn)
 		}
 	}
-	if !strings.Contains(ui2, "r.replaceChildren()") {
-		t.Error("ui2.js 的 resultHint 没有清空结果区")
+	if n := strings.Count(ui2, "restoreTabResult("); n < 4 {
+		t.Errorf("ui2.js 只有 %d 处 restoreTabResult(（应为定义 + switchTab/addTab/closeTab 三处调用，共 4）", n)
 	}
-	// 覆盖性：定义 1 处 + 三个切标签入口各 1 处，共 4 处 resultHint( 调用；
-	// 漏掉任一入口就会残留上一个标签的结果。
-	if n := strings.Count(ui2, "resultHint("); n < 4 {
-		t.Errorf("ui2.js 只有 %d 处 resultHint(，切标签清空结果的行为不完整（应为定义 + switchTab/addTab/closeTab 三处调用，共 4）", n)
+	// 新标签要带 result:null 字段，否则未执行的标签没有结果槽位。
+	if !strings.Contains(ui2, "result: null") {
+		t.Error("ui2.js 的标签对象没有 result 字段")
+	}
+	// 结果块必须是只读渲染：renderExec 里 renderTable 的 allowEdit 必须为 false。
+	// 一旦变成 true，标签里就会出现可编辑网格，读取共享 state 会串表误改数据。
+	if !strings.Contains(appjs, "renderTable(view, r.columns, r.rows || [], false, false)") {
+		t.Error("app.js 的 renderExec 不再是只读结果块，per-tab 活节点搬运会带上可编辑网格")
 	}
 
-	// 文档侧：设计与 ADR 都写成「全局结果区 / 已知限制」，不得再承诺每个标签独立结果。
+	// 文档侧：设计与 ADR 都承诺「每个标签独立的语句与结果」，不得退回「已知限制」口径。
 	for name, doc := range map[string]string{"spec": spec, "ADR-0017": adr} {
-		if !strings.Contains(doc, "结果区是全局的") {
-			t.Errorf("%s 没有写明「结果区是全局的」降级口径", name)
+		if !strings.Contains(doc, "每个标签独立的语句与结果") {
+			t.Errorf("%s 没有写明「每个标签独立的语句与结果」契约", name)
 		}
-		if !strings.Contains(doc, "已知限制") {
-			t.Errorf("%s 没有把结果区不按标签隔离标为已知限制", name)
+		if !strings.Contains(doc, "活节点") {
+			t.Errorf("%s 没有写明按活节点保存/恢复结果的实现机制", name)
 		}
-		const overclaim = "每个标签独立的语句与结果"
-		if strings.Contains(doc, overclaim) {
-			t.Errorf("%s 又写回了「%s」——实现并未按标签隔离结果（要么改实现，要么先改设计）", name, overclaim)
+		const stale = "结果区是全局的"
+		if strings.Contains(doc, stale) {
+			t.Errorf("%s 还残留「%s」的旧降级口径——实现已改为 per-tab 结果", name, stale)
 		}
 	}
 }

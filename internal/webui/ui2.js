@@ -191,8 +191,26 @@ async function delConn(id) {
 }
 
 // ---------- 多标签编辑器 ----------
-// 每个标签只存 SQL 文本；结果区属于「最近一次执行」，切标签时清空并提示。
-// 刻意不快照结果 DOM：网格里的编辑/审批按钮是带事件绑定的，innerHTML 回放会变成死按钮。
+// 每个标签独立保存 SQL 文本与「最近一次执行的结果」。执行结果由 app.js 的
+// renderExec 渲染成只读的 result-block（不设 dataset.key、不读 state.tableName
+// /pending），因此按「活 DOM 节点」保存、切标签时原样搬回即可：节点自带的
+// onclick（结果标题跳回语句、加载更多等）不会丢，也不像 innerHTML 回放那样
+// 变成死按钮。可编辑的表浏览网格走 loadTablePage，不经 renderExec、不进标签，
+// 所以不会把共享 state 的编辑入口带进某个标签里造成串表误改。
+//
+// 捕获方式：包装全局 renderExec（app.js 顶层函数声明，经典脚本可覆盖），每次
+// 渲染后记下 #results 的活节点引用。不改 app.js 的执行链路与既有源码断言。
+var origRenderExec = (typeof window !== 'undefined' && typeof window.renderExec === 'function')
+  ? window.renderExec : null;
+if (origRenderExec) {
+  window.renderExec = function (out) {
+    origRenderExec(out);
+    var r = u2('results'), t = ui2.tabs[ui2.active];
+    // 只存引用、不清空：本次执行的结果要留在界面上；切标签时 replaceChildren
+    // 会把节点移出文档，但这些引用仍有效，搬回来即可。
+    if (r && t) t.result = Array.prototype.slice.call(r.childNodes);
+  };
+}
 function tabLabel(t) { return t.name || ('查询 ' + t.id); }
 
 function renderTabs() {
@@ -214,7 +232,10 @@ function renderTabs() {
   var add = mkBtn('+', addTab); add.className = 'tab-add'; add.title = '新建标签';
   bar.appendChild(add);
   var spacer = document.createElement('span'); spacer.className = 'grow'; bar.appendChild(spacer);
-  var clear = mkBtn('清空结果', function () { u2('results').replaceChildren(); });
+  var clear = mkBtn('清空结果', function () {
+    var t = ui2.tabs[ui2.active]; if (t) t.result = null;
+    u2('results').replaceChildren();
+  });
   clear.className = 'tab-clear'; clear.title = '清空当前结果区';
   bar.appendChild(clear);
 }
@@ -229,22 +250,34 @@ function resultHint(text) {
   r.appendChild(noticeNode(text));
 }
 
+// 切回某个标签：存过结果就把活节点搬回 #results（事件绑定完好），否则给空状态提示。
+function restoreTabResult(t) {
+  var r = u2('results');
+  if (!r) return;
+  if (t && t.result && t.result.length) {
+    r.replaceChildren();
+    for (var k = 0; k < t.result.length; k++) r.appendChild(t.result[k]);
+  } else {
+    resultHint('执行以查看结果。');
+  }
+}
+
 function switchTab(i) {
   if (i === ui2.active || i < 0 || i >= ui2.tabs.length) return;
   syncActiveSQL();
   ui2.active = i;
   var el = u2('sql'); if (el) el.value = ui2.tabs[i].sql || '';
-  resultHint('已切到「' + tabLabel(ui2.tabs[i]) + '」。执行以查看结果。');
+  restoreTabResult(ui2.tabs[i]);
   renderTabs(); updateCursor();
 }
 
 function addTab() {
   syncActiveSQL();
   var n = ui2.seq++;
-  ui2.tabs.push({ id: n, name: '查询 ' + n, sql: '' });
+  ui2.tabs.push({ id: n, name: '查询 ' + n, sql: '', result: null });
   ui2.active = ui2.tabs.length - 1;
   var el = u2('sql'); if (el) { el.value = ''; el.focus(); }
-  resultHint('新标签。写一条 SQL，按 Ctrl+Enter 执行。');
+  restoreTabResult(ui2.tabs[ui2.active]);
   renderTabs(); updateCursor();
 }
 
@@ -255,7 +288,7 @@ function closeTab(i) {
   if (ui2.active > i) ui2.active--;
   else if (ui2.active >= ui2.tabs.length) ui2.active = ui2.tabs.length - 1;
   var el = u2('sql'); if (el) el.value = ui2.tabs[ui2.active].sql || '';
-  resultHint('已切换标签。执行以查看结果。');
+  restoreTabResult(ui2.tabs[ui2.active]);
   renderTabs(); updateCursor();
 }
 
@@ -279,7 +312,7 @@ function wireUI2() {
 
   var el = u2('sql');
   if (el) {
-    ui2.tabs = [{ id: 1, name: '查询 1', sql: el.value }];
+    ui2.tabs = [{ id: 1, name: '查询 1', sql: el.value, result: null }];
     ui2.active = 0; ui2.seq = 2;
     el.addEventListener('input', function () { syncActiveSQL(); updateCursor(); });
     el.addEventListener('click', updateCursor);

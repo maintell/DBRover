@@ -103,7 +103,7 @@ Wails v2 的 `assetserver.Options` 允许 `Assets: nil, Handler: h`：官方源�
 - 桌面只发 Windows；macOS / Linux 用户仍用 `dbrover serve -open`。
 - 嵌套 module 需要单独 `go mod tidy`，CI 多一条 Windows job。
 - 多标签编辑器保留单 `#sql` 文本节点，切换标签靠换值，标签内容只在前端内存里，刷新不恢复（未做工作区持久化，属已知限制）。
-- 结果区是全局的，只显示「最近一次执行」：切换、新建或关闭标签时清空结果并提示重新执行，不按标签隔离（已知限制）。结果网格的编辑/审批按钮带事件绑定、且读共享 `state`，快照回放会变死按钮或串表误改数据；本轮追加式改动不重做结果区状态模型，理由见设计说明「编辑器与结果区」。
+- 每个标签独立的语句与结果：`ui2.js` 包装全局 `renderExec`，把每次执行的 `#results` **活节点引用**存进当前标签，切标签时由 `restoreTabResult` 搬回。SQL 执行结果是只读块（不读共享 `state`），搬活节点不丢事件绑定、不串表；可编辑的表浏览网格走 `loadTablePage`、不进标签。结果只在前端内存，刷新不恢复。接关键与文档口径由 `internal/ci/tab_results_test.go` 守住，端到端由内置浏览器点验。机制详见设计说明「编辑器与结果区」。
 - `/bootstrap.js` 是新增的静态资源，需在 `api.Handler()` 里为 serve 模式提供空实现，避免 404 噪声。
 
 ---
