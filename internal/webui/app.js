@@ -3322,9 +3322,7 @@ function renderMetrics(out, slow, sizes) {
     rows.push(['QPS', out.qps.toFixed(1) + ' 语句/秒（两次采样的增量）']);
   }
   if (out.uptime_seconds > 0) {
-    const d = Math.floor(out.uptime_seconds / 86400);
-    const h = Math.floor((out.uptime_seconds % 86400) / 3600);
-    rows.push(['实例已运行', d + ' 天 ' + h + ' 小时']);
+    rows.push(['实例已运行', formatUptime(out.uptime_seconds)]);
   }
   if ((out.details || []).length) {
     rows.push(['需要注意', out.details.join('；')]);
@@ -3466,6 +3464,17 @@ function formatBytes(v) {
     i++;
   }
   return (i === 0 ? n.toFixed(0) : n.toFixed(1)) + ' ' + units[i];
+}
+// formatUptime 把秒数写成人读的时长。
+//
+// 新实例上「0 天 0 小时」等于什么都没说——按最大的那个量级给两个单位。
+function formatUptime(s) {
+  const d = Math.floor(s / 86400);
+  const h = Math.floor((s % 86400) / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  if (d > 0) return d + ' 天 ' + h + ' 小时';
+  if (h > 0) return h + ' 小时 ' + m + ' 分钟';
+  return m + ' 分钟';
 }
 function formatMS(v) {
   if (typeof v !== 'number' || !isFinite(v)) return '—';

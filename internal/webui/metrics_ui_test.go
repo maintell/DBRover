@@ -39,6 +39,9 @@ func TestUIMetricsPanel(t *testing.T) {
 		"tableSizes: '/api/v1/connections/:id/monitor/tables'",
 		"function sizeSection(sizes)",
 		"function formatBytes(v)",
+		"function formatUptime(s)",
+		// 新实例上「0 天 0 小时」等于没说：按最大量级给两个单位。
+		"return m + ' 分钟'",
 	} {
 		if !strings.Contains(src, want) {
 			t.Errorf("性能面板缺少 %q", want)
