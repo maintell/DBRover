@@ -28,6 +28,12 @@ func TestUIMetricsPanel(t *testing.T) {
 		// 定时器自己判断面板还在不在，不在就停。
 		"if (!$('metrics-panel') || !state.current)",
 		"clearInterval(metricsTimer)",
+		// 但「只在定时器里自检」不够：check 要等下一次 5 秒 tick，切视图发生时
+		// 在飞请求与下一个 tick 仍会打库（真机实测多两批）。面板一消失就立即停。
+		"function watchMetricsPanel()",
+		"new MutationObserver(",
+		"metricsObserver.observe(results, { childList: true, subtree: true })",
+		"watchMetricsPanel();",
 		// 结论来自服务端规则，界面上不二次判断。
 		"out.verdict",
 		// 入口按能力位显示。

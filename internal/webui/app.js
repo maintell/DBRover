@@ -3474,6 +3474,30 @@ function stopMetricsRefresh() {
   }
 }
 
+// watchMetricsPanel 让「面板从 DOM 消失」这件事本身立刻停掉采集。
+//
+// 为什么不能只靠 setInterval 回调里的自检：那个检查要等下一次 5 秒 tick 才跑，
+// 而切视图往往发生在两个 tick 之间——在飞的那批请求回来前、以及下一个 tick，
+// 都还会继续打库（真机实测：切走后仍多发了两整批 6 端点请求）。docs/09 验收 10
+// 要的是「关闭即停」，不是「最多再打两轮」。
+//
+// 用 MutationObserver 而不是让 20 处 `results.replaceChildren` 各自记得清理：
+// 散点清理漏一处就复发，而「面板不在了」是唯一不需要调用方配合的事实。
+let metricsObserver = null;
+function watchMetricsPanel() {
+  if (metricsObserver) return;
+  const results = $('results');
+  if (!results || typeof MutationObserver === 'undefined') return;
+  metricsObserver = new MutationObserver(() => {
+    if (!$('metrics-panel')) {
+      stopMetricsRefresh();
+      metricsObserver.disconnect();
+      metricsObserver = null;
+    }
+  });
+  metricsObserver.observe(results, { childList: true, subtree: true });
+}
+
 async function showMetrics(auto) {
   if (!state.current) return;
   if (!auto) setStatus('读指标…');
@@ -3518,6 +3542,8 @@ async function showMetrics(auto) {
   const alerts = pick(settled[5]);
   renderMetrics(out, slow, sizes, locks, hist, alerts);
   if (auto) return;
+  // 首次渲染完成后开始盯面板；每次 auto 刷新都复用同一个 observer。
+  watchMetricsPanel();
   setStatus('指标已更新');
   stopMetricsRefresh();
   metricsTimer = setInterval(() => {

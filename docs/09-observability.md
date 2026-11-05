@@ -285,7 +285,7 @@ CREATE TABLE slow_query_hourly (
 | 表体量 Top N + 增长 | §3.5 / FR-MON-06 | `driver.CapacityProvider`（判据 `Capabilities().Capacity`）。PG 用 `pg_table_size` / `pg_indexes_size` / `pg_total_relation_size`——都是 **O(1) 的目录计算，不扫表**；MySQL 用 `information_schema.TABLES` 并**排除系统库**（它们总是排在前几名，会把业务表挤掉）。数据与索引分开给：只报总量的话，「为什么这张表这么大」还得再点进去看一次。**增长未做**：需要本地时序留存（FR-MON-05） | `TestCapacityCapabilityIsHonest`（SQLite false / 两引擎 true）、`TestUIMetricsPanel`（界面接线）；真机 MySQL 见上 |
 | QPS | §3.1 / FR-MON-01 | `driver.Counters.Statements`（累计语句数，-1 表示这个实例没给）+ 服务层第二份采样状态，两次相减除以时间跨度。MySQL 取 `Questions`；PG 取 `SUM(calls)`（**要有 pg_stat_statements**，没装时留 -1，界面不显示这一行而不是显示 0）。首次采样不给数字、计数器重置时跳过——与慢查询同一套规矩 | `TestApplyQPSSkipsFirstSample`（首次不给、2 秒 200 条 = 100 QPS、清零后跳过）；真机 MySQL：第二次采样出现 QPS |
 | 终止会话的确认与审计 | §3.3 / 验收 6 | 确认框带**该会话当时在跑的语句**（超 400 字符截断，并**先转义再拼 HTML**——语句来自数据库，不能当可信文本拼）；终止**记审计**：`action=monitor.kill_session`、`risk=R4`、`friction=F2`、`sql` 是被终止会话当时的语句（已脱敏），失败时 `outcome=error` 且带原因。终止**不走执行门**（它不是 SQL，走的是驱动的专门方法），审计在 API 层自己写，id 复用同一个生成器以免审计里出现两种 id 形态 | `TestUISessionsPanel`（确认框含语句、含转义函数）；真机 MySQL：后台跑 `SELECT SLEEP(90)` → 终止 → `/audit` 出现 `monitor.kill_session` 且 `sql=SELECT SLEEP(90)`；内置浏览器确认框显示同一句 SQL |
-| 面板刷新与停止 | §2.1 / 验收 10 | 打开面板拉一次快照，之后每 5 秒一次；**停止条件写在定时器自己身上**（结果区里没有 `#metrics-panel` 就 `clearInterval`）。这样任何切视图的路径都不必记得清理——漏一处就是「监控把库拖慢」 | `TestUIMetricsPanel`（钉住判断语句与 `clearInterval`） |
+| 面板刷新与停止 | §2.1 / 验收 10 | 打开面板拉一次快照，之后每 5 秒一次；停止由 `MutationObserver` 盯「`#metrics-panel` 从 DOM 消失」立即触发 `stopMetricsRefresh()`，**不再只靠定时器下一次 tick 自检**（那会切走后多打两批请求，真机实测抓到并修掉）。定时器的自检保留为第二道 | `TestUIMetricsPanel`（断言 observer 接线 + `clearInterval`，含变异验证）；真机 MySQL + 内置浏览器：切走后 13 秒零新 `monitor/metrics` 请求 |
 
 ### 9.2 尚未实现
 
@@ -298,4 +298,19 @@ CREATE TABLE slow_query_hourly (
 | 慢查询的 P95 / 最大单次 / 首末次 | §3.2 的列表头 | §3.2 的表格承诺了「P95、最大单次耗时、首次/末次出现」，实现只给了总耗时 / 次数 / 平均 / 行数——**那三列没有**。另外「按窗口内总耗时重排」只在驱动按**累计**取回的 TOP-N 子集内成立：新近爆发但历史排名靠后的语句根本不在结果里 | 补字段要驱动侧多给（PG 的 `stddev_exec_time` / `max_exec_time`；MySQL 的 `SUM_*` 需要更多列）；「新近爆发」需要按窗口取数而不是按累计取数，属于采样策略变更 |
 | 慢查询的小时聚合 | §4 的 `slow_query_hourly` | 表已设计但没写：面板给的是**窗口增量**，没有按小时落盘 | 与本片的 `metric_sample` 同源，加一张表 + 一个聚合任务即可，等有「看一周慢查询」的真实需求再做 |
 
-**验收现状**：12 项里 2、3、4、5、6、8、11、12 已由真实用例或真机验证覆盖；第 1 的预算现在由「六块数据并发取」保证（实测六端点合计 37–50ms，本机），但**没有精确的 click→render 计时工具**，仍缺一条自动化计时断言；第 7 只有等待关系与链深（没有树形与 MDL 层）；第 10 的停止条件写在定时器自己身上，只有界面门禁，缺「关闭后无新查询」的集成断言；第 9 卡在 Oracle 实例。
+**验收现状（2026-11-05 真机补验后）**：12 项里 2、3、4、5、6、8、11、12 已由真实用例或真机验证覆盖；
+
+- **第 1（面板 2s 内出首屏结论）**：真机 MySQL 5.7（debug-ubuntu 一次性容器）+ 内置浏览器实测，
+  一次点开「指标」即同时给出六块真实数据（连接与负载/缓存命中/QPS 规则结论、慢查询 Top 8 含
+  「首次采样，暂无增量」标注、表体量、锁等待、趋势、告警），**结论由规则产出而不是固定文案**。
+  数据齐备由「六端点 `Promise.allSettled` 并发取」保证（本机六端点合计 37–50ms）；
+  仍缺一条纯 `click→render` 的自动化毫秒断言（浏览器工具的往返计入侵扰），如实标注为部分。
+- **第 10（关闭面板后停止采集）**：**已由真机网络证据验证**。此前只靠 `setInterval` 回调里的自检，
+  真机实测抓到缺陷：切走视图后 `#metrics-panel` 立即不在 DOM，但仍多发了两整批 6 端点请求
+  （序列 62/68，约 10 秒）。根因是自检要等下一次 5 秒 tick，而在飞请求与下一个 tick 会继续打库。
+  修法：加 `MutationObserver` 盯「面板从 DOM 消失」这件事本身，一消失立即 `stopMetricsRefresh()`，
+  不再依赖 20 处 `results.replaceChildren` 散点各自记得清理。修后同一操作复验：切走后 13 秒内
+  `monitor/metrics` **零新请求**（序列停在 118）。门禁 `TestUIMetricsPanel` 已升级断言 observer 接线
+  并做变异验证（去掉 `watchMetricsPanel()` 调用即红）。
+
+第 7 只有等待关系与链深（没有树形与 MDL 层）；第 9 卡在 Oracle 实例。
