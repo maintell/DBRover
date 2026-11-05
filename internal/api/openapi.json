@@ -264,7 +264,7 @@
     "/api/v1/connections/{id}/tables/{name}/schema": {
       "get": {
         "summary": "表结构详情与 DDL 原文",
-        "description": "DDL 还原失败时仍返回结构，另给 ddl_error，不让整页打不开。",
+        "description": "列、索引、外键、检查约束（checks）、分区（partitions）、主键与建表原文。DDL 还原失败时仍返回结构，另给 ddl_error；分区与约束取不到时只让那一块空着——都不让整页打不开。",
         "parameters": [
           { "name": "id", "in": "path", "required": true, "schema": { "type": "string" } },
           { "name": "name", "in": "path", "required": true, "schema": { "type": "string" } },
@@ -280,7 +280,7 @@
     "/api/v1/connections/{id}/schema/plan": {
       "post": {
         "summary": "生成结构变更预案",
-        "description": "v1 支持 create_table / add_column / drop_column / alter_column_type / create_index / drop_index / add_foreign_key / drop_table。执行走同一个 /changes/{pid}/apply；预案带表定义哈希（建表则要求执行时表仍不存在），变了就返回 409 SCHEMA_CHANGED。建表必须给主键。改列类型前会做收窄预检，装不下现存数据返回 409 NARROWING_BLOCKED；SQLite 不支持原地改类型，返回 400。加外键前先查孤儿数据与父表列唯一性，不通过返回 409 FK_PRECHECK_BLOCKED 并带样本；SQLite 不支持 ALTER TABLE 加约束，返回 400。删表/删列前先查依赖（视图与入向外键），仍被引用返回 409 DEPENDENCY_BLOCKED；删表必然不可逆，回滚语句只是把空表建回来。raw 是手写 DDL 入口：只接受一条 DDL，不做语义预检，预案里明确标注并标不可逆。",
+        "description": "动作清单以 action 的 enum 为准（19 个，按对象分组）。执行走同一个 /changes/{pid}/apply；预案带表定义哈希（建表则要求执行时表仍不存在），变了就返回 409 SCHEMA_CHANGED。建表必须给主键。改列类型前会做收窄预检，装不下现存数据返回 409 NARROWING_BLOCKED；SQLite 不支持原地改类型，返回 400。加外键前先查孤儿数据与父表列唯一性，不通过返回 409 FK_PRECHECK_BLOCKED 并带样本；SQLite 不支持 ALTER TABLE 加约束，返回 400。删表/删列前先查依赖（视图与入向外键），仍被引用返回 409 DEPENDENCY_BLOCKED；删表必然不可逆，回滚语句只是把空表建回来。raw 是手写 DDL 入口：只接受一条 DDL，不做语义预检，预案里明确标注并标不可逆。",
         "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "string" } }],
         "requestBody": {
           "required": true,
@@ -291,7 +291,19 @@
                 "required": ["table", "action"],
                 "properties": {
                   "table": { "type": "object" },
-                  "action": { "type": "string", "enum": ["create_table", "add_column", "drop_column", "alter_column_type", "create_index", "drop_index", "add_foreign_key", "drop_table", "raw"] },
+                  "action": {
+                    "type": "string",
+                    "description": "按对象分组：表（create_table / drop_table）、列（add_column / drop_column / alter_column_type / set_nullable / set_default）、索引（create_index / drop_index）、约束（add_foreign_key / add_check）、其他对象（create_view / create_matview / create_trigger / create_type / create_sequence / create_routine / replace_routine），最后是 raw。每一个的动作入参见下方对应字段；能力位为假的引擎上会明确拒绝并说明理由，而不是静默不生效",
+                    "enum": [
+                      "create_table", "drop_table",
+                      "add_column", "drop_column", "alter_column_type", "set_nullable", "set_default",
+                      "create_index", "drop_index",
+                      "add_foreign_key", "add_check",
+                      "create_view", "create_matview", "create_trigger", "create_type", "create_sequence",
+                      "create_routine", "replace_routine",
+                      "raw"
+                    ]
+                  },
                   "column": {
                     "type": "object",
                     "required": ["name"],
@@ -316,6 +328,70 @@
                   "sql": {
                     "type": "string",
                     "description": "raw 动作用：一条手写的 DDL 语句。一次只能一条（多条无法保证原子性），只接受 DDL（DML 走变更集），且**不做语义预检**——不检查收窄/孤儿/依赖，也不生成回滚语句"
+                  },
+                  "check": {
+                    "type": "object",
+                    "description": "add_check 用。只有真会强制 CHECK 的引擎上才有（PG；MySQL 5.7 会解析后静默忽略、SQLite 只能建表时写）。生成预案前先数一遍 NOT (expr) 的行数，有值即 409 CHECK_VIOLATED 并报行数；表达式禁分号（会把一条语句变两条）、禁注释符、禁控制字符，长度上限 1000",
+                    "required": ["name", "expression"],
+                    "properties": {
+                      "name": { "type": "string" },
+                      "expression": { "type": "string", "description": "布尔表达式原文，例如 age >= 0 AND age < 200" }
+                    }
+                  },
+                  "view": {
+                    "type": "object",
+                    "description": "create_view / create_matview 共用这一个结构，靠 action 区分（物化视图只有 PG 有）。同名已存在直接拒绝——不加 OR REPLACE，悄悄替换会改掉所有依赖方看到的列",
+                    "required": ["name", "query"],
+                    "properties": {
+                      "name": { "type": "string" },
+                      "query": { "type": "string", "description": "SELECT / WITH 主体，不含 CREATE VIEW 与结尾分号，≤4000 字符" }
+                    }
+                  },
+                  "sequence": {
+                    "type": "object",
+                    "description": "create_sequence 用，只有声明了 Sequences 的引擎（PG）才有。数字字段留空即交给引擎默认——用指针而不是 0，因为 INCREMENT 0 是非法值、必须与「没填」区分开",
+                    "required": ["name"],
+                    "properties": {
+                      "name": { "type": "string" },
+                      "start": { "type": "integer" },
+                      "increment": { "type": "integer" },
+                      "min": { "type": "integer" },
+                      "max": { "type": "integer" },
+                      "cycle": { "type": "boolean" }
+                    }
+                  },
+                  "trigger": {
+                    "type": "object",
+                    "description": "create_trigger 用，目标表由 table 给。body 只支持单条语句（不含结尾分号）：多语句体在 MySQL 里要靠 DELIMITER，走驱动得先解决语句切分，v1 不做",
+                    "required": ["name", "timing", "event", "body"],
+                    "properties": {
+                      "name": { "type": "string" },
+                      "timing": { "type": "string", "enum": ["BEFORE", "AFTER", "INSTEAD OF"] },
+                      "event": { "type": "string", "enum": ["INSERT", "UPDATE", "DELETE"] },
+                      "body": { "type": "string" }
+                    }
+                  },
+                  "type": {
+                    "type": "object",
+                    "description": "create_type 用，v1 只做枚举。values 的顺序就是比较大小的顺序（PG 按声明顺序而非字母序），单个标签 ≤63 字节",
+                    "required": ["name", "values"],
+                    "properties": {
+                      "name": { "type": "string" },
+                      "values": { "type": "array", "items": { "type": "string" } }
+                    }
+                  },
+                  "routine": {
+                    "type": "object",
+                    "description": "create_routine / replace_routine 用（两者入参相同，replace 要求同名已存在且 kind 与现状一致）。params 只支持输入参数；returns 只在 function 时有意义，language 只在 PG 上有意义。回滚 PG 必须带参数类型签名，否则删不掉",
+                    "required": ["name", "body"],
+                    "properties": {
+                      "name": { "type": "string" },
+                      "kind": { "type": "string", "enum": ["procedure", "function"], "description": "空表示 procedure" },
+                      "params": { "type": "array", "items": { "type": "object" }, "description": "[{name, type}]，只支持输入参数" },
+                      "returns": { "type": "string" },
+                      "language": { "type": "string", "description": "只在 PG 上有意义，默认 plpgsql" },
+                      "body": { "type": "string", "description": "不能为空、不能以分号结尾、不能含定界符 $dbrover$、≤2 万字符；MySQL 的多语句体要用 BEGIN … END 包起来" }
+                    }
                   },
                   "foreign_key": {
                     "type": "object",
