@@ -364,6 +364,11 @@ func (e *Executor) ApplyChangePlanWithProgress(
 
 	if time.Now().After(plan.ExpiresAt) {
 		out.Blocked = true
+		// 必须给稳定码：没有它，这个拦截会落到「需要审批」（428），
+		// 客户端于是拿着一张永远不可能成功的预案反复重试——过期是不可逆状态，
+		// 正确动作是重新生成，而不是补一个 approve。404 + 重新生成才是可行动的。
+		out.BlockCode = "CHANGE_PLAN_EXPIRED"
+		out.BlockHint = "重新生成预案；旧的那张不会再生效"
 		out.Reason = ErrPlanExpired.Error()
 		return out, nil
 	}

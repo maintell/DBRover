@@ -48,14 +48,13 @@ type Session interface {
     Query(ctx context.Context, sql string, args []any, opt QueryOptions) (*ResultCursor, error)
     Execute(ctx context.Context, sql string, args []any) (*ExecResult, error)
 
-    Begin(ctx context.Context, opt TxOptions) error
+    Begin(ctx context.Context) error
     Commit(ctx context.Context) error
     Rollback(ctx context.Context) error
-    TxState() TxState
+    InTx() bool   // 实际签名；目标形态里的 TxState（含失败态）未实现
 
-    // 会话上下文切换（不同引擎语义不同，见 3.1）
-    Use(ctx context.Context, path NamespacePath) error
-
+    // 会话上下文切换：**v1 没有这个方法**（见 3.1 的现状说明）。
+    // 三个引擎都没实现 Use；换库/换模式只能新建连接。
     // 取消当前在途语句。必须能在语句阻塞时生效。
     Cancel(ctx context.Context) error
 
@@ -66,19 +65,27 @@ type Session interface {
 ### 2.2 元数据
 
 ```go
-type MetadataProvider interface {
-    Catalogs(ctx) ([]CatalogRef, error)
-    Schemas(ctx, catalog string) ([]SchemaRef, error)
-    Objects(ctx, schema NamespacePath, kinds ...ObjectKind) ([]ObjectRef, error)
+// 实际签名（internal/driver/connector.go 的 Metadata；下面这份是 v1 的真相）
+type Metadata interface {
+    Catalogs(ctx context.Context) ([]string, error)
+    Schemas(ctx context.Context, catalog string) ([]string, error)
+    Objects(ctx context.Context, catalog, schema string, kinds ...model.ObjectKind) ([]model.ObjectRef, error)
 
-    DescribeTable(ctx, ref ObjectRef) (*TableDetail, error)
-    DescribeRoutine(ctx, ref ObjectRef) (*RoutineDetail, error)
-    DescribeIndex(ctx, ref ObjectRef) (*IndexDetail, error)
+    DescribeTable(ctx context.Context, ref model.ObjectRef) (*model.TableDetail, error)
+    // 例程/索引/统计没有独立的 Describe：例程走 DDL（含定义原文），
+    // 索引在 TableDetail.Indexes 里，统计在 TableDetail.RowEstimate/SizeBytes。
 
-    DDL(ctx, ref ObjectRef) (string, error)             // 引擎原生 DDL 文本
-    SearchObjects(ctx, q SearchQuery) ([]ObjectRef, error)
-    Stats(ctx, ref ObjectRef) (*ObjectStats, error)     // 行数估算、体积
+    DDL(ctx context.Context, ref model.ObjectRef) (string, error)
+    Search(ctx context.Context, pattern string, limit int) ([]model.ObjectRef, error)
+
+    // 这两条在目标契约里没有，但删除阻断与锁等待全靠它们：
+    Dependents(ctx context.Context, ref model.ObjectRef) ([]model.Dependent, error)
+    Blockers(ctx context.Context, minAge time.Duration) ([]model.Blocker, error)
 }
+
+> 写法差异不是笔误：**不引入 CatalogRef/SchemaRef/NamespacePath 这层包装**，库与模式都是
+> 字符串，少一层类型就少一层转换。反过来，`Dependents` 与 `Blockers` 是真实入口，
+> 新增引擎必须实现——它们分别决定「删表会不会打断别人」和「现在有没有人占着锁」。
 ```
 
 **缺失对象的契约**：`Describe*` 系列遇到不存在的对象必须返回包装了 `driver.ErrObjectNotFound` 的错误，**不得**返回一个零列的空结构。
@@ -113,28 +120,31 @@ type KVConnector interface {
 ### 2.4 可选能力（用能力接口 + 类型断言）
 
 ```go
+// 运行态观测拆成四个独立接口，各自对应一个能力位：四类数据的可用性完全独立
+// （PG 有锁图但没 pg_stat_statements，MySQL 有慢查询但拿不到事务起始时间）。
+// 合成一个大接口只会逼每个引擎实现一堆返回空切片的方法。
+type MetricsProvider interface {      // Capabilities.Metrics
+    Metrics(ctx context.Context) (*model.ServerMetrics, error)
+}
+type SlowQueryProvider interface {   // Capabilities.SlowQueryStats
+    SlowQueries(ctx context.Context, window time.Duration) ([]model.SlowQuery, error)
+}
+type LockGraphProvider interface {   // Capabilities.LockGraph
+    LockGraph(ctx context.Context) (*model.LockGraph, error)
+}
+type CapacityProvider interface {    // Capabilities.Capacity
+    TableSizes(ctx context.Context, limit int) ([]model.TableSize, error)
+}
+
+// 会话管理（Capabilities.SessionMgmt）：只有这两条，指标不在这里。
 type MonitorProvider interface {
-    ServerMetrics(ctx) (*ServerMetrics, error)
-    Sessions(ctx, filter SessionFilter) ([]DbSession, error)
-    KillSession(ctx, id string) error
-    SlowQueries(ctx, window time.Duration) ([]SlowQuery, error)
-    LockGraph(ctx) (*LockGraph, error)
-    TableSizes(ctx, limit int) ([]TableSize, error)
+    Sessions(ctx context.Context) ([]model.DbSession, error)
+    KillSession(ctx context.Context, id string) error
 }
 
-type Backuper interface {
-    Backup(ctx, spec BackupSpec, sink Sink) (*BackupResult, error)
-    Restore(ctx, src Source, spec RestoreSpec) (*RestoreResult, error)
-}
-
-type BulkLoader interface {
-    BulkLoad(ctx, target ObjectRef, rows RowStream) (*LoadResult, error)
-}
-
-type DDLLocker interface {
-    // 变更前的可行性探测：锁风险、在线 DDL 支持、预估时长
-    AssessDDL(ctx, stmts []string) (*DDLAssessment, error)
-}
+// Backuper / BulkLoader / DDLLocker 在 v1 里**都没有定义**：备份与恢复走
+// service 层的 Export/DBR 容器（不需要驱动特化），批量写入走执行门，
+// DDL 可行性只有 Blockers（锁等待与长事务），没有锁级别/时长预估。
 ```
 
 上层用法：
@@ -157,10 +167,14 @@ if m, ok := conn.(driver.MonitorProvider); ok && conn.Capabilities().SessionMgmt
 
 | 项 | PG | MySQL | MSSQL | Oracle | SQLite | Redis | Mongo | ES |
 |---|:--:|:--:|:--:|:--:|:--:|:--:|:--:|:--:|
-| Catalog 层 | database | ○ | database | ○ | 文件 | db index | database | ○ |
-| Schema 层 | schema | database | schema | user | main/temp | ○ | ○ | index |
+| Catalog 层 | database | **database**（`SHOW DATABASES`，`Capabilities.Schemas=false`） | database | ○ | **main / temp / attached**（`PRAGMA database_list`，`Schemas=false`） | db index | database | ○ |
+| Schema 层 | schema | ○（v1 不启用；库已归 Catalog） | schema | user | ○（同左） | ○ | ○ | index |
+
+> 这两行此前写反了：MySQL / SQLite 的「库」在 v1 里落在 **Catalog** 层，`Schemas()` 对它们
+> 返回空。按旧表去调 `Schemas()` 取库名，对象树第一层会直接是空的。
 | 跨 catalog 查询 | ○（需 FDW） | ◐ 同实例可 `db.tbl` | ● 三段式 | ● 同义词/权限 | ● attach | ○ | ○ | ○ |
 | 切换上下文语句 | `SET search_path` | `USE db` | `USE db` | `ALTER SESSION SET CURRENT_SCHEMA` | `ATTACH` | `SELECT n` | `use db` | ○ |
+| 切换上下文的实现 | ⛔ v1 未实现 | ⛔ | ⛔ | ⛔ | ⛔ | ⛔ | ⛔ | ○ |
 | 只读强制手段 | `SET default_transaction_read_only` | `SET SESSION TRANSACTION READ ONLY` | 事务隔离+权限 | `SET TRANSACTION READ ONLY` | `PRAGMA query_only` | 连接层拦截 | 连接层拦截 | 连接层拦截 |
 
 ### 3.2 元数据
@@ -177,7 +191,7 @@ if m, ok := conn.(driver.MonitorProvider); ok && conn.Capabilities().SessionMgmt
 | 例程源码 | ● | ● | ● | ●（可能被 wrap） | ◐ | ○ | ◐ JS | ○ |
 | 对象 DDL 还原 | `pg_get_*def` | `SHOW CREATE` | 自拼（无原生） | `DBMS_METADATA` | 自拼 | 自拼 | 自拼 | 自拼 |
 
-> **对象类型覆盖**：视图与触发器三个引擎都支持（触发器分别走 `sqlite_master` / `information_schema.TRIGGERS` / `pg_trigger`，PG 需排除 `tgisinternal`，否则每个外键都会冒出两条内部触发器）；序列只有 PostgreSQL 做了（`pg_class.relkind='S'`），MySQL 与例程都还没接。**界面**：`/tables` 按能力声明把这些对象一起返回。触发器与序列在对象树里都可点开看定义（`?kind=trigger` / `?kind=sequence`）：触发器用 `SHOW CREATE TRIGGER` / `pg_get_triggerdef`，序列因为 PostgreSQL 没有「取定义」的内置函数，由 `pg_sequences` 拼回 `CREATE SEQUENCE`（起始值、步长、上下界、缓存、循环都要带，否则重建出来的是另一个序列）。两者都不会被当成「能查数据的表」——对它们执行 `SELECT *` 只会得到一条必然失败的语句。没做的类型能力位一律为 `false`——声明 `true` 却返回空列表，会被读成「这个库没有该对象」，比「不支持」更误导。**用户类型**（枚举 / 域）就属于这一类：PostgreSQL 的 `pg_type` 曾查得到但没接进 `Objects(KindType)`，能力位一度写着 `true`——按这条原则先改成 `false`，再按「实现列表 → 加 `drivertest` 用例 → 才翻回 `true`」的顺序做完：现在 PG 的 `Objects(KindType)` 查 `pg_type` 的 `typtype IN ('e','d')`（枚举与域），`drivertest` 的 `TypeListing` 会建一个真枚举再列出来，`TestUserTypesCapabilityIsHonest` 按引擎列出预期值。MySQL / SQLite 仍为 `false`（ENUM 是列类型，不是独立对象）。**例程**（存储过程 / 函数）也已接上：MySQL 走 `information_schema.ROUTINES`、定义取 `SHOW CREATE PROCEDURE` / `SHOW CREATE FUNCTION`（要先查一次 `ROUTINE_TYPE`，两者结果列名不同）；PostgreSQL 走 `pg_proc` 的 `prokind IN ('f','p')`、定义取 `pg_get_functiondef`，并排除聚合、窗口函数与**扩展自带的成员**（`pg_depend` 的 `deptype='e'`）——不排除的话装完扩展就会列出上百个别人的函数。SQLite 没有例程，保持 `false`。PG 里一个名字可以有多个重载，列表按名字去重、定义只显示第一个并在开头说明有几条，把几条拼在一起会让人以为那是**一条**可回放的语句。`drivertest` 的 `RoutineListing` 走完整链路：建一个带 `BEGIN … END` 体的过程 → 列出来 → 取定义 → 删掉后立刻消失 → **用取到的定义回放**（回放不了就说明定义不完整）。
+> **对象类型覆盖**：视图与触发器三个引擎都支持（触发器分别走 `sqlite_master` / `information_schema.TRIGGERS` / `pg_trigger`，PG 需排除 `tgisinternal`，否则每个外键都会冒出两条内部触发器）；序列只有 PostgreSQL 做了（`pg_class.relkind='S'`），MySQL 没有序列这个概念（用 AUTO_INCREMENT）。**界面**：`/tables` 按能力声明把这些对象一起返回。触发器与序列在对象树里都可点开看定义（`?kind=trigger` / `?kind=sequence`）：触发器用 `SHOW CREATE TRIGGER` / `pg_get_triggerdef`，序列因为 PostgreSQL 没有「取定义」的内置函数，由 `pg_sequences` 拼回 `CREATE SEQUENCE`（起始值、步长、上下界、缓存、循环都要带，否则重建出来的是另一个序列）。两者都不会被当成「能查数据的表」——对它们执行 `SELECT *` 只会得到一条必然失败的语句。没做的类型能力位一律为 `false`——声明 `true` 却返回空列表，会被读成「这个库没有该对象」，比「不支持」更误导。**用户类型**（枚举 / 域）就属于这一类：PostgreSQL 的 `pg_type` 曾查得到但没接进 `Objects(KindType)`，能力位一度写着 `true`——按这条原则先改成 `false`，再按「实现列表 → 加 `drivertest` 用例 → 才翻回 `true`」的顺序做完：现在 PG 的 `Objects(KindType)` 查 `pg_type` 的 `typtype IN ('e','d')`（枚举与域），`drivertest` 的 `TypeListing` 会建一个真枚举再列出来，`TestUserTypesCapabilityIsHonest` 按引擎列出预期值。MySQL / SQLite 仍为 `false`（ENUM 是列类型，不是独立对象）。**例程**（存储过程 / 函数）也已接上：MySQL 走 `information_schema.ROUTINES`、定义取 `SHOW CREATE PROCEDURE` / `SHOW CREATE FUNCTION`（要先查一次 `ROUTINE_TYPE`，两者结果列名不同）；PostgreSQL 走 `pg_proc` 的 `prokind IN ('f','p')`、定义取 `pg_get_functiondef`，并排除聚合、窗口函数与**扩展自带的成员**（`pg_depend` 的 `deptype='e'`）——不排除的话装完扩展就会列出上百个别人的函数。SQLite 没有例程，保持 `false`。PG 里一个名字可以有多个重载，列表按名字去重、定义只显示第一个并在开头说明有几条，把几条拼在一起会让人以为那是**一条**可回放的语句。`drivertest` 的 `RoutineListing` 走完整链路：建一个带 `BEGIN … END` 体的过程 → 列出来 → 取定义 → 删掉后立刻消失 → **用取到的定义回放**（回放不了就说明定义不完整）。
 >
 > **MSSQL 与 SQLite 没有「一键取 DDL」**，必须由驱动自己拼装。这是两个容易低估工作量的实现点，需专门写测试（拼出的 DDL 能被回放到新库并产生等价结构）。
 
@@ -185,7 +199,7 @@ if m, ok := conn.(driver.MonitorProvider); ok && conn.Capabilities().SessionMgmt
 
 | 项 | PG | MySQL | MSSQL | Oracle | SQLite | Redis | Mongo | ES |
 |---|:--:|:--:|:--:|:--:|:--:|:--:|:--:|:--:|
-| 流式读取 | ● `DECLARE CURSOR` | ● `RowStream` | ● | ● | ● | ◐ `SCAN` | ● cursor | ● `scroll`/`search_after` |
+| 流式读取 | ● `RowStream`（按需读行，**没有** `DECLARE CURSOR` 服务端游标） | ● `RowStream` | ● | ● | ● | ◐ `SCAN` | ● cursor | ● `scroll`/`search_after` |
 | Keyset 分页 | ● `ctid`/PK | ● PK | ● PK | ● `ROWID`/PK | ● `rowid` | ○ | ● `_id` | ● `search_after` |
 | OFFSET 兜底 | ● | ● | ● `OFFSET..FETCH` | ● 12c+ / `ROWNUM` | ● | ○ | ○ | ○（`from` 有 1 万上限） |
 | 总数估算 | ◐ `reltuples` | ◐ `TABLE_ROWS` | ◐ DMV | ◐ `NUM_ROWS` | ○（需 `COUNT`） | ● `DBSIZE` | ◐ `estimatedDocumentCount` | ● `_count` |
@@ -202,7 +216,8 @@ else:
     单页 + 禁止翻页
 ```
 
-> 深分页阈值：`offset > 10000` 时 UI 提示「当前使用偏移分页，可能变慢；建议按主键排序」。
+> **v1 只做键集分页**：`ORDER BY … LIMIT n+1`，没有 OFFSET 分支，因此也没有上面的「深分页提示」。
+> 无主键表**直接拒绝浏览**（`ErrNoPrimaryKey` → 501），不会退回偏移分页——漏行比打不开更糟。
 
 ### 3.4 执行计划
 
@@ -217,6 +232,8 @@ else:
 **统一计划模型**
 
 ```go
+// ⛔ 目标形态，v1 **没有**这个类型：执行计划不归一化，只把引擎原始输出（行）交给
+// service.AnalyzePlan 做「偏差项」翻译（docs/05 §4.2）。跨引擎统一计划模型没做。
 type PlanNode struct {
     ID          int
     Operation   string        // 归一化：SeqScan / IndexScan / HashJoin / Sort / Aggregate ...
@@ -249,7 +266,7 @@ type PlanNode struct {
 | Kill | `pg_terminate_backend` | `KILL` | `KILL` | `ALTER SYSTEM KILL SESSION` | ○ | `CLIENT KILL` | `killOp` | ◐ 取消任务 |
 | 慢查询来源 | `pg_stat_statements`（需扩展） | `performance_schema.events_statements_summary_by_digest` | Query Store（2016+） | `v$sql` + `v$sqlstats`（AWR 需 License） | ○ | `SLOWLOG GET` | Profiler / `$collStats` | 慢日志配置 + `_nodes/stats` |
 | 锁等待 | `pg_locks` + `pg_blocking_pids` | `performance_schema.data_lock_waits` | `sys.dm_tran_locks` + `dm_os_waiting_tasks` | `v$lock` + `v$session.blocking_session` | ○ | ○ | ○ | ○ |
-| 表体积 | `pg_total_relation_size` | `information_schema.TABLES` | `dm_db_partition_stats` | `dba_segments` | `PRAGMA page_count` | `MEMORY USAGE` | `$collStats` | `_cat/indices` |
+| 表体积 | `pg_total_relation_size` | `information_schema.TABLES` | `dm_db_partition_stats` | `dba_segments` | ○（需要 `dbstat` 虚拟表，v1 不做） | `MEMORY USAGE` | `$collStats` | `_cat/indices` |
 | 需额外许可 | — | — | — | **AWR/ASH 需 Diagnostics Pack** | — | — | — | ◐ 部分监控特性 |
 
 **Oracle 许可约束很重要**：AWR/ASH 属于付费选件。默认实现必须只用 `v$`、`v$sql` 等免费视图；检测到 AWR 不可用时静默降级并在 UI 注明，**不得假设可用**。
@@ -259,6 +276,11 @@ type PlanNode struct {
 | 项 | PG | MySQL | MSSQL | Oracle | SQLite | Redis | Mongo | ES |
 |---|:--:|:--:|:--:|:--:|:--:|:--:|:--:|:--:|
 | 逻辑备份 | `COPY TO` / 自拼 SQL | `SELECT ... INTO OUTFILE` 受权限限 / 流式读 | 流式读 | 流式读 | `.backup` / `VACUUM INTO` | `DUMP`/`RESTORE` 自行序列化 | BSON 遍历 | `_reindex` 或 scroll 导出 |
+
+> **v1 现状**：备份**不走驱动**，也不看 `Capabilities.Backup`（三个引擎都还是 `false`）。
+> 它由 service 层的 `Export` + DBR 容器实现（`dbrover backup create|inspect`、`dbrover restore`，
+> 见 docs/08 §7），所以能力位恒为 `false` 并不代表「不能备份」。**没有 HTTP 端点**；
+> 上表这一行是「各引擎原生的高效路径」的目标形态，v1 一条都没用。
 | 原生工具 | `pg_dump`(外部) | `mysqldump`(外部) | `BACKUP DATABASE` | Data Pump | — | `BGREWRITEAOF` | `mongodump` | Snapshot API |
 | 本产品策略 | **自实现流式导出**，不依赖外部二进制 | 同左 | 同左 | 同左 | 复制文件（需停机或 WAL 检查点） | 序列化命令 | BSON | NDJSON |
 | 一致性保证 | `REPEATABLE READ` 快照 | `--single-transaction` 等价 | 快照隔离 | `AS OF SCN` | 文件锁 | `BGSAVE` 后读 RDB | 快照读 | 快照仓库 |
@@ -293,7 +315,8 @@ type Dialect interface {
     Classify(sql string) StatementClass    // query | dml | ddl | dcl | tcl | unknown
 
     // 计划
-    ParsePlan(raw []byte) (*model.PlanNode, error)
+    // ⛔ v1 未实现：方言层只提供 Explain 语句与偏差规则，没有 ParsePlan。
+    // ParsePlan(raw []byte) (*model.PlanNode, error)
 }
 ```
 
@@ -346,7 +369,9 @@ type Dialect interface {
 
 ### 5.1 PostgreSQL
 
-- 驱动用原生 `pgx/v5`，**不走 `database/sql`**（需要 `CopyFrom`、`LISTEN`、取消请求、批量协议）。
+- 驱动用 `database/sql` + **pgx 的 stdlib 适配**（`driverName="pgx"`），不是原生 pgx 接口。
+  好处是与另外两个引擎共用同一套行扫描与取消语义；代价是 `CopyFrom`、`LISTEN`、批量协议都用不上
+  ——现在也没用到。`取消`走 `context` + 连接级 `pg_cancel_backend`，不依赖 pgx 的私有 API。
 - 大结果集：`BEGIN; DECLARE c CURSOR FOR ...; FETCH FORWARD n` 才能流式；普通 `Query` 会缓冲。
 - 取消：`pgx` 的 `ctx` 取消会发送 CancelRequest，需独立的短连接，注意别在事务中误用。
 - `default_transaction_read_only=on` 是只读连接的最强保障，优先于 SQL 文本分析。
@@ -403,7 +428,10 @@ type Dialect interface {
 - WAL 模式下读不阻塞写，但要求文件系统支持共享内存（网络盘可能不行）。
 - 无 `ALTER COLUMN`：改列类型/约束需「建新表 → 拷数据 → 删旧表 → 改名」，`ChangePlan` 必须生成这套四步并包在事务里（SQLite DDL 是事务性的，这是优点）。
 - 类型是「亲和性」而非强类型：`INTEGER` 列可以存字符串（部分情况）。UI 渲染以实际值为准。
-- 取 schema：`PRAGMA table_info` / `index_list` / `foreign_key_list` / `table_xinfo`（含生成列），而不是查 `sqlite_master` 解析 SQL。
+- 取 schema：`PRAGMA table_info` / `index_list` / `foreign_key_list`。⛔ **没有用 `table_xinfo`**：
+  生成列（`GENERATED ALWAYS AS …`）在当前列清单里**不会出现**，导出与迁移会静默漏列，界面也标不出
+  「这是计算列」。补齐要走两步：换成 `table_xinfo` 并按 hidden 位设 `IsGenerated`，同时让导出/迁移的
+  INSERT 列清单跳过生成列（否则会往计算列写值），而不是查 `sqlite_master` 解析 SQL。
 - 备份：`VACUUM INTO 'file'` 是最安全的方式（在线、一致）；直接复制文件在 WAL 模式下会不一致。
 - 无用户与权限：`read-only` 只能在连接层用 `?mode=ro` 实现。
 
@@ -415,7 +443,7 @@ type Dialect interface {
 
 | 做什么 | 怎么触发 | 失败与降级 | 验收 |
 |---|---|---|---|
-| 浏览 keyspace | 界面左侧（按 `connection.kind=keyvalue` 自动切换）；接口是 `GET /connections/{id}/kv/keys?cursor&pattern&type&count` | 游标遍历超时 → 返回已取到的部分 + `has_more: true`，**不假装取完** | 真机 Redis 8.0.5 + 浏览器实测：6 个 key 列出、pattern 框可用、点 key 进详情 |
+| 浏览 keyspace | 界面左侧（按 `connection.kind=keyvalue` 自动切换）；接口是 `GET /connections/{id}/kv/keys?cursor&pattern&type&count` | ⛔ **v1 不返回部分结果**：SCAN 出错整页丢弃并返回错误（`redis/kv.go` 的 `SCAN 失败`）。目标形态是「把已取到的 key 连同 `has_more: true` 一起给」，但那要先定义「错误 + 部分数据」怎么同时表达，现在没有 | 真机 Redis 8.0.5 + 浏览器实测：6 个 key 列出、pattern 框可用、点 key 进详情 |
 | 看一个 key | `GET /kv/entry?key=...` → 类型 / TTL / 编码 / 元素数 / 体积 | `MEMORY USAGE` 超时 → 只给类型与元素数，体积字段缺失，不猜 | 真机返回 `type=stream ttl=-1 size=1277`；TTL -2 表示 key 不存在 |
 | 读值 | `GET /kv/value?key=...&cursor&count&max_bytes`，按类型分页（`HSCAN`/`SSCAN`/`ZRANGE`/`XRANGE`/`GETRANGE`） | string 超过 8 KB 默认只取前 8 KB 并标 `truncated: true` | 真机读 stream 返回 `pairs=0`（空队列）不报错 |
 | 改值 | `POST /kv/apply`，一次一个结构化写操作（`set_string` / `set_field` / `delete_key` / `delete_item` / `push` / `expire`） | 与命令模式共用同一道门（`service.KVExecutor`）。**刻意不做「一次多条命令」的预案**：Redis 的 `MULTI/EXEC` 出错不回滚，套用关系型那套「整批回滚」文案会骗人 | `TestKVWriteGateAndApprovalBinding`；真机 Redis 8.0.5：写 string（带 TTL 120）→ 读回一致且 `ttl=120`；写 hash field → `HGETALL` 读回；`delete_key` 返回 1 且之后 `TYPE=none`；审计里三条 `kv.mutate` |
@@ -505,7 +533,7 @@ drivertest/
 - [ ] 实现 `Connector` + `Session`，`Capabilities()` 填真实值
 - [ ] 实现 `MetadataProvider`，含 `DDL()` 往返测试
 - [ ] 实现 `dialect.Dialect`，含 `SplitStatements` 全情形用例
-- [ ] 实现 `ParsePlan`
+- [ ] 实现 `ParsePlan`（当前不存在：计划只做原始输出 + 偏差项翻译）
 - [ ] 可选接口按需实现，且与 `Capabilities()` 一致
 - [ ] 通过 `drivertest` 全套
 - [ ] 补 `testdata/docker-compose.<engine>.yml`

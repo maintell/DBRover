@@ -1919,6 +1919,12 @@ func classifyBlock(out *service.Outcome) (code string, status int, hint string) 
 	// 具体预检给了错误码就用它：这类拦截不是「策略要求确认」，而是这条语句
 	// 在这个引擎上没法执行，用 428 会把客户端引到错误的重试路径上。
 	if out.BlockCode != "" {
+		// 个别码有自己的状态语义：预案过期是「这个东西不存在了」，用 404。
+		// 一律 400 会让客户端以为「改改参数还能成」，而它其实只能重新生成。
+		switch out.BlockCode {
+		case "CHANGE_PLAN_EXPIRED":
+			return out.BlockCode, http.StatusNotFound, out.BlockHint
+		}
 		return out.BlockCode, http.StatusBadRequest, out.BlockHint
 	}
 	if out.Friction == policy.F5 {

@@ -232,6 +232,7 @@
 - **失败时抹掉已成功的结果、序号从 0 起**（高）：失败提示走 `showNotice`（它自己会 `replaceChildren`），且文案用 `r.index` 原值。现在失败块追加在已完成结果之后，「第 N 条」按 1 起；只有失败恰好是最后一条时才说「后面的语句没有执行」——勾了「遇错继续」时那句话是假的。
 - **docs/07、docs/08 的契约按实现改准（12 处）**：独立审计逐条核对了 07 的 129 条与 08 的 145 条断言，报出 8 条不符 + 4 处小缺陷，全部是「文档说的和代码做的不是一回事」。其中三条会让人对「数据会不会丢、能不能恢复」产生错误预期：08 §7 自称加密/续跑/恢复/迁移都没做（实际都做了）、08 §4.4 预检清单 12 项实际只落地 3 项、08 §4.6 校验和算法写成了 fnv1a64 求和且「与顺序无关」（实际是 sha256 按主键顺序累加）。另修 07 §5.2 的摩擦列：DDL 预案固定走变更集路径 −1，R3 的生效值是 test F1 / prod F2，不是 F2/F3；「界面必弹确认」与「接口 F2 起要审批凭证」是两件事。
 - **错误码表与代码双向漂移**（中）：`INTERNAL/500` 文档有、代码从不产出；`DB_NOT_FOUND` 与 `DB_CONNECT_NO_DATABASE` 是同一情况的两个名字；`TASK_CONFLICT` 属于未实现的任务端点。补上 `recoverPanic`（panic → 结构化 500 + `request_id`，栈打 stderr；包一层后仍实现 `http.Flusher`，头已发出则不追加错误体），删掉两个从不产出的码，并加 `TestDocErrorCodesExistInCode` 双向核对（变异验证：表里加一行 `PHANTOM_CODE` 即红）。
+- **过期预案返回 428 而不是 404**（中）：预案过期走的是「Blocked 但没给错误码」的路径，被归成 `POLICY_APPROVAL_REQUIRED`/428，hint 还写着「用 approve=true 重新提交」——客户端于是对一张永远不可能成功的预案反复重试。现在给稳定码 `CHANGE_PLAN_EXPIRED` 并映射 404：过期不可恢复，只能重新生成。用例 `TestClassifyBlockPlanExpiredIs404` 与反向断言 `TestClassifyBlockOtherCodesStay400`。
 - **两处文档过时说法**：`docs/02` 说「Origin 白名单还没有实现」（实际 `originAllowed` 已实现且有 `origin_test.go`）；`docs/08` 结尾说「恢复目前要手工取出来回放」（实际有 `dbrover restore -file … -confirm-target`）。
 
 ### 安全

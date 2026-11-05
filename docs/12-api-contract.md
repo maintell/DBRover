@@ -442,6 +442,7 @@ POST /connections
 | `CROSS_DATABASE_UNSUPPORTED` | syntax | 400 | 语句里有跨库引用（PostgreSQL 的 `库.模式.表`）：一个连接只对应一个库，执行前拦下并说明改法；**不是**策略拦截，补审批也不会过 |
 | `POLICY_APPROVAL_REQUIRED` | policy | 428 | 需要审批 |
 | `POLICY_APPROVAL_MISMATCH` | policy | 409 | 审批内容与实际语句不一致 |
+| `CHANGE_PLAN_EXPIRED` | resource | 404 | 预案超过有效期（默认 10 分钟）：不可恢复，必须重新生成。**不是** 428——补审批也救不回来 |
 | `CHANGE_ROW_CONFLICT` | constraint | 409 | 按原值定位不到行，或影响行数与预案不符 |
 | `NUMBER_PRECISION_LOSS` | internal | 400 | 大整数被写成 JSON 数字（>2^53 已在解析阶段丢精度），改用字符串重传 |
 | `CHANGE_APPLY_ABORTED` | policy | 409 | 分批执行被中止：已提交的批不回滚，预案仍有效 |
