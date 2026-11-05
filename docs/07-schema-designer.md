@@ -41,7 +41,10 @@
 | Oracle | 表空间、`COMPRESS`、分区、`SEGMENT CREATION` |
 | SQLite | `WITHOUT ROWID`、`STRICT`、`AUTOINCREMENT` |
 
-未知项通过 `EngineExtra map[string]any` 透传，UI 以「原始属性（只读）」区块展示，避免信息丢失。
+> **v1 现状：既不展示、也不透传**。`TableDetail` 里**没有** `EngineExtra` 这个字段（全仓库 0 处引用），
+> 引擎特有的未知属性在驱动读元数据时就被丢掉了，不是「存了没显示」。要落地需要两步：给
+> `model.TableDetail` 加 `EngineExtra map[string]any`，再让三个驱动各自填自己认得的项
+> （MySQL 的 `ENGINE` / `ROW_FORMAT`、PG 的 `reloptions` / `tablespace`…）。登记在 §8.2。
 
 ---
 
@@ -61,6 +64,11 @@
    · 预计锁级别与时长
    · 是否可用在线 DDL / CONCURRENTLY
    · 是否存在长事务阻塞
+
+> **v1 现状**：第 3 步只落地了最后一条——`Metadata.Blockers` 查长事务与锁等待（锁等待阻断、
+> 长事务进 `notes`）。**DDLLocker 不存在**，`ChangePlan` 里也没有 `LockLevel` / 预计时长字段，
+> 所以「预案上能看到这条 DDL 会锁多久」目前做不到；能给的是索引类操作的**引擎建议文本**
+> （§2.4 的 `IndexBuildAdvice`）与阻塞项。登记在 §8.2。
    ↓
 4. 回滚生成
    · DDLTransactional=true → 生成真实反向语句
@@ -148,7 +156,7 @@ ChangePlan
 | Mongo | 拼 `createIndexes` + `collMod` | 中 | 校验器、分片键需单独取 |
 | ES | 拼 `PUT /index`（settings + mappings） | 高 | 需剥离不可写字段（如 `uuid`、`creation_date`） |
 
-**验收方式（强制）**：把生成的 DDL 在一个空库中回放，再对回放后的结构做一次描述比对，必须与原结构等价。这是 `drivertest/ddl_test.go` 的核心用例，MSSQL 与 SQLite 尤其需要。
+**验收方式（强制）**：把生成的 DDL 在一个空库中回放，再对回放后的结构做一次描述比对，必须与原结构等价。这是 `drivertest` 的 `DDLRoundTrip` 用例（`internal/driver/drivertest/suite.go` 里的 `testDDLRoundTrip`，由 `Run` 注册；此处曾写成不存在的 `drivertest/ddl_test.go`），MSSQL 与 SQLite 尤其需要。
 
 ---
 
@@ -207,7 +215,7 @@ ChangePlan
 
 ### 5.2 危险操作的门槛
 
-| 操作 | 风险 | 额外要求 | 测试环境 | 生产环境 |
+| 操作 | 风险 | 额外要求 | 测试环境（基准） | 生产环境（基准） |
 |---|:--:|---|:--:|:--:|
 | `DROP TABLE` | R4 | 输入表名确认 + 展示行数 + 建议先备份 | F3 | F4 |
 | `DROP DATABASE/SCHEMA` | R4 | 输入库名确认 + 二次密码 | F3 | F4 + 禁止 Agent 发起 |
@@ -226,6 +234,17 @@ SELECT COUNT(*) FROM t WHERE c > 2147483647 OR c < -2147483648;
 
 非零则阻断并给出样本行。
 
+**这张表给的是基准值，实际生效的 F 还要过一遍修正项**（`policy.FrictionFor`）：
+
+- **DDL 预案固定走「变更集路径」，基准 −1**（ADR-0004：预案里已经带了完整语句与回滚，界面弹窗
+  本身就是确认，不需要再叠一层打扰）。F1 是下限，不再降。
+- 影响行数 > 1 万、影响行数未知（`-1`）、脚本语句数 > 5、近 7 天无备份：各 +1；最后夹在 F0–F4。
+
+所以常见结果是：**R3 的删列 / 改类型 / 加外键 / 加唯一索引在测试环境是 `F1`、生产环境是 `F2`**
+（生产仍 ≥ F2，接口层照样要审批凭证）；`DROP TABLE` 因为影响行数未知 +1、再 −1，正好落回
+表里的 `F3` / `F4`。此前这张表把 R3 写成 `F2`/`F3`，等于把「界面必弹确认」当成了「接口必须审批」——
+两者不是一回事：**弹窗由界面无条件给出，审批凭证只在 F2 及以上由服务端强制**。
+
 ---
 
 ## 6. 视图与例程
@@ -233,7 +252,7 @@ SELECT COUNT(*) FROM t WHERE c > 2147483647 OR c < -2147483648;
 ### 6.1 视图
 
 - 定义 SQL 用 Monaco（复用编辑器与补全）。
-- 保存前做 `EXPLAIN` 空跑验证（只读，安全）。
+- 保存前做 `EXPLAIN` 空跑验证（只读，安全）。⛔ **v1 未做**：`buildCreateViewPlan` 只校验「是不是一条查询」（必须以 SELECT/WITH 开头、禁分号、长度上限），**不发 EXPLAIN**——建一条引用了不存在列名的视图照样会出预案，到执行时才由引擎报错。
 - 展示「依赖此视图的对象」。
 - MySQL 的 `ALGORITHM`/`DEFINER`/`SQL SECURITY` 作为高级项，默认不显示（避免误设 `DEFINER`）。
 
@@ -305,14 +324,16 @@ SELECT COUNT(*) FROM t WHERE c > 2147483647 OR c < -2147483648;
 | 改默认值 | §1.1 / §5.2 | `action` 为 `set_default`：`ALTER COLUMN … SET/DROP DEFAULT`；值必须过 `defaultPattern`（数字 / 单引号字符串 / TRUE / FALSE / CURRENT_TIMESTAMP），表达式一律拒——它是一条任意 SQL。**当前默认值本身是表达式时也拒**：那意味着给不出等价回滚。预案注明「只影响之后的写入，不回填已有行」 | `TestDDLSetDefaultOnRealEngines`（MySQL + PG：表达式被拒 → SET DEFAULT → DROP DEFAULT）、`TestDDLSetNullableAndDefaultUnsupportedOnSQLite` |
 | 外键预检（只读） | §5.1 / §5.2 / 验收 5 | `POST /connections/{id}/fk/precheck`：检出子表里父表找不到对应行的数据（任一子列为 NULL 不计），判断父表参与列是否唯一（主键或**列集合完全一致**的唯一索引），orphans>0 即 `blocked` 并给最多 5 条样本 | `TestFKPrecheckCleanData`、`TestFKPrecheckOrphansBlocked`、`TestFKPrecheckCompositeUniqueness`、`TestFKPrecheckEndpoint` |
 | 删列的影响面 | §5.2 | 展示该列**非空行数**（`COUNT(*) WHERE col IS NOT NULL`），并标 `不可逆`；NULL 行不计入 | 浏览器实测（3 行有值 → 显示「影响 3 行」） |
-| 加列可撤销 | §2.6 | 撤销预案 = `DROP COLUMN`，复用撤销通道；删列因数据丢失不生成撤销 | 浏览器实测（加列后撤销，结构与 DDL 复原） |
+| 加列可撤销 | §2（撤销通道） | 撤销预案 = `DROP COLUMN`，复用撤销通道；删列因数据丢失不生成撤销 | 浏览器实测（加列后撤销，结构与 DDL 复原） |
 
 ### 8.2 尚未实现（对应验收项也未通过）
 
 | 缺口 | 契约位置 | 影响 | 处置 |
 |---|---|---|---|
-| 引擎特有项（`EngineExtra`）表单 | §1.3 | 未渲染，仅能看 DDL 原文 | 待实现；依赖各引擎补充元数据 |
+| 引擎特有项（`EngineExtra`） | §1.3 | **字段与表单都不存在**（不是「存了没渲染」）：`TableDetail` 没有这个字段，驱动读元数据时直接丢掉引擎特有属性 | 两步：加 `model.TableDetail.EngineExtra` + 三个驱动各自填充 + 界面「原始属性（只读）」区块 |
 | 磁盘余量探测 | §2.5 | 未做：DDL 前不检查可用空间，大表重建可能把磁盘写满 | 待实现；需要各引擎的库体积与所在卷余量 |
+| DDL 锁级别与时长预估 | §2.1 第 3 步 / §2.2 | 未做：`ChangePlan` 里没有 `LockLevel` / 时长字段，也没有 `DDLLocker`。用户看不到「这条 DDL 会锁多久」，只能从索引建议文本里自己推 | 在 `ChangePlan` 加 `LockLevel` 与 `DurationBand`（秒级 / 分钟级 / 十分钟级以上），取值交给 `dialect` 的规则表——不要由 service 判引擎名（ADR-0005） |
+| `DROP DATABASE` / `DROP SCHEMA` 动作 | §5.2 风险表 | 风险表里列了这一行（二次密码、生产禁止 Agent 发起），但**没有对应 action**：结构设计器只能删表，删库要走手写 DDL 或 SQL 工作区 | 要么实现 action（带二次确认），要么把这一行从风险表里去掉并注明「不在本工具范围内」 |
 | 例程依赖检查 | §5.1 | 只查视图与外键；存储过程/函数体里引用目标对象查不出来 | 待实现；文本搜索例程体误报率太高，加之前要先想清楚怎么标注 |
 | 结构比对的完整形态 | §4 / 验收 9 | 已比表、列、索引、外键、检查约束、视图**与物化视图**定义；回退脚本覆盖索引、外键、视图与物化视图；删表/删列/改类型与检查约束仍不生成（会丢数据，有意推给人）；**例程仍不参与比对**（`§4.3`） | 只剩例程；它在三种引擎里几乎无可比性，且 `CREATE OR REPLACE` 会让「差异」失去意义 |
 | 手写 SQL 模式（表单 ↔ SQL 双向同步） | §1.2 / 验收 12 | 已做**单向**：写一条 DDL → 校验 → 走同一个 Plan/Apply。**没做**「SQL 反解回表单」——那需要完整的 DDL 解析器 | 双向同步待实现；单向已覆盖「我已经有语句，只想让它经过这道门」这个真实需求 |
