@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/maintell/DBRover/internal/driver"
@@ -31,6 +32,9 @@ type MetricsSummary struct {
 	Verdict string `json:"verdict"`
 	// Details 是被触发的规则明细，供「点进详情」用。
 	Details []string `json:"details,omitempty"`
+	// QPS 是窗口内的语句速率；nil 表示算不出来（首次采样，或这个实例没给累计语句数）。
+	// 与 CacheHitRatio 一样用指针：0 与「未知」是两件不同的事。
+	QPS *float64 `json:"qps,omitempty"`
 	// Degraded 非空表示这次没拿到数据（例如采集超时），且**不是错误**。
 	// 监控拿不到数字不该报 5xx —— 那只会让人以为库挂了。
 	Degraded string `json:"degraded,omitempty"`
@@ -47,7 +51,51 @@ func (e *Executor) Metrics(ctx context.Context) (*MetricsSummary, error) {
 	if !ok {
 		return nil, fmt.Errorf("能力位声明了性能指标，但 %s 驱动没有实现 MetricsProvider", e.conn.Engine())
 	}
-	return collectMetrics(ctx, mp, metricsCollectionTimeout)
+	sum, counters, err := collectMetrics(ctx, mp, metricsCollectionTimeout)
+	if err != nil {
+		return nil, err
+	}
+	e.applyQPS(sum, counters)
+	return sum, nil
+}
+
+// qpsSampler 保存上一次的累计语句数与时刻。
+type qpsSampler struct {
+	mu    sync.Mutex
+	calls int64
+	at    time.Time
+	valid bool
+}
+
+// applyQPS 用两次采样的累计语句数算窗口 QPS。
+//
+// 首次采样没有上一份样本 → 不给数字（而不是给一个「自启动以来的平均值」冒充）。
+// 计数器被重置时差为负 → 这轮跳过，也不要显示负数。
+func (e *Executor) applyQPS(sum *MetricsSummary, c driver.Counters) {
+	if c.Statements < 0 {
+		return
+	}
+	now := c.CollectedAt
+	if now.IsZero() {
+		now = time.Now()
+	}
+	e.qps.mu.Lock()
+	defer e.qps.mu.Unlock()
+	prevCalls, prevAt, had := e.qps.calls, e.qps.at, e.qps.valid
+	e.qps.calls, e.qps.at, e.qps.valid = c.Statements, now, true
+	if !had {
+		return
+	}
+	dt := now.Sub(prevAt).Seconds()
+	if dt <= 0 {
+		return
+	}
+	delta := c.Statements - prevCalls
+	if delta < 0 {
+		return
+	}
+	q := float64(delta) / dt
+	sum.QPS = &q
 }
 
 // collectMetrics 采集并处理降级。
@@ -56,7 +104,7 @@ func (e *Executor) Metrics(ctx context.Context) (*MetricsSummary, error) {
 // 整个 driver.Connector 是一笔不划算的交易，而超时这条恰恰是最需要钉住的：
 // docs/09 §2.1 要求「超时不算错误，记一次降级并在 UI 标注」，写错的代价是运维
 // 在最需要面板的时候看到一个 5xx。
-func collectMetrics(ctx context.Context, mp driver.MetricsProvider, timeout time.Duration) (*MetricsSummary, error) {
+func collectMetrics(ctx context.Context, mp driver.MetricsProvider, timeout time.Duration) (*MetricsSummary, driver.Counters, error) {
 	cctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	counters, err := mp.Counters(cctx)
@@ -66,11 +114,11 @@ func collectMetrics(ctx context.Context, mp driver.MetricsProvider, timeout time
 				Status:   "unknown",
 				Verdict:  "采集超时，本次不展示指标",
 				Degraded: fmt.Sprintf("采集超过 %s 未返回，已放弃（监控不能把库拖慢）", timeout),
-			}, nil
+			}, driver.Counters{}, nil
 		}
-		return nil, err
+		return nil, driver.Counters{}, err
 	}
-	return summarizeCounters(counters), nil
+	return summarizeCounters(counters), counters, nil
 }
 
 // summarizeCounters 把读数变成「状态 + 一句结论」。

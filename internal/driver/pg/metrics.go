@@ -31,6 +31,14 @@ func (c *Connector) Counters(ctx context.Context) (driver.Counters, error) {
 	if err != nil {
 		return driver.Counters{}, err
 	}
+	// 语句总数只有装了 pg_stat_statements 才有。取不到就留 -1（QPS 显示「未知」），
+	// 千万别留 0——0 在差分里意味着「这段时间一条语句都没跑」，那是另一回事。
+	out.Statements = -1
+	var total int64
+	if serr := h.QueryRowContext(ctx,
+		"SELECT COALESCE(SUM(calls), -1)::bigint FROM pg_stat_statements").Scan(&total); serr == nil {
+		out.Statements = total
+	}
 	out.CollectedAt = time.Now()
 	return out, nil
 }

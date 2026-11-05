@@ -45,6 +45,11 @@ func (c *Connector) Counters(ctx context.Context) (driver.Counters, error) {
 			if v, cerr := strconv.ParseInt(val, 10, 64); cerr == nil {
 				out.CacheMisses = v
 			}
+		case `Questions`:
+			// 累计语句数（客户端发出的语句，不含复制线程）。QPS 由上层差分算。
+			if v, cerr := strconv.ParseInt(val, 10, 64); cerr == nil {
+				out.Statements = v
+			}
 		case `Uptime`:
 			if v, cerr := strconv.ParseInt(val, 10, 64); cerr == nil {
 				out.UptimeSeconds = v

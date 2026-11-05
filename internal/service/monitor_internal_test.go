@@ -93,7 +93,7 @@ func (p blockingProvider) Counters(ctx context.Context) (driver.Counters, error)
 // TestCollectMetricsDegradesOnTimeout 钉住 docs/09 §2.1 / §8 验收 8：
 // 采集超时**不算错误**，记一次降级并在界面上标注。
 func TestCollectMetricsDegradesOnTimeout(t *testing.T) {
-	sum, err := collectMetrics(context.Background(), blockingProvider{wait: 2 * time.Second}, 30*time.Millisecond)
+	sum, _, err := collectMetrics(context.Background(), blockingProvider{wait: 2 * time.Second}, 30*time.Millisecond)
 	if err != nil {
 		t.Fatalf("超时不该返回错误: %v", err)
 	}
@@ -108,10 +108,37 @@ func TestCollectMetricsDegradesOnTimeout(t *testing.T) {
 	}
 }
 
+// TestApplyQPSSkipsFirstSample 钉住 QPS 的两条规矩。
+//
+// 首次采样没有上一份样本 → 不给数字，而不是拿「自启动以来的平均值」冒充；计数器
+// 被重置时差为负 → 这一轮跳过（显示负数比不显示更糟）。
+func TestApplyQPSSkipsFirstSample(t *testing.T) {
+	ex := &Executor{}
+	t0 := time.Now()
+
+	s1 := &MetricsSummary{}
+	ex.applyQPS(s1, driver.Counters{Statements: 100, CollectedAt: t0})
+	if s1.QPS != nil {
+		t.Error("首次采样不该给 QPS")
+	}
+
+	s2 := &MetricsSummary{}
+	ex.applyQPS(s2, driver.Counters{Statements: 300, CollectedAt: t0.Add(2 * time.Second)})
+	if s2.QPS == nil || *s2.QPS < 99 || *s2.QPS > 101 {
+		t.Errorf("QPS 应为 100（2 秒 200 条），实际 %v", s2.QPS)
+	}
+
+	s3 := &MetricsSummary{}
+	ex.applyQPS(s3, driver.Counters{Statements: 5, CollectedAt: t0.Add(4 * time.Second)})
+	if s3.QPS != nil {
+		t.Errorf("计数器被重置时不该给 QPS，实际 %v", *s3.QPS)
+	}
+}
+
 // TestCollectMetricsPassesThrough 确认正常路径不被降级逻辑吃掉。
 func TestCollectMetricsPassesThrough(t *testing.T) {
 	fast := blockingProvider{wait: 0}
-	sum, err := collectMetrics(context.Background(), fast, time.Second)
+	sum, _, err := collectMetrics(context.Background(), fast, time.Second)
 	if err != nil {
 		t.Fatalf("采集失败: %v", err)
 	}

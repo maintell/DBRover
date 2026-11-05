@@ -3308,6 +3308,9 @@ function renderMetrics(out) {
       ? (out.cache_hit_ratio * 100).toFixed(1) + '%'
       : '未知（这个引擎没有缓存计数）',
   ]);
+  if (typeof out.qps === 'number') {
+    rows.push(['QPS', out.qps.toFixed(1) + ' 语句/秒（两次采样的增量）']);
+  }
   if (out.uptime_seconds > 0) {
     const d = Math.floor(out.uptime_seconds / 86400);
     const h = Math.floor((out.uptime_seconds % 86400) / 3600);

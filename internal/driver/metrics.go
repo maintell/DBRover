@@ -27,6 +27,10 @@ type Counters struct {
 	// PG 取 blks_hit / blks_read；MySQL 取 buffer pool 的 read_requests / reads。
 	CacheHits   int64 `json:"cache_hits"`
 	CacheMisses int64 `json:"cache_misses"`
+	// Statements 是**累计**执行过的语句数；-1 表示这个引擎/这个实例没给。
+	// PG 要有 pg_stat_statements 才有这个数（否则 -1）；MySQL 取 Questions。
+	// 它必须与其余瞬时值分开读：由上层两次采样做差分才得到 QPS。
+	Statements int64 `json:"statements"`
 	// UptimeSeconds 是实例已运行的秒数；0 表示没取到。
 	UptimeSeconds int64 `json:"uptime_seconds"`
 	// CollectedAt 是采集时刻（服务端时钟），让上层知道这份读数有多旧。

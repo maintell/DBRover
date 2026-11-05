@@ -178,6 +178,8 @@
 
 - **慢查询 Top N（窗口增量）**（FR-MON-04，docs/09 验收 3/4）：`driver.SlowQueryProvider`（判据 `Capabilities().SlowQueryStats`）。PG 走 `pg_stat_statements`（`total_exec_time`），MySQL 走 `performance_schema.events_statements_summary_by_digest`（TIMER 是**皮秒**，换算放驱动里——只有它知道这个引擎用什么单位）。**差分成窗口增量**：`Executor` 每条连接一份采样状态，本次累计值减上一次；`docs/09 §6.2` 点名这是最容易做错的地方——把累计值当窗口值展示，用户会看到「这条 SQL 跑了 120 万次」，而那是自实例启动以来的总量。首次采样没有上一份样本，只能给累计值并标 `first_sample`，界面在表头上方写明「首次采样，暂无增量」。**排序按窗口内总耗时重排**：引擎给的是生命周期排序，窗口里跑得最多的可能根本不在前几名。计数器被清过（`pg_stat_statements_reset` / `TRUNCATE performance_schema`）时差成负数，按新增处理——显示负数比不显示更糟。两条降级路径都返回 200：实例没开统计（`available=false` + 怎么打开的说明，PG 是 preload + 重启 + `CREATE EXTENSION` 三步）、采集超时（`degraded`）。面板把慢查询接在指标卡下面，同一个 5 秒节奏——第一次点开建立基线，之后每次都是增量。
 
+- **QPS（两次采样差分）**（FR-MON-01 收尾）：`driver.Counters.Statements` 是累计语句数（MySQL `Questions`、PG `SUM(calls)`，**-1 表示这个实例没给**）；服务层第二份采样状态，两次相减除以时间跨度。首次采样不给数字（不拿「自启动以来的平均值」冒充），计数器被重置时跳过（显示负数比不显示更糟）。PG 没装 `pg_stat_statements` 时留 -1，界面**不显示这一行**而不是显示 0——0 在差分里意味着「这段时间一条都没跑」，那是另一回事。
+
 ### 安全
 
 - **大整数不再静默丢精度**：`BIGINT` 超过 2^53 时，界面保持字符串、服务端按列类型还原；客户端若把它写成 JSON 数字，直接 `400 NUMBER_PRECISION_LOSS` 并提示改用字符串，而不是把丢了低位的值写进库。此前界面 `coerce()` 用 `Number()` 转换整数列，编辑 `9223372036854775807` 会变成 `...5808`。
