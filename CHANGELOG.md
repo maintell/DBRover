@@ -10,7 +10,7 @@
 - **桌面不监听端口**：Wails 的 `assetserver.Options{Handler: ...}`（`Assets` 留空）把 `api.Server.Handler()` 挂成进程内资源处理器，`/`、静态资源、`/api/v1/*` 全在窗口进程里派发。令牌经进程内 `/bootstrap.js` 注入 `window.DBRoverBootstrapToken`，不打印、不落盘、不进日志；关窗即关连接/审计/留存并退出；WebView2 缺失明确报错并提示 `dbrover serve -open` 回退。
 - **共享装配层 `internal/host`**：`OpenConnector` 从 `cmd/dbrover` 抽出（CLI 与桌面共用一份工厂）；`host.New` 统一装配审计/锚点/指标/设置/Agent 配置；`host.DesktopHandler` 对齐 WebView 伪造请求的 Host 使同源校验成立。`cmd/dbrover serve` 改为调用它，全部开关与 stderr 行保持原样。
 - **服务端设置（`GET/PATCH /api/v1/settings`）**：非敏感项落单文件 JSON（0600，`internal/infra/settings`），桌面与团队模式共用同一份配置，重启前后一致；API Key 只进 OS 凭据库、响应只回 `api_key_configured`、绝不回显。进 `openapi.json` 契约与 docs/12 已实现表，受路由双向门禁与请求体字段双向门禁约束（含变异验证）。设置变更重建 Agent 配置，作用于下一次会话。
-- **交互四项（复用免构建 `internal/webui`）**：① 设置面板（主题深/浅、字号、缩进、模型服务、快捷键、API Key 只写不读）；② 连接管理抽屉（列出/切换/测试/删除、空状态引导，"编辑"明确要求重输口令）；③ 多标签 SQL 编辑器（保留单 `#sql` 节点、切换换内容，不重做已验收的执行链路）；④ 整体视觉重做（分组工具条、标签栏、深/浅两套设计令牌、抽屉、统一间距与空状态，删掉多余标语靠布局达意）。新增 `ui2.js` 为追加层，18 条既有源码断言全绿。
+- **交互四项（复用免构建 `internal/webui`）**：① 设置面板（主题深/浅、字号、缩进、模型服务、快捷键、API Key 只写不读）；② 连接管理抽屉（列出/切换/测试/删除、空状态引导，"编辑"明确要求重输口令）；③ 多标签 SQL 编辑器（每个标签独立的语句，保留单 `#sql` 节点、切换换内容；结果区为全局「最近一次执行」，切标签清空并提示重跑，属已知限制，理由见设计说明，不重做已验收的执行/审批链路）；④ 整体视觉重做（分组工具条、标签栏、深/浅两套设计令牌、抽屉、统一间距与空状态，删掉多余标语靠布局达意）。新增 `ui2.js` 为追加层，18 条既有源码断言全绿。
 - **CI 发版**：Windows 桌面 job 并入现有 `release.yml`（同一 `v*` tag、固定并发组 `release`、单条 `publish`），PR 仍只跑测试。新增 `internal/ci/desktop_test.go` 守住模块隔离、无监听端口、bootstrap 接线三项；`internal/ci` 全绿。桌面模块已在 `CGO_ENABLED=0` 下 `go mod tidy` + `go build` 验证通过（Wails v2.10.2 + Go 1.26.6）。
 
 ### 新增
