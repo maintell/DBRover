@@ -21,6 +21,7 @@ docker run -d --name dbrover-pg  -e POSTGRES_PASSWORD=testpass     -e POSTGRES_D
 | 脚本 | 验什么 | 需要真机 |
 |---|---|---|
 | `bulk-20k-sqlite.ps1` | 分批批量修改：2 万行 20 批、NDJSON 进度逐条到达、`curl --max-time` 中途断开只保留已提交的批、预案仍有效可重新提交补齐 | 不需要 |
+| `run-local.ps1` | 一次跑完所有**不需要真机**的脚本（下面标「不需要」的那几条），失败时打印该脚本最后 15 行输出；任何一条失败即退出码 1 | 不需要 |
 | `backup-schema-only.ps1` | 结构备份（docs/08 §2.1）：`-type schema` 真的不含数据（体积比 full 小、段里没有 INSERT）、恢复后两张表与独立索引都在且行数为 0、`-type data` 被拒并说明未实现、恢复不带 `-env` 时报的是「连接只读」而不是「文件不存在」 | 不需要 |
 | `stop-on-error.ps1` | 脚本语义（docs/05 §2.1）：默认遇错即停（前两条结果各自带回、第三条不跑）、`stop_on_error=false` 时三条都跑且失败那条只标自己；顺带钉住 `/query` 只接单条只读语句（多语句 400 `EXEC_INVALID`）与单条能开游标取页 | 不需要 |
 | `bulk-engines.ps1 -Engine mysql -Port 13306 -User root` | 同上但 3000 行 3 批，重点是**逐批都是「改成相同值」**时 `RowsAffected` 仍等于本批主键数（MySQL 的 `clientFoundRows`）；另含复合主键表 1500 行（批大小自动降到 200） | MySQL 或 PostgreSQL |
@@ -29,6 +30,24 @@ docker run -d --name dbrover-pg  -e POSTGRES_PASSWORD=testpass     -e POSTGRES_D
 | `fk-add.ps1 -Engine mysql -Port 13306 -User root` | 加外键的端到端：孤儿数据 → 409 `FK_PRECHECK_BLOCKED` 带样本；清数据后出预案（含生成的外键名与动作子句）→ 执行 → 结构里出现外键 → 用返回的 `undo` 预案摘掉 | MySQL 或 PostgreSQL |
 | `timezone.ps1 -Engine mysql -Port 13306 -User root` | 展示时区：同一条数据在 `display_timezone=Asia/Shanghai` 与默认（UTC）两条连接上读出的 RFC3339 是不是同一瞬间；再把值改成另一种带偏移的写法写回，用 UTC 连接读回仍同一瞬间（存的是瞬间，展示才换算） | MySQL 或 PostgreSQL |
 | `deps-drop.ps1 -Engine mysql -Port 13306 -User root` | 删除前依赖检查：造「父表 + 引用它的视图 + 引用它的外键」→ 删表返回 409 `DEPENDENCY_BLOCKED` 并同时点名视图与外键 → 拆掉两者后出预案（不可逆 + 补偿建表 + 「数据不会回来」的说明）→ 执行后表真的没了 | MySQL 或 PostgreSQL |
+
+## 一次跑完（不需要真机的部分）
+
+```powershell
+pwsh -File scripts/accept/run-local.ps1
+```
+
+约 12 秒，输出形如：
+
+```
+PASS  bulk-20k-sqlite.ps1         8.4s
+PASS  stop-on-error.ps1           1.2s
+PASS  backup-schema-only.ps1      1.8s
+全部通过（3 个脚本，覆盖分批批量、脚本语义、结构备份）
+```
+
+它**不替代**真机脚本，也不进 `scripts/check.ps1`：后者是发版前的静态与单测门禁，
+跑的是内存/临时库；验收脚本会起真实进程、占固定端口（7791–7796），属于另一层。
 
 ## 约定
 
