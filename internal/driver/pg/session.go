@@ -227,6 +227,9 @@ func (cur *cursor) Next(ctx context.Context) ([][]any, bool, error) {
 		}
 		normalizeRow(vals, cur.cols)
 		driver.ConvertTimeValues(vals, cur.loc)
+		// 超过 2^53 的整数必须字符串化，否则 JSON 编码出去就已经丢了低位
+		// （docs/05 §3.1）。
+		driver.StringifyLargeInts(vals)
 		batch = append(batch, vals)
 		cur.sent++
 		if cur.maxRows > 0 && cur.sent >= cur.maxRows {

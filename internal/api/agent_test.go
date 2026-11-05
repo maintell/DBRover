@@ -172,10 +172,10 @@ func TestAgentApprovalEndpoint(t *testing.T) {
 	fake := &fakeModel{script: []string{
 		toolReply("c1", "change.plan", `{"ddl":{"table":{"name":"items"},
 			"action":"create_index","index":{"name":"idx_v","columns":["v"]}}}`),
-		// 第 2 次：模型读到 plan_id 后要求执行（此时还没批准）
+		// 第 2 次：模型读到 plan_id 后要求执行（此时还没批准）——这一轮会就地挂起，
+		// 所以脚本里不再有「等你确认」那句话：结论由我们写，不替模型发言。
 		"__apply__",
-		textReply("预案已生成，等你确认"),
-		// 第 4 次：批准之后模型再要求执行一次
+		// 第 3 次：人批准之后，模型再要求执行一次
 		"__apply__",
 		textReply("索引已建好"),
 	}}
@@ -240,6 +240,10 @@ func TestAgentApprovalEndpoint(t *testing.T) {
 	er, _ := applyStep["error"].(map[string]any)
 	if er["code"] != "APPROVAL_REQUIRED" {
 		t.Fatalf("错误码 = %v", er["code"])
+	}
+	// 未批准 = 这一轮挂起，而不是「跑完了但没执行」：界面据此知道要等人签字。
+	if body["stopped"] != "approval" {
+		t.Errorf("stopped = %v，期望 approval", body["stopped"])
 	}
 	pending, _ := body["pending_approvals"].([]any)
 	if len(pending) != 1 {

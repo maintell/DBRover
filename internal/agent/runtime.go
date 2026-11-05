@@ -24,6 +24,12 @@ var (
 	// 「你点了停止」和「跑太久被掐断」给用户的结论完全不同，混成一句会让人
 	// 以为自己没点成功，或者以为程序坏了。
 	ErrAborted = errors.New("agent: 已被用户中止")
+	// ErrApprovalPending 表示这一轮停在「等人批一张预案」上。
+	//
+	// 它不是故障，也不该让模型在同一个 apply 上反复撞墙：连续撞三次会触发
+	// 失败上限，用户看到的是「工具反复失败」，而真实原因是「还没签字」。
+	// 所以遇到未批准的 apply 就停下，把审批卡片推给界面，等人批准后由人再发起。
+	ErrApprovalPending = errors.New("agent: 等待人工批准预案")
 )
 
 // ErrNoToolCalling 表示模型不支持工具调用，不能进入 Agent 模式。
@@ -67,6 +73,11 @@ type Step struct {
 	Error      *ToolError      `json:"error,omitempty"`
 	Denied     bool            `json:"denied,omitempty"`
 	DurationMS int64           `json:"duration_ms"`
+	// Sample 是这一步的工具返回数据（截断后的），供界面「展开看真实结果」。
+	//
+	// 只随这一步的响应与流式事件出去，**不写进会话导出**：导出是给人复核
+	// 「做了什么」，不是把库里的数据再复制一份（docs/11 §13 第 13 条）。
+	Sample json.RawMessage `json:"sample,omitempty"`
 }
 
 // Result 是一轮问答的结果。
@@ -260,12 +271,16 @@ func (r *Runtime) forgetPlan(id string) {
 //
 // 只给「发生了什么」，不给「为什么」：界面要画的是步骤时间线，不是思考过程。
 type Event struct {
-	// Kind 取 step（一次工具调用结束）/ answer（给出结论）/ done（这一轮结束）。
+	// Kind 取 step（一次工具调用结束）/ approval_request（要把审批卡片推给界面）/
+	// answer（给出结论）/ done（这一轮结束）。
 	Kind    string `json:"kind"`
 	Step    *Step  `json:"step,omitempty"`
 	Text    string `json:"text,omitempty"`
 	Usage   *Usage `json:"usage,omitempty"`
 	Stopped string `json:"stopped,omitempty"`
+	// Plan 只在 approval_request 事件里出现：界面据此立刻画审批卡片，
+	// 而不是等整轮结束再一次性补上（docs/11 §5.2）。
+	Plan *service.ChangePlan `json:"plan,omitempty"`
 }
 
 // Turn 是一轮问答的留存记录，供会话导出。
@@ -325,6 +340,17 @@ func (r *Runtime) Export() Transcript {
 }
 
 func (r *Runtime) appendTurn(t Turn) {
+	// 导出不带步骤样本：会话导出是给人复核「做了什么」，不是把库里读到的
+	// 业务数据再复制一份出去（docs/11 §13 第 13 条）。实时响应与流式事件里
+	// 仍然带样本，那是当下这一屏的事。
+	if len(t.Steps) > 0 {
+		clean := make([]Step, len(t.Steps))
+		for i, s := range t.Steps {
+			s.Sample = nil
+			clean[i] = s
+		}
+		t.Steps = clean
+	}
 	r.mu.Lock()
 	r.turns = append(r.turns, t)
 	r.mu.Unlock()
@@ -360,6 +386,9 @@ func (r *Runtime) ask(ctx context.Context, question string, emit func(Event)) (*
 	res := &Result{}
 	var lastSig string
 	repeats := 0
+	// sigs 是最近 4 次工具调用的签名，用来识别 A、B、A、B 这种交替空转。
+	// 只留 4 个：再多也无助于区分「在换着法子查」与「在打转」。
+	var sigs []string
 
 	for step := 0; step < r.maxSteps; step++ {
 		if err := ctx.Err(); err != nil {
@@ -424,6 +453,24 @@ func (r *Runtime) ask(ctx context.Context, question string, emit func(Event)) (*
 			} else {
 				lastSig, repeats = sig, 1
 			}
+			sigs = append(sigs, sig)
+			if len(sigs) > 4 {
+				sigs = sigs[len(sigs)-4:]
+			}
+
+			// 未批准的 apply 就地停：把审批卡片推给界面，等人签字。
+			// 继续跑下去只会让同一个工具连续失败，最后以「工具反复失败」收场——
+			// 那个结论对用户毫无用处，真实原因是「还没批」。
+			if stepOut.Error != nil && stepOut.Error.Code == "APPROVAL_REQUIRED" {
+				plan := r.planFromArgs(call.Arguments)
+				if emit != nil {
+					emit(Event{Kind: "approval_request", Plan: plan})
+				}
+				res.Answer = approvalPendingAnswer(plan)
+				res.Stopped = "approval"
+				r.commit(msgs, res)
+				return res, ErrApprovalPending
+			}
 		}
 
 		// 同一个工具同一组参数连着出现两次，再走一步只会得到同样的结果。
@@ -432,7 +479,15 @@ func (r *Runtime) ask(ctx context.Context, question string, emit func(Event)) (*
 			r.commit(msgs, res)
 			return res, ErrLoopDetected
 		}
-		if n := r.maxFailure(); n > r.maxToolFailures {
+		// A、B、A、B 交替：每次签名都不同，看「连续两次」永远抓不到，
+		// 但它同样是原地打转——两步走一圈，信息量并没有增加（docs/11 §7.3）。
+		if len(sigs) == 4 && sigs[0] == sigs[2] && sigs[1] == sigs[3] && sigs[0] != sigs[1] {
+			res.Stopped = "loop"
+			r.commit(msgs, res)
+			return res, ErrLoopDetected
+		}
+		// 文档写的是「累计失败 3 次停止」，所以是 >=：写成 > 会拖到第 4 次才停。
+		if n := r.maxFailure(); n >= r.maxToolFailures {
 			res.Stopped = "tool_failures"
 			r.commit(msgs, res)
 			return res, ErrToolFailures
@@ -476,12 +531,70 @@ func (r *Runtime) invoke(ctx context.Context, call ToolCall, index int) (Step, s
 	out.OK = env.OK
 	out.Summary = env.Summary
 	out.Error = env.Error
+	// 真实结果：界面「展开这一步」要看到的不只是摘要，而是工具到底返回了什么
+	// （docs/11 §9 必须做到 1）。截到 2 KB：够看清几行样本与前几个字段，
+	// 又不至于把整页数据搬进事件流。
+	out.Sample = sampleJSON(env.Data, maxStepSampleBytes)
 	out.DurationMS = time.Since(started).Milliseconds()
 	if !env.OK {
 		r.countFailure(call.Name)
 	}
 	return out, env.encode()
 }
+
+// maxStepSampleBytes 是步骤样本的大小上限。
+const maxStepSampleBytes = 2048
+
+// sampleJSON 把工具返回的数据压成可展示的样本。
+//
+// 超限就整段丢掉并留一句说明，而不是截断 JSON 文本：截断后的 JSON 无法解析，
+// 界面要么显示一堆乱码，要么解析失败——两种都比如实说「太大了」更糟。
+func sampleJSON(data any, limit int) json.RawMessage {
+	if data == nil || limit <= 0 {
+		return nil
+	}
+	raw, err := json.Marshal(data)
+	if err != nil {
+		return nil
+	}
+	if len(raw) > limit {
+		quoted, _ := json.Marshal(map[string]any{
+			"omitted": true,
+			"bytes":   len(raw),
+			"note":    "这一步的返回数据过大，已省略；需要细节请让 Agent 用更小的范围重取",
+		})
+		return quoted
+	}
+	return raw
+}
+
+// planFromArgs 从 change.apply 的参数里取出 plan_id 并找回预案。
+func (r *Runtime) planFromArgs(args json.RawMessage) *service.ChangePlan {
+	if len(args) == 0 {
+		return nil
+	}
+	var in struct {
+		PlanID string `json:"plan_id"`
+	}
+	if err := json.Unmarshal(args, &in); err != nil || in.PlanID == "" {
+		return nil
+	}
+	p, _ := r.lookupPlan(in.PlanID)
+	return p
+}
+
+// approvalPendingAnswer 是挂起时给用户的那句话。
+//
+// 结论由我们写而不是让模型写：这一轮根本没走到「模型给结论」那一步，
+// 硬塞一段模型没说过的话进 answer 字段，等于替他发言。
+func approvalPendingAnswer(p *service.ChangePlan) string {
+	if p == nil {
+		return "这一轮停在一次需要你确认的写操作上：请在上方审批卡片里确认后继续。"
+	}
+	return fmt.Sprintf("这一轮停在预案 %s（%s，影响 %d 行）：请在上方审批卡片里确认后再继续。",
+		p.ID, p.Risk, p.AffectedRows)
+}
+
 func (r *Runtime) countFailure(name string) {
 	r.mu.Lock()
 	r.failures[name]++

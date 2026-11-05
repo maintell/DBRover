@@ -3,6 +3,7 @@ package agent_test
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -269,6 +270,9 @@ func TestReadOnlyModeAllowsPlanButDeniesApply(t *testing.T) {
 
 // TestDDLPlanNeedsApproval 结构变更是 R3：预案能生成，执行必须人工批准。
 // 这条路径也正是「审批卡片」在真实使用中会出现的场景。
+//
+// 未批准时这一轮**就地挂起**（docs/11 §5.2）：不挂起的话模型会反复重试同一个
+// apply，三次之后撞上失败上限，用户看到「工具反复失败」——真实原因却是「还没签字」。
 func TestDDLPlanNeedsApproval(t *testing.T) {
 	conn := newConn(t,
 		`CREATE TABLE t (id INTEGER PRIMARY KEY, v TEXT)`,
@@ -299,8 +303,14 @@ func TestDDLPlanNeedsApproval(t *testing.T) {
 	}
 	rt := newRuntime(t, prov, conn, agent.ModeWriteWithApproval)
 	res, err := rt.Ask(context.Background(), "给 v 建个索引")
-	if err != nil {
-		t.Fatalf("Ask: %v", err)
+	if !errors.Is(err, agent.ErrApprovalPending) {
+		t.Fatalf("期望 ErrApprovalPending（挂起等签字），实际 %v", err)
+	}
+	if res.Stopped != "approval" {
+		t.Errorf("Stopped = %q，期望 approval", res.Stopped)
+	}
+	if len(res.Steps) != 2 {
+		t.Fatalf("挂起后不该继续调用工具，实际 %d 步", len(res.Steps))
 	}
 	if !res.Steps[0].OK {
 		t.Fatalf("生成 DDL 预案失败: %+v", res.Steps[0])
@@ -310,6 +320,9 @@ func TestDDLPlanNeedsApproval(t *testing.T) {
 	}
 	if res.Steps[1].Error == nil || res.Steps[1].Error.Code != "APPROVAL_REQUIRED" {
 		t.Fatalf("错误码 = %+v，期望 APPROVAL_REQUIRED", res.Steps[1].Error)
+	}
+	if len(rt.PendingPlans()) != 1 {
+		t.Errorf("预案应留在待批清单里供界面画卡片，实际 %d 张", len(rt.PendingPlans()))
 	}
 }
 

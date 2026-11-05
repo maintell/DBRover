@@ -211,7 +211,7 @@ DBRover 的做法是把 Agent 接进**执行闭环**：
 
 **硬约束**
 
-1. `autonomous` **不可用于 `production` / `staging` / `unknown` 的连接**（配置层校验，UI 置灰并说明）。
+1. `autonomous` **不可用于 `production` / `staging` / `unknown` 的连接**（配置层校验，UI 置灰并说明）。✅ 界面已按连接环境置灰并写明原因；`policy.ClampMode` 在服务端做同一件事——置灰只是「别让他白点」，不是安全边界。
 2. `read-only` 模式下 `change.plan` 仍可调用（生成预案供人带走），但 `change.apply` 直接拒绝。
 3. Agent 无法修改自己的权限模式——这是人类设置项。
 
@@ -233,6 +233,20 @@ UI 展示：最终 SQL（非意图描述）、影响行数、回滚语句、风�
 ```
 
 **审批卡片必须展示最终 SQL**，而不是 Agent 的自然语言描述。原因见 [10 文档 §7.1](10-connection-and-security.md#71-提示注入t4ai-工具特有的威胁)：描述可以被数据内容操纵，SQL 不会。
+
+> **现状**（与上面这张流程图逐条对应）：
+>
+> | 流程 | 实现 |
+> |---|---|
+> | `change.plan` → plan_id + 影响 + 回滚 | ✅ 预案只在服务端保管，模型只能引用 ID |
+> | `policy` 判定 `risk >= R2 && mode != autonomous` | ✅ 收口在 `toolChangeApply` 一处 |
+> | 挂起 + 推送 `approval_request` | ✅ 撞上未批准的 apply 就**就地挂起**：流式连接上立刻发一条 `{"kind":"approval_request","approval":{…}}`（与 `result.pending_approvals` 同形状），本轮以 `stopped=approval` 结束。不挂起的话模型会反复重试同一个 apply，三次后撞上失败上限，用户看到「工具反复失败」——真实原因是「还没签字」 |
+> | UI 展示最终 SQL / 影响 / 回滚 / 风险 | ✅ 卡片只渲染 `plan.statements` |
+> | 人批准 → 校验 → 执行 | ✅ 批准绑**预案 ID**（比「校验语句哈希」更强：模型改不了语句，因为它拿不到语句的写入口），执行仍由下一轮 `change.apply` 发起——不在背后替人执行 |
+> | 拒绝 | ✅ 预案作废，之后的 apply 返回 `PLAN_NOT_FOUND` |
+>
+> 用例：`TestApprovalPendingStopsRun`（挂起、事件、数据未变、预案留在待批清单）、
+> `TestDDLPlanNeedsApproval`、`TestAgentApprovalEndpoint`、`TestChangeApplyGateHoldsUntilHumanApproves`。
 
 ### 5.3 权限判定的唯一位置
 
@@ -344,8 +358,8 @@ func (r *Runtime) Run(ctx context.Context, conv *Conversation) error {
 | 最大 token | **未实现**（目标 200k） | 目前只有步数、时长、同工具失败上限与上下文预算；没有按累计 token 熔断 |
 | 最大时长（chat） | 10 分钟 | 停止 |
 | 最大时长（runbook） | 无限制，但每步落检查点 | 可暂停续跑 |
-| 单工具重试 | 2 次 | 之后放弃该工具并告知模型 |
-| 循环检测 | 同工具 + 同参数连续 2 次 | 中断并提示「检测到重复调用」 |
+| 单工具重试 | 2 次 | 之后放弃该工具并告知模型。与 §7.2 的「累计失败 3 次停止」是**同一条阈值**的两种说法：首次 + 2 次重试 = 3 次，代码里只有一处判断（`maxToolFailures`，默认 3） |
+| 循环检测 | 同工具 + 同参数连续 2 次；或 A、B、A、B 交替 | 中断并提示「检测到重复调用」 |
 
 **超预算必须显式告知用户**，不能静默截断然后给一个看起来完整的答案。
 
@@ -371,11 +385,19 @@ func (r *Runtime) Run(ctx context.Context, conv *Conversation) error {
 
 除「同工具同参数」外，还要检测：
 
-- 交替调用 A、B、A、B 且无进展（连续 4 步无新信息）。
-- 反复 `meta.search` 同一关键词。
-- 反复读取同一对象详情。
+| 形态 | 现状 |
+|---|---|
+| 同工具 + 同参数连续 2 次 | ✅ `repeats >= 2` → `ErrLoopDetected`，`stopped=loop` |
+| 交替调用 A、B、A、B（连续 4 步无新信息） | ✅ 用最近 4 个调用签名判定 `s[0]==s[2] && s[1]==s[3] && s[0]!=s[1]`。「连续两次」永远抓不到它——每一步的签名都和上一步不同，但两步走一圈并没有多出信息 |
+| 反复 `meta.search` 同一关键词 / 反复读同一对象详情 | ✅ 属于「同工具同参数」，由第一条覆盖（参数完全相同才算） |
 
-检测到即中断，并在 UI 说明「Agent 陷入循环」。
+检测到即中断，并在 UI 说明「Agent 陷入循环」（`stop_message` = 「检测到重复调用同一工具与参数，已中断」）。
+
+**不做的检测**：语义级「没进展」（比如两次不同 SQL 得到的行数一样）。判断「这算不算新信息」
+需要理解结果含义，误判一次就会打断正常工作，代价比多烧两步高得多。
+
+用例：`TestAlternatingLoopDetected`（A、B、A、B 在第 4 步停下）、
+`TestDifferentQueriesAreNotLoop`（反向断言：四条不同的查询不许被判成循环）、`TestLoopDetected`。
 
 ---
 
@@ -453,11 +475,18 @@ type Provider interface {
 
 **已实现补充**：流式输出（`?stream=1` 走 NDJSON，步骤到一条画一条）与会话导出（`GET /agent/conversations/{id}/export`，含每轮的问题、结论、步骤与用量，**不含工具结果全文**——那里面可能有业务数据）。
 
-**未实现**：「查看全部 N 步」的分页、沉淀为 Runbook、结论数字到某一步的「来源」链接。**中止**：接口已做（`POST /agent/conversations/{id}/abort`，运行时会以 `ErrAborted` 收尾并让被中止的 `messages` 返回 200 + 「已按请求中止」），界面上还没有那个按钮。
+**步骤里的真实结果**：每个 `Step` 带 `sample`（工具返回的结构化数据，截到 2 KB；超限时
+只给一句「这一步的返回数据过大，已省略」而不是把 JSON 切一半——切一半的 JSON 解析不了，
+界面只能显示乱码）。`sample` **只出现在实时响应与流式事件里**，写进会话记录时会被清掉：
+导出是给人复核「做了什么」，不是把库里的数据再复制一份。
+用例：`TestStepSampleCarriesResultButExportDropsIt`（两个方向同时断言）。
+
+**未实现**：「查看全部 N 步」的分页、沉淀为 Runbook、结论数字到某一步的「来源」链接（第 3 条必须做到）。**中止**：接口已做（`POST /agent/conversations/{id}/abort`，运行时会以 `ErrAborted` 收尾并让被中止的 `messages` 返回 200 + 「已按请求中止」），界面上还没有那个按钮。
 
 **必须做到的**
 
-1. 每一步可展开看**实际执行的 SQL 与真实结果**，不能只给结论。
+1. 每一步可展开看**实际执行的 SQL 与真实结果**，不能只给结论。✅ SQL 来自 `step.args`，
+   真实结果来自 `step.sample`（见上方「步骤里的真实结果」）。
 2. 工具调用显示耗时与状态（成功/失败/被拒/待审批）。
 3. 结论中的数字必须可追溯到某一步的结果（提供「来源」链接）。
 4. 只读模式下显著提示，让用户知道 Agent 不可能改数据。

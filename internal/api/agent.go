@@ -259,6 +259,18 @@ type pendingApproval struct {
 	Irreversible bool                    `json:"irreversible"`
 }
 
+// toPendingApproval 把预案翻成审批卡片的数据。
+//
+// 卡片只渲染 plan.statements 里的最终 SQL，不渲染 Agent 的自然语言描述：
+// 描述可以被库里的数据操纵，SQL 不会（docs/11 §5.2）。
+func toPendingApproval(p *service.ChangePlan) pendingApproval {
+	return pendingApproval{
+		PlanID: p.ID, Table: p.Table.Name, Risk: p.Risk.String(), Friction: p.Friction.String(),
+		AffectedRows: p.AffectedRows, Statements: p.Statements, Rollback: p.Rollback,
+		Irreversible: p.Irreversible,
+	}
+}
+
 // handleAgentMessage 发一条消息并等这一轮跑完。
 //
 // 同步返回而不是流式：一轮通常是几次工具调用，秒级到分钟级。超预算、循环、
@@ -300,11 +312,7 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request) {
 
 	pending := make([]pendingApproval, 0, 4)
 	for _, p := range c.rt.PendingPlans() {
-		pending = append(pending, pendingApproval{
-			PlanID: p.ID, Table: p.Table.Name, Risk: p.Risk.String(), Friction: p.Friction.String(),
-			AffectedRows: p.AffectedRows, Statements: p.Statements, Rollback: p.Rollback,
-			Irreversible: p.Irreversible,
-		})
+		pending = append(pending, toPendingApproval(p))
 	}
 
 	out := map[string]any{
@@ -366,6 +374,7 @@ func softStop(err error) bool {
 		errors.Is(err, agent.ErrLoopDetected) ||
 		errors.Is(err, agent.ErrToolFailures) ||
 		errors.Is(err, agent.ErrAborted) ||
+		errors.Is(err, agent.ErrApprovalPending) ||
 		errors.Is(err, agent.ErrDuration)
 }
 
@@ -377,6 +386,8 @@ func stopMessage(err error) string {
 		return "检测到重复调用同一工具与参数，已中断"
 	case errors.Is(err, agent.ErrToolFailures):
 		return "同一工具反复失败，已停止重试"
+	case errors.Is(err, agent.ErrApprovalPending):
+		return "停在一次需要人工确认的写操作上：批准后继续，拒绝则该预案作废"
 	case errors.Is(err, agent.ErrAborted):
 		return "已按请求中止；已执行的步骤仍然有效"
 	case errors.Is(err, agent.ErrDuration):
@@ -411,7 +422,18 @@ func (s *Server) streamAgentMessage(w http.ResponseWriter, r *http.Request, c *a
 	defer done()
 
 	c.mu.Lock()
-	res, err := c.rt.AskStream(ctx, content, func(ev agent.Event) { write(ev) })
+	res, err := c.rt.AskStream(ctx, content, func(ev agent.Event) {
+		// 审批请求单独成一条：界面据此**立刻**画卡片，而不是等整轮结束。
+		// 用与 /result 完全相同的形状（approval 字段），界面不必写第二套解析。
+		if ev.Kind == "approval_request" {
+			if ev.Plan == nil {
+				return
+			}
+			write(map[string]any{"kind": "approval_request", "approval": toPendingApproval(ev.Plan)})
+			return
+		}
+		write(ev)
+	})
 	c.mu.Unlock()
 
 	if err != nil && !softStop(err) {
@@ -421,11 +443,7 @@ func (s *Server) streamAgentMessage(w http.ResponseWriter, r *http.Request, c *a
 
 	pending := make([]pendingApproval, 0, 4)
 	for _, p := range c.rt.PendingPlans() {
-		pending = append(pending, pendingApproval{
-			PlanID: p.ID, Table: p.Table.Name, Risk: p.Risk.String(), Friction: p.Friction.String(),
-			AffectedRows: p.AffectedRows, Statements: p.Statements, Rollback: p.Rollback,
-			Irreversible: p.Irreversible,
-		})
+		pending = append(pending, toPendingApproval(p))
 	}
 	final := map[string]any{
 		"kind": "result", "answer": res.Answer, "stopped": res.Stopped,

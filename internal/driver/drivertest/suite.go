@@ -122,6 +122,8 @@ func Run(t *testing.T, cfg Config) {
 	t.Run("IndexValidityHonest", func(t *testing.T) { testIndexValidityHonest(t, cfg) })
 	// 表详情里的表注释（列注释由 DDLAndMetadata 顺带覆盖）。
 	t.Run("DescribeReportsTableComment", func(t *testing.T) { testDescribeReportsTableComment(t, cfg) })
+	// 大整数保真：> 2^53 的整数必须字符串化，否则 JSON 编码出去就已经丢了低位。
+	t.Run("LargeIntsAsStrings", func(t *testing.T) { testLargeInts(t, cfg) })
 }
 
 // testBlockers 锁住「预执行检查能看到我们自己开着的事务」。
@@ -432,8 +434,24 @@ func testTypeFidelity(t *testing.T, cfg Config) {
 	if got, ok := r[0].(int64); !ok || got != 1 {
 		t.Errorf("id = %#v, 期望 int64(1)", r[0])
 	}
-	if got, ok := r[1].(int64); !ok || got != 9007199254740993 {
-		t.Errorf("big = %#v, 期望 9007199254740993（不能走 float64）", r[1])
+	// 大整数只能是「精确的整数」或「精确的十进制字符串」这两种形态之一：
+	// 一旦变成 float64，低位就已经没了（9007199254740993 → …992）。
+	// 我们的读路径统一走字符串（docs/05 §3.1），这里也接受 int64 是为了让
+	// 这个用例只锁「不丢精度」，不重复锁「用哪种形态」（后者的专职用例是
+	// LargeIntsAsStrings）。
+	switch v := r[1].(type) {
+	case string:
+		if v != "9007199254740993" {
+			t.Errorf("big = %q, 期望 \"9007199254740993\"（不能走 float64）", v)
+		}
+	case int64:
+		if v != 9007199254740993 {
+			t.Errorf("big = %d, 期望 9007199254740993", v)
+		}
+	case float64:
+		t.Errorf("big = %v（float64）, 大整数不能走浮点：低位已经丢了", v)
+	default:
+		t.Errorf("big = %#v（%T），期望精确的字符串或整数", r[1], r[1])
 	}
 	if got, ok := r[2].(string); !ok || got != "hello 世界 🚀" {
 		t.Errorf("txt = %#v", r[2])

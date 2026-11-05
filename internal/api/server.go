@@ -368,7 +368,12 @@ type execRequest struct {
 	// ApprovalToken 是服务端签发的审批凭证，绑定语句指纹与有效期。
 	// 客户端不能用布尔值绕过 —— 审批的是「这段 SQL」，不是一个请求。
 	ApprovalToken string `json:"approval_token"`
-	MaxRows       int    `json:"max_rows"`
+	// StopOnError 省略时按 true 处理（遇错即停）。传 false 表示「继续执行」：
+	// 每条语句的结果独立返回，失败的那条带上自己的 err（docs/05 §2.1）。
+	// 用指针而不是 bool：零值 false 会让「没传」变成「继续执行」，
+	// 那是把用户没做过的选择当成他的选择。
+	StopOnError *bool `json:"stop_on_error"`
+	MaxRows     int   `json:"max_rows"`
 	// Cursor 是编辑器里光标的字节偏移；给了就只执行光标所在的那条语句。
 	// 切分在服务端做（前端不重复实现方言规则）。
 	Cursor *int `json:"cursor"`
@@ -872,6 +877,8 @@ func (s *Server) handleExec(w http.ResponseWriter, r *http.Request) {
 		MaxRows:       req.MaxRows,
 		Cursor:        req.Cursor,
 		Actor:         "human:http",
+		// 默认遇错即停；只有显式 stop_on_error=false 才继续跑后面的语句。
+		ContinueOnError: req.StopOnError != nil && !*req.StopOnError,
 	})
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "EXEC_INVALID", "internal", err.Error(), "", false)
@@ -1021,7 +1028,9 @@ func (s *Server) handleTableRows(w http.ResponseWriter, r *http.Request) {
 	}
 
 	q := r.URL.Query()
-	limit := atoiDefault(q.Get("limit"), 100)
+	// 页大小默认 200（docs/05 §8）；上限由 service 的 clampPageSize 收，
+	// 这里不再写第二份阈值。
+	limit := atoiDefault(q.Get("limit"), 200)
 
 	var after []any
 	if raw := q.Get("after"); raw != "" {

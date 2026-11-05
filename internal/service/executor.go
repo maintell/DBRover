@@ -67,10 +67,16 @@ type Request struct {
 	StatementHash string
 	// ChangeSetPath 表示经由变更集提交（路径自带语句预览），摩擦降一级。
 	ChangeSetPath bool
-	// MaxRows 限制单条查询返回的最大行数，0 表示默认 1000。
+	// MaxRows 限制单条查询返回的最大行数，0 表示默认 1000，封顶 10 万（docs/05 §8）。
 	MaxRows int
 	// FetchSize 是驱动侧批大小，0 表示默认 200。
 	FetchSize int
+	// ContinueOnError 为 true 时，脚本里某条语句失败后继续跑后面的（docs/05 §2.1
+	// 的「继续执行」，即 stop_on_error=false）。
+	//
+	// 零值是「遇错即停」：多语句脚本里第一条失败通常说明前提不成立，闷头往下跑
+	// 更容易把库改坏。要「继续执行」必须显式要求。
+	ContinueOnError bool
 	// Actor 是发起者标识，默认 human:local。
 	Actor string
 }
@@ -255,68 +261,71 @@ func (e *Executor) Execute(ctx context.Context, req Request) (*Outcome, error) {
 	defer doneRun()
 	ctx = runCtx
 
-	maxRows := req.MaxRows
-	if maxRows <= 0 {
-		maxRows = 1000
-	}
+	maxRows := clampMaxRows(req.MaxRows)
 
 	for i, p := range preps {
 		sr := StatementResult{Index: i, SQL: p.text, Grade: p.gr}
 		t0 := time.Now()
+		// 必须留住 error 本身而不是它的字符串：ClassifyError 认的是
+		// context.Canceled / 驱动哨兵这类**身份**，包装成新 error 之后就只剩
+		// 一句 "context canceled"，取消会被归成 SQL_EXEC_FAILED。
+		var stmtErr error
 
 		if p.an.Class == dialect.ClassQuery && !p.an.SelectInto && !p.an.WriteInCTE {
 			cur, err := sess.Query(ctx, p.text, req.Args, driver.QueryOptions{MaxRows: maxRows})
 			if err != nil {
-				sr.Err = err.Error()
-				out.Err = ClassifyError(err)
-				sr.DurationMS = time.Since(t0).Milliseconds()
-				out.Results = append(out.Results, sr)
-				out.Duration = time.Since(started)
-				e.record(actor, req, out, "error", p.text, sr.Err)
-				return out, nil
-			}
-			sr.Columns = cur.Columns()
-			for {
-				rows, more, err := cur.Next(ctx)
-				if err != nil {
-					sr.Err = err.Error()
-					out.Err = ClassifyError(err)
-					break
+				stmtErr = err
+			} else {
+				sr.Columns = cur.Columns()
+				for {
+					rows, more, err := cur.Next(ctx)
+					if err != nil {
+						stmtErr = err
+						break
+					}
+					sr.Rows = append(sr.Rows, rows...)
+					if !more {
+						break
+					}
 				}
-				sr.Rows = append(sr.Rows, rows...)
-				if !more {
-					break
-				}
+				_ = cur.Close()
 			}
-			_ = cur.Close()
 		} else {
 			res, err := sess.Execute(ctx, p.text, req.Args)
 			if err != nil {
-				sr.Err = err.Error()
-				out.Err = ClassifyError(err)
-				sr.DurationMS = time.Since(t0).Milliseconds()
-				out.Results = append(out.Results, sr)
-				out.Duration = time.Since(started)
-				e.record(actor, req, out, "error", p.text, sr.Err)
-				return out, nil
+				stmtErr = err
+			} else {
+				sr.Affected = res.RowsAffected
 			}
-			sr.Affected = res.RowsAffected
 		}
 
+		if stmtErr != nil {
+			sr.Err = stmtErr.Error()
+		}
 		sr.DurationMS = time.Since(t0).Milliseconds()
 		out.Results = append(out.Results, sr)
-		if sr.Err != "" {
+		if stmtErr == nil {
+			continue
+		}
+		// 第一条失败就是这一批的结论：后面的语句再多成功，也不改变「脚本没跑通」。
+		if out.Err == nil {
+			out.Err = ClassifyError(stmtErr)
+		}
+		// 遇错即停是默认（docs/05 §2.1）：已成功的语句保留结果，后面的不执行。
+		// 显式要求「继续执行」时才往下走，每条结果独立。
+		if !req.ContinueOnError {
 			out.Duration = time.Since(started)
-			if out.Err == nil {
-				out.Err = ClassifyError(errors.New(sr.Err))
-			}
 			e.record(actor, req, out, "error", p.text, sr.Err)
 			return out, nil
 		}
 	}
 
 	out.Duration = time.Since(started)
-	e.record(actor, req, out, "ok", req.SQL, "")
+	outcome := "ok"
+	if out.Err != nil {
+		outcome = "error"
+	}
+	e.record(actor, req, out, outcome, req.SQL, "")
 	return out, nil
 }
 

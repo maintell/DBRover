@@ -46,8 +46,12 @@
         <textarea id="sql" spellcheck="false" placeholder="SELECT * FROM ...">SELECT 1 AS ok</textarea>
         <div class="toolbar">
           <button id="btn-run" class="primary">执行 (Ctrl+Enter)</button>
+          <button id="btn-run-all" title="执行整个脚本：所有语句按顺序跑（Ctrl+Shift+Enter）">执行全部</button>
           <button id="btn-explain" title="只看执行计划，不执行这条语句">计划</button>
           <button id="btn-cancel" hidden title="终止这条连接上正在执行的语句">取消</button>
+          <label class="inline" title="多条语句时，前面某条失败后继续跑后面的；结果按语句分开显示">
+            <input type="checkbox" id="run-continue"> 遇错继续
+          </label>
           <span id="risk" class="badge r0" hidden></span>
           <span id="friction" class="badge" hidden></span>
           <span class="grow"></span>

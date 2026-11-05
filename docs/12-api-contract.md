@@ -94,9 +94,9 @@ Content-Type: application/x-ndjson
 | `GET` | `/api/v1/connections/{id}/tables/{name}/rows` | 表数据浏览，**键集分页**（`limit`、`after`、`where`、`order`） |
 | `GET` | `/api/v1/connections/{id}/tables/{name}/schema` | 列、索引、外键、检查约束、分区、主键与建表原文；表不存在 → 404。分区与约束取不到时只让那一块空着（它们只是详情的一部分，不该让整页打不开）。`?kind=trigger` / `?kind=sequence` 时只回对象定义（`{object, ddl, capabilities}`）——这两类对象没有列结构 |
 | `GET` | `/api/v1/connections/{id}/export` | 流式导出 CSV / NDJSON / SQL / Markdown。`format=sql`：建表 + `INSERT` 的可回放脚本（**同引擎**回放）；`format=markdown`：GitHub 风格表格，表头必写、`NULL` 与空串 `''` 分开（与界面一致），`|` 与换行转义；`format=xlsx`：真 Excel 工作簿（`application/vnd.openxmlformats-officedocument.spreadsheetml.sheet`，文件名 `<表>.xlsx`），数字保持数字 |
-| `POST` | `/api/v1/connections/{id}/exec` | 执行 SQL（一次性，行数有上限） |
-| `POST` | `/api/v1/connections/{id}/query` | 打开**流式游标**，只接受单条只读语句 |
-| `GET` | `/api/v1/results/{cid}/page` | 按页拉取，`limit` 可调 |
+| `POST` | `/api/v1/connections/{id}/exec` | 执行 SQL（一次性）。`max_rows` 默认 1000、封顶 10 万；多条语句默认**遇错即停**（已成功的语句结果照常返回），`stop_on_error=false` 时继续跑后面的、每条结果独立（`docs/05` §2.1） |
+| `POST` | `/api/v1/connections/{id}/query` | 打开**流式游标**，只接受单条只读语句；`max_rows` 同样封顶 10 万 |
+| `GET` | `/api/v1/results/{cid}/page` | 按页拉取，`limit` 默认 200、上限 2000（超过按 2000 处理） |
 | `DELETE` | `/api/v1/results/{cid}` | 主动关闭游标 |
 | `POST` | `/api/v1/connections/{id}/changes/plan` | 行数据变更预案 |
 | `POST` | `/api/v1/connections/{id}/schema/plan` | 结构变更预案（建表 / 加列 / 删列 / 改类型 / 索引建删） |
@@ -331,7 +331,7 @@ POST /connections
 | `GET` | `/agent/status` | 模型服务是否可用（不返回 key） | ✅ |
 | `POST` | `/agent/conversations` | 新建会话（绑定连接 + 模式） | ✅ |
 | `GET` | `/agent/conversations/{id}` | 会话详情：元信息（连接、模式、provider、创建/最近使用、`running`）+ 已有记录（`transcript`，与 export 同形状，不含工具结果全文） | ✅ |
-| `POST` | `/agent/conversations/{id}/messages` | 发送消息 | ✅ 同步返回；`?stream=1` 改 NDJSON 流（step / answer / done / result / error） |
+| `POST` | `/agent/conversations/{id}/messages` | 发送消息 | ✅ 同步返回；`?stream=1` 改 NDJSON 流（step / approval_request / answer / done / result / error）。`approval_request` 只在「撞上一次未批准的写操作」时出现，带与 `result.pending_approvals` 同形状的 `approval` 字段，**跑到那一步就推**，界面据此立刻画审批卡片；这一轮会就地挂起（`stopped=approval`） |
 | `POST` | `/agent/conversations/{id}/approvals/{aid}` | 批准/拒绝（`aid` 为预案 ID） | ✅ |
 | `POST` | `/agent/conversations/{id}/abort` | 中止正在跑的一轮：返回 `200 {aborted:true}` 表示**取消已发出**（这一轮在下一个模型调用或工具边界收尾，被中止的 `messages` 请求会带 `stop_message` 返回 200）；没有在跑的一轮时返回 `409 CONVERSATION_IDLE`，不假装停掉了什么 | ✅ |
 | `POST` | `/agent/conversations/{id}/compact` | 由人主动压缩一次历史（把最早的工具结果换成指代）：低于预算时 `skipped=true` 且什么都没改；连点幂等 | ✅ |
@@ -433,6 +433,7 @@ POST /connections
 | `SQL_CONSTRAINT_VIOLATION` | constraint | 409 | 唯一/外键/非空冲突 |
 | `SQL_TIMEOUT` | timeout | 504 | 语句超时 |
 | `SQL_CANCELED` | canceled | 499 | 用户取消 |
+| `EXEC_INVALID` | internal | 400 | 请求本身没成立：脚本切分失败、没有可执行语句，或 `/query` 一次给了多条语句（流式只接受单条只读语句）。与 `SQL_*` 的区别是**根本没送到引擎**，所以不可能是语法/约束问题，也不该按引擎错误去建议 |
 | `POLICY_READ_ONLY` | policy | 403 | 只读连接拒绝写 |
 | `CROSS_DATABASE_UNSUPPORTED` | syntax | 400 | 语句里有跨库引用（PostgreSQL 的 `库.模式.表`）：一个连接只对应一个库，执行前拦下并说明改法；**不是**策略拦截，补审批也不会过 |
 | `POLICY_APPROVAL_REQUIRED` | policy | 428 | 需要审批 |

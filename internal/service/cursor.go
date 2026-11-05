@@ -42,6 +42,21 @@ type cursorHandle struct {
 	cancel context.CancelFunc
 }
 
+// rejectLocking 拒绝会给行加锁的语句。
+//
+// SELECT ... FOR UPDATE 不写数据，分级里 Writes 是 false（这是对的：它确实不改
+// 数据），但它会**加行锁**。游标是长连接——面板不关、游标不释放，一条看起来是 SELECT
+// 的语句就能把行锁攥到用户关掉页面为止，别人全在排队。这属于「用只读接口做了有副
+// 作用的操作」，所以在游标这条路上明确拒绝，指路到 /exec（那里有风险分级与确认）。
+func rejectLocking(preps []prepared) error {
+	for _, p := range preps {
+		if p.an.ForUpdate {
+			return fmt.Errorf("流式查询不接受 SELECT ... FOR UPDATE：它会加行锁并可能挡住别人，请改用执行接口")
+		}
+	}
+	return nil
+}
+
 func (h *cursorHandle) close() {
 	if h.cancel != nil {
 		h.cancel()
@@ -261,6 +276,9 @@ func (e *Executor) Query(ctx context.Context, req Request) (*QueryOutcome, error
 	if anyWrite {
 		return nil, fmt.Errorf("该语句会修改数据（%s），请改用执行接口", preps[0].gr.Level)
 	}
+	if err := rejectLocking(preps); err != nil {
+		return nil, err
+	}
 
 	friction := e.frictionFor(maxLevel, anyWrite, req, 1)
 
@@ -273,7 +291,8 @@ func (e *Executor) Query(ctx context.Context, req Request) (*QueryOutcome, error
 	qctx, cancel := context.WithCancel(context.Background())
 	cur, err := sess.Query(qctx, stmts[0].Text, req.Args, driver.QueryOptions{
 		FetchSize: req.FetchSize,
-		MaxRows:   req.MaxRows,
+		// 流式同样封顶：没有上限时一条 SELECT * 会一直读下去（docs/05 §8）。
+		MaxRows: clampMaxRows(req.MaxRows),
 	})
 	if err != nil {
 		cancel()
@@ -301,7 +320,7 @@ func (e *Executor) Query(ctx context.Context, req Request) (*QueryOutcome, error
 
 // Page 拉取一页。返回 HasMore=false 时游标已被关闭。
 func (e *Executor) Page(ctx context.Context, cursorID string, limit int) (*Page, error) {
-	return e.cursors.page(ctx, cursorID, limit)
+	return e.cursors.page(ctx, cursorID, clampPageSize(limit))
 }
 
 // CloseCursor 主动关闭游标。不存在时返回 false。
@@ -490,13 +509,7 @@ func (e *Executor) TableRows(ctx context.Context, req TableRowsRequest) (*TableR
 	// 因此不存在把调用方字符串直接拼进 SQL 的路径。
 	known := columnCatalog(td)
 
-	limit := req.Limit
-	if limit <= 0 {
-		limit = 100
-	}
-	if limit > 1000 {
-		limit = 1000
-	}
+	limit := clampPageSize(req.Limit)
 
 	cols := make([]string, len(td.Columns))
 	for i, c := range td.Columns {

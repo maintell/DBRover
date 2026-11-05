@@ -10,7 +10,8 @@ const state = {
   columns: [],
   filter: [],
   order: null,
-  limit: 100,
+  // 页大小默认 200，界面可选 50–2000（docs/05 §8）。
+  limit: 200,
   // 行级编辑：是否允许、主键列、待提交的改动
   editable: false,
   pkCols: [],
@@ -811,10 +812,10 @@ function renderToolbar() {
 
   const sizeSel = document.createElement('select');
   sizeSel.id = 'page-size';
-  fill(sizeSel, [['100', '100 行'], ['200', '200 行'], ['500', '500 行'], ['1000', '1000 行']], String(state.limit));
+  fill(sizeSel, [['50', '50 行'], ['100', '100 行'], ['200', '200 行'], ['500', '500 行'], ['1000', '1000 行'], ['2000', '2000 行']], String(state.limit));
   sizeSel.title = '每页行数';
   sizeSel.onchange = () => {
-    state.limit = Number(sizeSel.value) || 100;
+    state.limit = Number(sizeSel.value) || 200;
     loadTablePage(true);
   };
 
@@ -2840,14 +2841,33 @@ window.addEventListener('beforeunload', (ev) => {
 
 function renderExec(out) {
   $('results').replaceChildren();
-  for (const r of out.results || []) {
+  const list = out.results || [];
+  for (let i = 0; i < list.length; i++) {
+    const r = list[i];
     if (r.err) {
-      showNotice('第 ' + r.index + ' 条失败：' + r.err, 'error');
-      return;
+      // 失败提示必须**追加**在已画出的结果之后，不能走 showNotice（它会
+      // replaceChildren，把前面成功的语句抹掉）——docs/05 验收 4 要求
+      // 「先画已完成的结果再提示」。序号是 1 起的：用户数的是「第几条」。
+      //
+      // 不 return：勾了「遇错继续」时后面的语句真的跑过、结果就在 list 里，
+      // 提前收工会让它们凭空消失（用户以为没跑）。只有失败的那条是最后一条时，
+      // 才说明「后面的语句没有执行」——那时本来就一条都没有。
+      const d = document.createElement('div');
+      d.className = 'notice error';
+      d.textContent = '第 ' + ((r.index || 0) + 1) + ' 条失败：' + r.err +
+        (i === list.length - 1 ? '（后面的语句没有执行）' : '');
+      $('results').appendChild(d);
+      continue;
     }
     if (r.columns && r.columns.length) {
+      // 每条语句一个块：renderTable 的 append 参数是「往同一张表追加行」（分页用），
+      // 传 false 会 replaceChildren 清空整个结果区——多语句脚本里前面几条的结果
+      // 就被最后一条悄悄顶掉了。块之间用独立容器隔开，谁也不动谁。
+      const box = document.createElement('div');
+      box.className = 'result-block';
+      $('results').appendChild(box);
       // 原始 SQL 的结果集不给编辑：列可能来自别的表，拼出来的 UPDATE 会打错表。
-      renderTable($('results'), r.columns, r.rows || [], false, false);
+      renderTable(box, r.columns, r.rows || [], false, false);
     } else {
       const d = document.createElement('div');
       d.className = 'notice';
@@ -2915,14 +2935,16 @@ async function cancelRunning() {
   $('btn-cancel').click();
 }
 
-async function runSQL(approvalToken) {
+async function runSQL(approvalToken, wholeScript) {
   if (!state.current) { showNotice('请先建立连接。', 'warn'); return; }
-  const cur = currentStatement();
+  // wholeScript 时不带 cursor：服务端按「整段脚本」切分并逐条执行（docs/05 §2.1）。
+  const cur = wholeScript ? { sql: $('sql').value, cursor: null } : currentStatement();
   const sql = cur.sql;
   if (!sql.trim()) return;
 
   setStatus('执行中…');
   $('btn-run').disabled = true;
+  $('btn-run-all').disabled = true;
   // 只有真在跑的时候才有取消按钮：常驻会让人以为随时能中断。
   $('btn-cancel').hidden = false;
   // 超过 3 秒开始报时；到 30 秒问一次继续等还是取消（docs/05 §6）。
@@ -2942,6 +2964,9 @@ async function runSQL(approvalToken) {
   });
   try {
     const body = { sql, max_rows: 200 };
+    // 默认遇错即停；勾了「遇错继续」才显式传 false（docs/05 §2.1）。
+    const cont = $('run-continue');
+    if (cont && cont.checked) body.stop_on_error = false;
     if (cur.cursor !== null) body.cursor = cur.cursor;
     if (approvalToken) body.approval_token = approvalToken;
     const out = await api(path(API.exec, { id: state.current.id }), {
@@ -2957,6 +2982,7 @@ async function runSQL(approvalToken) {
       const ok = await askApproval(sql, e);
       if (ok && token) {
         $('btn-run').disabled = false;
+        $('btn-run-all').disabled = false;
         // 必须用刚签发的凭证重放「同一段 SQL」：服务端会比对语句指纹，
         // 期间若编辑了文本框，凭证失效并返回 409。
         return runSQL(token);
@@ -2995,6 +3021,7 @@ async function runSQL(approvalToken) {
       $('dlg-ok').click();
     }
     $('btn-run').disabled = false;
+    $('btn-run-all').disabled = false;
     $('btn-cancel').hidden = true;
   }
 }
@@ -3024,7 +3051,9 @@ async function explainSQL() {
     const findings = out.findings || [];
     if (findings.length) {
       const box = document.createElement('div');
-      box.className = 'notice warn';
+      // crit 是「这条计划在大表上很可能真出事」，用红；其余用黄。
+      // 全黑白会让「扫了 20 行的小表」和「扫了 80 万行」长得一模一样。
+      box.className = findings.some((f) => f.severity === 'crit') ? 'notice error' : 'notice warn';
       for (const f of findings) {
         const line = document.createElement('div');
         line.textContent = '· ' + f.message + (f.hint ? '（' + f.hint + '）' : '');
@@ -3107,11 +3136,27 @@ async function showAgent() {
     '<select id="agent-mode" style="width:100%">' +
     '<option value="read-only">只读：只查不改</option>' +
     '<option value="write-with-approval">可写：每次执行都要你确认</option>' +
-    '</select>';
+    // 自主模式只在本地 / 测试环境可选（docs/11 §5.1 硬约束 1）。
+    // 置灰而不是藏起来：用户需要知道「有这个模式，但这里不能用，以及为什么」。
+    '<option value="autonomous"' + (envAllowsAutonomous() ? '' : ' disabled') +
+    '>自主：按策略自动放行' + (envAllowsAutonomous() ? '' : '（仅本地/测试环境）') + '</option>' +
+    '</select>' +
+    (envAllowsAutonomous() ? '' :
+      '<p style="color:var(--muted);font-size:12px;margin:6px 0 0">当前连接环境是 ' +
+      escapeHTML((state.current && state.current.environment) || 'unknown') +
+      '：自主模式只能在 local / test 连接上使用。</p>');
   dialog('AI 助手', html, '提问').then(async (ok) => {
     if (!ok) return;
     await askAgent($('agent-q').value, $('agent-mode').value);
   });
+}
+
+// envAllowsAutonomous 判断当前连接能不能选自主模式（docs/11 §5.1）。
+//
+// 服务端还有一道同样的校验：界面置灰是「别让他白点」，不是安全边界。
+function envAllowsAutonomous() {
+  const env = state.current && state.current.environment;
+  return env === 'local' || env === 'test';
 }
 
 async function askAgent(question, mode) {
@@ -3180,6 +3225,12 @@ async function askAgent(question, mode) {
         } else if (ev.kind === 'answer') {
           answer = ev.text || answer;
           paint();
+        } else if (ev.kind === 'approval_request') {
+          // 审批卡片在**跑到那一步时**就出现，不等整轮结束（docs/11 §5.2）。
+          if (ev.approval) {
+            pending = pending.filter((p) => p.plan_id !== ev.approval.plan_id).concat([ev.approval]);
+            paint();
+          }
         } else if (ev.kind === 'result') {
           answer = ev.answer || answer;
           pending = ev.pending_approvals || pending;
@@ -3846,6 +3897,10 @@ $('btn-forget').onclick = () => {
   location.reload();
 };
 $('btn-run').onclick = () => runSQL(false);
+// 「执行全部」：整段脚本按顺序跑（docs/05 §2.1 的 Ctrl+Shift+Enter）。
+// 没有它，「遇错继续」这个开关就没有用武之地——不选中一段文字时，
+// 「执行」永远只跑光标所在的那一条。
+$('btn-run-all').onclick = () => runSQL(false, true);
 
 // 取消：独立一次请求。执行那条请求正阻塞着等结果，没法用它自己取消自己。
 $('btn-explain').onclick = () => explainSQL();
@@ -3866,7 +3921,7 @@ $('btn-cancel').onclick = async () => {
 $('sql').addEventListener('keydown', (e) => {
   if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
     e.preventDefault();
-    runSQL(false);
+    runSQL(false, e.shiftKey);
   }
 });
 

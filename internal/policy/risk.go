@@ -46,10 +46,14 @@ func (l *Level) UnmarshalJSON(b []byte) error {
 }
 
 // Grade 是分级结果。
+//
+// 带 json tag：它会随 /exec 的每条语句结果出去，而契约里所有字段都是
+// snake_case。没有 tag 时编码成 {"Level":…,"Reason":…,"Writes":…}，
+// 客户端按文档写的 grade.level 会取到 undefined——静默失效，最难查。
 type Grade struct {
-	Level  Level
-	Reason string
-	Writes bool // 该语句是否会修改数据或结构
+	Level  Level  `json:"level"`
+	Reason string `json:"reason"`
+	Writes bool   `json:"writes"` // 该语句是否会修改数据或结构
 }
 
 // Relations 提供分级所需的对象元数据。

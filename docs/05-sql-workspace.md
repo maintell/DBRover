@@ -56,6 +56,13 @@
 - 可切换为「继续执行」（`stop_on_error = false`），每条结果独立展示。
 - 结果区按语句分组，失败的语句高亮并显示错误码与位置。
 
+> **现状**：两种语义都已实现，入口是「执行全部」（`Ctrl+Shift+Enter`）——不选中文字时
+> 「执行」只跑光标所在那一条，「遇错继续」也就无从体现。工具栏「遇错继续」勾选框对应 `stop_on_error=false`；
+> 服务端字段默认 `true`（零值不能被解释成「继续执行」——那等于替用户做选择）。
+> 接口侧失败仍返回错误码，但错误体带 `error.results`，界面先把已完成的语句画出来
+> 再提示失败在哪。用例：`TestContinueOnErrorKeepsGoing`（两个子用例分别断言
+> 「只跑 2 条」与「3 条都跑且第三条带结果」）、`TestMultiStatementKeepsEarlierResults`。
+
 ### 2.2 补全
 
 补全来源按优先级：
@@ -105,11 +112,18 @@
 | 复制格式 | TSV / CSV / JSON / Markdown 表格 / SQL IN 列表 / INSERT 语句 |
 | 空值与二进制 | `NULL` 与空串**视觉可区分**（`NULL` 灰斜体、`''` 显示为空）；二进制显示 `0x…` 与字节数 |
 | 大字段 | 单元格截断显示，双击打开专用查看器（文本/JSON/图片/十六进制） |
-| 类型保真 | `Decimal`/`BigInt` 以字符串传输，避免 JS 精度丢失 |
+| 类型保真 | `Decimal` 一律以字符串传输；整数里**超过 2^53** 的那些也转成字符串，避免 JS 精度丢失（其余整数仍是数字，排序与聚合照常） |
 
 ### 3.2 结果与语句的对应
 
 - 每条语句一个结果集区块，标题显示语句前 60 字符 + 序号。
+  **现状**：多语句时每条结果各占一个块（`div.result-block`），互不覆盖；失败块用红字标出
+  「第 N 条失败」（序号 1 起），只有失败恰好是最后一条时才补「后面的语句没有执行」。
+  这条以前不成立：`renderTable` 的 `append` 参数语义是「往同一张表追加行」，多语句场景传
+  `false` 会把整个结果区 `replaceChildren` 掉，于是**只剩最后一条语句的结果**——内置浏览器
+  实测（勾选「遇错继续」跑三条语句，只看到第三条）才发现。
+  **仍未做**：区块标题（语句前 60 字符 + 序号）与「点击标题跳回编辑器」；目前靠失败行的
+  「第 N 条」与结果顺序区分。
 - 点击结果区块标题可跳回编辑器对应语句。
 - 失败语句显示：错误码、引擎原生错误（脱敏）、出错位置（行列）、可执行建议。
 
@@ -141,10 +155,20 @@
 
 ### 4.2 必须高亮的四种情况
 
-1. **估算偏差**：`ActualRows / EstRows > 100` 或 `< 0.01` → 黄色，提示「统计信息可能过期」。
-2. **全表扫描且行数大**：`SeqScan/COLLSCAN/ALL` 且 `ActualRows > 10000` → 橙色，提示「考虑索引」。
-3. **嵌套循环内层大**：`NestedLoop` 且内层 `ActualRows > 10000` → 红色，提示「可能退化」。
-4. **排序溢出**：`Sort` 带 `disk` 标记 → 提示「工作内存不足」。
+| # | 情况 | 判据 | 现状 |
+|---|---|---|---|
+| 1 | 估算偏差 | `ActualRows / EstRows > 100` 或 `< 0.01` | ⛔ **未实现**：要 ActualRows 就得发 `EXPLAIN ANALYZE`（真执行），而 §4.3 把它默认关掉了。宁可没有这一条，也不拿估算冒充实测 |
+| 2 | 全表扫描且行数大 | `Seq Scan` / `type=ALL` / `SCAN` 且**估算**行数 > 10000 | ✅ 已实现，判为 `crit`（红）并在结论里写明「估算 N 行」；`AnalyzePlan` 的 `FULL_SCAN` |
+| 3 | 嵌套循环 | `Nested Loop` 节点 | ⚠️ **部分**：报 `BLOCK_NESTED_LOOP`，估算行数过万时升为 `crit`；但**没有**解析「内层子节点自己的行数」——那要给 PG 的文本计划建缩进树，收益不抵复杂度 |
+| 4 | 排序 / 临时表 | MySQL `Using filesort` / `Using temporary`、SQLite `USE TEMP B-TREE` | ✅ 已实现（`FILESORT` / `TEMP_TABLE`，`info`）。PG 的 `Sort Method: external merge` 只出现在 ANALYZE 输出里，所以 PG 侧暂不报 |
+
+**颜色只有三档**：`info` 蓝、`warn` 黄、`crit` 红。设计稿里的「橙色」并入 `warn`——
+多一档颜色换不来更好的判断，只在界面里多一种要记住的语义。
+
+**为什么行数门槛比的是估算值**：我们只发 `EXPLAIN`（不执行），引擎给的就是估算。
+所以结论里必须出现「估算」两个字：把估算当实测说出去，用户会据此做出相反的决定
+（「才 200 行，不用管」）。用例：`TestAnalyzePlanLargeScanIsCrit`（四个子用例，含「小表不许标红」的反向断言）、
+> `TestPlanRowEstimateParsesPGText`、`TestAnalyzePlanIgnoresUnknownEngines`。
 
 ### 4.3 安全约束
 
@@ -221,8 +245,10 @@
 
 快捷键与 Monaco 冲突时以 Monaco 为准，并在帮助面板列出最终生效表。
 
-> **现状**：上面这张快捷键表是目标形态。临时界面（`internal/webui`，免构建）目前只有
-> `Ctrl+Enter` 执行与 `Esc` 关对话框；**取消、格式化、计划、历史、标签页、全局搜索都还没有**。
+> **现状**：上面这张快捷键表是目标形态。临时界面（`internal/webui`，免构建）目前有
+> `Ctrl+Enter`（执行光标所在语句 / 有选区时执行选区）、`Ctrl+Shift+Enter`（执行整个脚本，
+> 与工具栏「执行全部」等价）与 `Esc` 关对话框。**格式化、历史、标签页、全局搜索还没有**；
+> 取消与计划是工具栏按钮，没有绑键。
 > 键位清单在正式前端（React + Monaco）落地时才有意义。
 
 ---
@@ -236,7 +262,16 @@
 - 超过 3 秒的查询：状态栏滚动显示「执行中… 3.4s（可取消）」（每 200ms 刷新，不到 3 秒不显示秒数——几十毫秒就回来的语句让读数闪一下只是噪音）。✅ 内置浏览器实测：一条约 6 秒的递归 CTE 在 5.4s 时状态栏正是「执行中… 5.4s（可取消）」
 - 超过 30 秒：弹一次「已运行 30 秒，继续等待还是取消？」（选「取消」走与按钮同一条路，不做第二套取消逻辑）。✅ 弹窗实测通过（约 35 秒的递归 CTE，30 秒整弹出，标题与两个按钮都对）。**实测同时抓到一个缺陷**：语句在用户看弹窗时跑完了，弹窗却还留着——问一个已经不成立的问题比不问更糟；已修成「收尾时先标记不再运行、再按『继续等待』收起自己那个弹窗」。⚠️ **未覆盖**：引擎侧等待事件（`MonitorProvider`）仍未接；修复后的自动收起只由源码门禁（`TestSlowQueryTimerWiring`）覆盖，没有重跑一次 30 秒真机验证（浏览器快照在页面重载后取不到元素引用）
 - 结果行数超过 10 万：默认停止继续拉取，提示「已加载 10 万行，可继续或导出」。
+  ✅ 已落地为服务端硬上限 `MaxRowsCeiling = 100000`：`max_rows` 给多大都按 10 万算，
+  驱动那边到上限即停并标 `truncated`。**一次性执行**（`/exec`）默认只取 1000 行——
+  十万行塞进一个 JSON 响应会把服务端内存与界面一起拖垮，要大结果请走流式游标或导出。
+  用例：`TestMaxRowsCeiling`。
 - 单页大小默认 200 行，可配 50–2000。
+  ✅ 界面下拉可选 50 / 100 / 200 / 500 / 1000 / 2000，默认 200；服务端上限 `MaxPageSize = 2000`，
+  `limit` 超过按 2000 处理（不是报错：翻页大小写大了是个无害的愿望）。
+  下限只拦到 1——内部调用方（Agent 的 `data.sample`、测试）需要两三行看形状，
+  按「界面最少 50 行」去卡它们只会逼出一堆例外。用例：`TestPageSizeCeiling`、
+  `TestTableRowsDefaultLimit`（断言默认页大小真的是 200，而不是「不限」）。
 
 ---
 
@@ -256,6 +291,8 @@
 | 10 | 执行计划对 5 种关系库可解析并高亮偏差节点 | 集成 | ⚠️ **3 个引擎已通过**：`POST /connections/{id}/explain` + 工具栏「计划」，支持 `cursor`；`AnalyzePlan` 把计划翻成偏差项并在计划表上方高亮——SQLite 认 `SCAN` / `USE TEMP B-TREE`，PostgreSQL 认 `Seq Scan` / `Nested Loop`，MySQL 认 `type=ALL` / `type=index` / `Using filesort` / `Using temporary`，同一条按 code+message 去重且最多 8 条。**未过**：MSSQL/Oracle 返回 400 `EXPLAIN_UNSUPPORTED`（没有镜像与实例），所以只有 3/5。**能力声明已对齐**：SQLite / MySQL / PG 的 `Capabilities().Explain` 以前一直写 `false`（功能已接但声明说没有），现在改成真值，`/health` 把它返回给界面，不支持时界面直接不摆「计划」按钮；`TestExplainCapabilityMatchesDialect` 双向钉住「声明 = 方言支持」。用例：`TestExplainEndpoint`（断言 findings 里确有 FULL_SCAN）、`TestExplainUsesCursor`、`TestAnalyzePlan{SQLite,Postgres,MySQL,Dedupe,IgnoresUnknownEngines}`、浏览器实测。顺带修掉一个真 bug：`EXPLAIN QUERY PLAN` 被 `Analyze` 判成「无法识别 → 按写处理」 |
 | 11 | 格式化后 `Normalize` 指纹不变 | 单测 | ✅ `dialect` 归一化用例 |
 | 12 | 跨库引用（PG）在执行前被拦截并说明原因 | 单测 | ✅ 方言层 `Dialect.CrossDatabase` 认 `库.模式.表` 三段名（字符串与注释里的点不算、数字里的点不算、两段名正常放行、四段名整体报出来），执行门在**碰连接之前**拦下，返回 `400 CROSS_DATABASE_UNSUPPORTED` + 「另开连接 / postgres_fdw / dblink」的改法，审计记一条 denied。只对 PostgreSQL 生效：MySQL 的 `库.表`、MSSQL 的 `库.模式.表`、Oracle 的 `库.模式.表`（dblink）都是正常写法，不拦。用例：`TestCrossDatabase`（17 条表驱动，含变异验证）、`TestCrossDatabaseReferenceIsBlocked`、`TestCrossDatabaseOnlyOnPostgres`、`TestClassifyBlock`（400 不被误映射成 403/428） |
+| 13 | `stop_on_error=false` 时失败语句之后仍继续执行，每条结果独立 | 集成 | ✅ 工具栏「遇错继续」勾选框 → `stop_on_error=false`；服务端默认遇错即停，失败仍返回错误码但错误体带已完成的结果。用例：`TestContinueOnErrorKeepsGoing`（只跑 2 条 vs 3 条都跑） |
+| 14 | 超过 2^53 的整数读出来是精确的十进制字符串 | 真机（drivertest） | ✅ 三个驱动的读路径统一走 `driver.StringifyLargeInts`，2^53 以内保持数字（否则排序与聚合全变文本）。用例：drivertest 的 `LargeIntsAsStrings` 子用例（真库往返 + 「小整数不许被字符串化」的反向断言，SQLite 每次 CI 都跑，MySQL/PG 由环境变量开启）、`TestStringifyLargeInts`、`TestStringifyLargeIntsWalksWholeRow` |
 
 ---
 
