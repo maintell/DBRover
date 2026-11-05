@@ -289,7 +289,7 @@ M1/M2 已完成并有测试覆盖的部分：
 | D3 | Agent 默认 provider | 产品 | M3 前 |
 | D4 | 是否 v1 就做服务化 | 产品 | M5 后 |
 | D5 | 许可证 | 负责人 | 公开前 |
-| D6 | Redis 客户端是否引入 `github.com/redis/go-redis/v9` | ~~负责人~~ 已按 ADR-0007 引入 v9.7.3 | 已执行（纯 Go、无 CGO；备选是自己实现 RESP2，ADR 里写了否决理由） |
+| D6 | Redis 客户端是否引入 `github.com/redis/go-redis/v9` | 已按 ADR-0007 引入 v9.7.3（负责人已决策） | 已执行（纯 Go、无 CGO；备选是自己实现 RESP2，ADR 里写了否决理由） |
 
 ---
 
