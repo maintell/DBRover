@@ -16,6 +16,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"runtime/debug"
 	"strconv"
 	"strings"
 	"sync"
@@ -249,7 +250,62 @@ func (s *Server) Handler() http.Handler {
 		webui.Index(w, r)
 	})
 
-	return s.withAuth(mux, public)
+	// 兜底放在最外层：鉴权与业务处理器都在里面，任何一处 panic 都要变成可读的 500。
+	return s.recoverPanic(s.withAuth(mux, public))
+}
+
+// statusRecorder 记下「响应头有没有写出去」，供 recoverPanic 决定还能不能回错误体。
+//
+// 同时保留 Flush：NDJSON 流式端点靠 w.(http.Flusher) 逐条推，包一层之后
+// 类型断言必须照样成功，否则整条流会静默退化成「攒完再发」。
+type statusRecorder struct {
+	http.ResponseWriter
+	wrote bool
+}
+
+func (r *statusRecorder) WriteHeader(code int) {
+	r.wrote = true
+	r.ResponseWriter.WriteHeader(code)
+}
+
+func (r *statusRecorder) Write(b []byte) (int, error) {
+	r.wrote = true
+	return r.ResponseWriter.Write(b)
+}
+
+func (r *statusRecorder) Flush() {
+	if f, ok := r.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
+}
+
+// recoverPanic 把处理器的 panic 变成结构化 500（docs/12 §4 的 INTERNAL）。
+//
+// 为什么必须有：契约里写了 INTERNAL/500，此前却没有任何代码路径产出它——一个
+// nil map 或越界就能让响应变成「空回复 + 连接被掐断」，客户端只看到网络错误，
+// 也拿不到 request_id。本地工具没有集中日志，stderr 就是它的日志，所以栈打在那里。
+//
+// 只兜「响应还没写」的情况：头已经发出去之后再写会变成重复写头（日志里一行
+// superfluous WriteHeader，且客户端拿到半截响应），那时只记日志、不追加错误体。
+func (s *Server) recoverPanic(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		rec := &statusRecorder{ResponseWriter: w}
+		defer func() {
+			v := recover()
+			if v == nil {
+				return
+			}
+			fmt.Fprintf(os.Stderr, "dbrover: 处理 %s %s 时 panic: %v\n%s\n",
+				r.Method, r.URL.Path, v, debug.Stack())
+			if rec.wrote {
+				return
+			}
+			writeError(rec, http.StatusInternalServerError, "INTERNAL", "internal",
+				"服务端内部错误（已记录到 stderr）",
+				"这是缺陷：把 stderr 里的 panic 栈与这一步的请求路径贴到 issue", false)
+		}()
+		next.ServeHTTP(rec, r)
+	})
 }
 
 func (s *Server) handleAPINotFound(w http.ResponseWriter, r *http.Request) {

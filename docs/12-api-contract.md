@@ -312,6 +312,10 @@ POST /connections
 
 ### 2.6 任务（备份/迁移）
 
+> **现状：未实现**。备份/恢复/迁移目前只有同步端点（`/api/v1/backup/*`、`/api/v1/migrate/*`，
+> 见 §2.4），下面这张表是长任务化之后的目标形态：没有 `tasks` 表、没有进度、没有暂停续跑，
+> 因此也**没有** `TASK_CONFLICT` 这个错误码（错误码表只列已实现的）。
+
 | 方法 | 路径 | 说明 |
 |---|---|---|
 | `POST` | `/tasks/backup` | 创建备份任务 |
@@ -427,7 +431,7 @@ POST /connections
 > 三个已实现的引擎都有用例；其中 Windows 的「端口被拒」实测踩到过：内核给的是
 > `WSAECONNREFUSED`，与 `syscall.ECONNREFUSED` 不是同一个值，`errors.Is` 匹配不到，
 > 所以额外按 `*net.OpError` 的 `Op == "dial"` 兜了一层。
-| `DB_NOT_FOUND` | connection | 404 | 库/实例不存在 |
+
 | `DB_PERMISSION_DENIED` | permission | 403 | 权限不足 |
 | `SQL_SYNTAX_ERROR` | syntax | 400 | 语法错误（含位置） |
 | `SQL_CONSTRAINT_VIOLATION` | constraint | 409 | 唯一/外键/非空冲突 |
@@ -451,11 +455,15 @@ POST /connections
 | `BULK_NO_ROLLBACK_ACK` | policy | 428 | 影响行数超过回滚上限，需显式接受 |
 | `CURSOR_CLOSED` | resource | 410 | 游标已关闭 |
 | `CURSOR_BUSY` | resource | 409 | 游标正在被读取 |
-| `TASK_CONFLICT` | resource | 409 | 任务状态不允许该操作 |
 | `CAPABILITY_UNSUPPORTED` | internal | 501 | 该引擎不支持此能力 |
-| `INTERNAL` | internal | 500 | 未分类内部错误 |
+| `INTERNAL` | internal | 500 | 未分类内部错误：处理器 panic 由最外层兜底转成它（带 `request_id`，栈打到 stderr）。**头已经发出之后不再追加错误体**——重复写头会让客户端拿到半截响应，比不写更糟 |
 
 **`CAPABILITY_UNSUPPORTED` 必须带 `hint` 说明替代方案**，例如「该引擎不支持 keyset 分页，已降级为偏移分页」。
+
+**这张表只列「代码里真的会产出」的码**，由 `TestDocErrorCodesExistInCode` 双向核对：
+表里多一个 → 调用方写了永远进不去的分支；代码里多一个 → 客户端漏一种。这条门禁抓到的
+第一例就是本表自己：`EXEC_INVALID` 一直在产出却没进表，而 `DB_NOT_FOUND` / `TASK_CONFLICT`
+进了表却从不产出（前者与 `DB_CONNECT_NO_DATABASE` 重复，后者属于未实现的任务端点）。
 
 ---
 
