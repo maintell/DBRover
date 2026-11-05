@@ -78,8 +78,15 @@ type ExportRequest struct {
 // 抽出来是因为有两条路径要用它：正常导出（结构 + 数据）与只要结构的导出。
 // 复制一份的话，SQLite 的独立索引这种「容易漏」的细节迟早只在一处被修。
 func (e *Executor) writeSQLPreamble(ctx context.Context, bw *bufio.Writer, table string, td *model.TableDetail) error {
-	fmt.Fprintf(bw, "-- DBRover 导出：%s（%s）\n-- 同引擎回放；跨引擎请先核对类型映射。\n\n",
+	fmt.Fprintf(bw, "-- DBRover 导出：%s（%s）\n-- 同引擎回放；跨引擎请先核对类型映射。\n",
 		table, e.conn.Engine())
+	// 生成列必须说出来：它们在文件里既没有列定义也没有值，读者会以为导出漏了。
+	for _, c := range td.Columns {
+		if c.IsGenerated {
+			fmt.Fprintf(bw, "-- 生成列 %s 不写入（由目标端按表达式计算）\n", c.Name)
+		}
+	}
+	bw.WriteString("\n")
 	ddl, err := e.TableDDL(ctx, model.ObjectRef{Kind: model.KindTable, Name: table})
 	if err != nil {
 		return fmt.Errorf("导出需要建表语句：%w", err)
@@ -138,9 +145,16 @@ func (e *Executor) Export(ctx context.Context, req ExportRequest, w io.Writer) (
 
 	cols := make([]string, len(td.Columns))
 	names := make([]string, len(td.Columns))
+	// insertIdx 是「可以写入的列」在结果集里的下标：生成列由目标端计算，
+	// 写进去引擎会直接报错（SQLite/MySQL/PG 都不接受 INSERT 计算列）。
+	// 读路径仍然包含它们——导出成 CSV/JSON 时用户要看得到这一列。
+	insertIdx := make([]int, 0, len(td.Columns))
 	for i, c := range td.Columns {
 		cols[i] = e.dialect.QuoteIdent(c.Name)
 		names[i] = c.Name
+		if !c.IsGenerated {
+			insertIdx = append(insertIdx, i)
+		}
 	}
 
 	where, args, err := e.filterClause(known, req.Filter)
@@ -260,12 +274,18 @@ func (e *Executor) Export(ctx context.Context, req ExportRequest, w io.Writer) (
 				return nil, err
 			}
 			for _, row := range batch {
-				vals := make([]string, len(row))
-				for i, v := range row {
-					vals[i] = sqlLiteral(e.conn.Engine(), v)
+				vals := make([]string, len(insertIdx))
+				insNames := make([]string, len(insertIdx))
+				for k, i := range insertIdx {
+					var v any
+					if i < len(row) {
+						v = row[i]
+					}
+					vals[k] = sqlLiteral(e.conn.Engine(), v)
+					insNames[k] = e.dialect.QuoteIdent(td.Columns[i].Name)
 				}
 				fmt.Fprintf(bw, "INSERT INTO %s (%s) VALUES (%s);\n",
-					table, strings.Join(cols, ", "), strings.Join(vals, ", "))
+					table, strings.Join(insNames, ", "), strings.Join(vals, ", "))
 				out.Rows++
 			}
 			if !more {

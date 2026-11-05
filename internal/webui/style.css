@@ -207,6 +207,9 @@ tr:hover td { background: #1e222c; }
 .notice.error { border-color: #7c2f2b; color: #ffb3ae; }
 .notice.warn { border-color: #7a6320; color: #ffd98a; }
 
+/* 生成列：算出来的，不可编辑。用斜体加一点底色，与「只读」区分开。 */
+.generated { color: var(--muted); font-style: italic; }
+
 /* 每条语句一个结果块（docs/05 §3.2）。标题是按钮：点它跳回编辑器对应语句。 */
 .result-block { margin-bottom: 14px; }
 .result-block:last-child { margin-bottom: 0; }

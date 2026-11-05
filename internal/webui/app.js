@@ -2572,6 +2572,13 @@ const longTextLimit = 200;
 
 function attachEdit(td, key, column, origValue, isNull) {
   if (!key) return;
+  // 生成列（GENERATED ALWAYS AS …）不可编辑：写它引擎会直接拒绝，界面上让格子
+  // 可编辑等于给一个点了必然报错的入口。标成 generated 是为了让人看出「这列是算出来的」。
+  if (column && column.is_generated) {
+    td.classList.add('generated');
+    td.title = '生成列：由引擎按表达式计算，不能直接改';
+    return;
+  }
   td.dataset.col = column.name;
   td.dataset.kind = cellKind(column);
   td.dataset.orig = isNull ? '' : String(origValue);

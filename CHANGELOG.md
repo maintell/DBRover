@@ -6,6 +6,16 @@
 
 ### 新增
 
+- **生成列不再静默漏列**（SQLite 读不到、MySQL/PG 导出写不进去）：
+  - SQLite 改用 `PRAGMA table_xinfo`，按 hidden 位把生成列收进列清单并标 `IsGenerated`（hidden=1 的虚拟表隐藏列跳过）。此前用 `table_info`，
+    生成列**根本不出现**——结构页看不到，导出/迁移不知道它存在。
+  - 导出的 INSERT 列清单跳过生成列：MySQL/PG 原本就会报出这类列，导出的 SQL 里带上它们，
+    回放时引擎直接拒绝（SQLite 则是漏列）。现在按 `IsGenerated` 过滤，并在文件头注明「生成列 X 不写入」。
+  - 界面把生成列的格子标成 `generated` 且不可编辑（写进去必然失败），有源码门禁钉住。
+  - 迁移预检把生成列判 `blocked`：元数据里没有派生表达式，直接迁会建成空列，而摘要校验两端用同一份列清单、
+    发现不了。要迁必须由人给出目标类型，把计算结果固化成普通列。
+  - 用例：`TestDescribeReportsGeneratedColumn`、`TestExportSQLSkipsGeneratedColumnButKeepsData`（回放后 b 由目标端算出 10）、
+    `TestMigrateBlocksGeneratedColumn`、`TestUIGeneratedColumnIsReadOnly`；导出侧做了变异验证（改回包含生成列即红）。
 - **结构备份（`backup create -type schema`）**（docs/08 §2.1）：每段只写建表与索引，不读任何行，
   用于建空库 / 结构比对 / 把结构带走给人看——这些场景拿一个带全量数据的文件既慢又多一份
   业务数据落盘。容器头新增 `type` 字段，`backup inspect` 直接写「仅结构（无数据）」；

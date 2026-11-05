@@ -97,6 +97,19 @@ func PlanMigration(src, dst *model.TableDetail, srcEngine, dstEngine model.Engin
 }
 
 func verdictFor(sc model.Column, dc *model.Column, srcEngine, dstEngine model.Engine) ColumnVerdict {
+	// 生成列必须最先拦：元数据里**没有**派生表达式（model.Column 只有 Default），
+	// 按普通列迁过去会得到一个空列——源里算好的值变成 NULL，而摘要校验发现不了
+	// （两端用同一份列清单），属于「看起来迁完了、数据不一样」。
+	// 唯一可接受的做法是让人给出目标类型，把派生值固化成普通列。
+	if sc.IsGenerated {
+		return ColumnVerdict{
+			Column: sc.Name,
+			Source: sc.Type.Raw,
+			Status: MigrateBlocked,
+			Reason: "生成列：派生表达式不在元数据里，直接迁会建成空列。若接受「把计算结果固化成普通列」，" +
+				"给出目标类型即可（决定后值会被复制过去）",
+		}
+	}
 	v := ColumnVerdict{Column: sc.Name, Source: sc.Type.Raw, SourceMaxLen: sc.Type.MaxLen}
 	if dc != nil {
 		v.Target = dc.Type.Raw

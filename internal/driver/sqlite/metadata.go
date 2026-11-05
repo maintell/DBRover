@@ -190,8 +190,16 @@ func (c *Connector) DescribeTable(ctx context.Context, ref model.ObjectRef) (*mo
 	return td, nil
 }
 
+// loadColumns 读列定义，**包括生成列**。
+//
+// 用 `table_xinfo` 而不是 `table_info`：后者不返回生成列（`GENERATED ALWAYS AS …`），
+// 于是「列清单」里少了它们——结构页看不到，导出/迁移也不知道它们存在，等于静默漏列。
+//
+// 第 7 列 hidden 的取值：0 普通列、1 虚拟表的隐藏列（不该出现给用户）、2 生成列（虚拟）、
+// 3 生成列（存储）。只跳过 1，2/3 收下并标 IsGenerated——**能不能写**由调用方决定
+// （导出/迁移的 INSERT 列清单要跳过它们，读路径照常包含）。
 func (c *Connector) loadColumns(ctx context.Context, h *sql.DB, qual, name string, td *model.TableDetail) error {
-	rows, err := h.QueryContext(ctx, "PRAGMA "+qual+".table_info("+name+")")
+	rows, err := h.QueryContext(ctx, "PRAGMA "+qual+".table_xinfo("+name+")")
 	if err != nil {
 		return err
 	}
@@ -205,18 +213,24 @@ func (c *Connector) loadColumns(ctx context.Context, h *sql.DB, qual, name strin
 			notNull    int
 			defaultVal sql.NullString
 			pk         int
+			hidden     int
 		)
-		if err := rows.Scan(&cid, &colName, &colType, &notNull, &defaultVal, &pk); err != nil {
+		if err := rows.Scan(&cid, &colName, &colType, &notNull, &defaultVal, &pk, &hidden); err != nil {
 			return err
 		}
-		col := model.Column{
-			Name:      colName,
-			Type:      NeutralType(colType),
-			Nullable:  notNull == 0 && pk == 0,
-			IsPrimary: pk > 0,
-			Ordinal:   cid,
+		if hidden == 1 {
+			// 虚拟表的隐藏列：它们不是用户定义的结构，列出来只会让人困惑。
+			continue
 		}
-		if defaultVal.Valid {
+		col := model.Column{
+			Name:        colName,
+			Type:        NeutralType(colType),
+			Nullable:    notNull == 0 && pk == 0,
+			IsPrimary:   pk > 0,
+			IsGenerated: hidden == 2 || hidden == 3,
+			Ordinal:     cid,
+		}
+		if defaultVal.Valid && !col.IsGenerated {
 			v := defaultVal.String
 			col.Default = &v
 		}

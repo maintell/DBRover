@@ -428,10 +428,12 @@ type Dialect interface {
 - WAL 模式下读不阻塞写，但要求文件系统支持共享内存（网络盘可能不行）。
 - 无 `ALTER COLUMN`：改列类型/约束需「建新表 → 拷数据 → 删旧表 → 改名」，`ChangePlan` 必须生成这套四步并包在事务里（SQLite DDL 是事务性的，这是优点）。
 - 类型是「亲和性」而非强类型：`INTEGER` 列可以存字符串（部分情况）。UI 渲染以实际值为准。
-- 取 schema：`PRAGMA table_info` / `index_list` / `foreign_key_list`。⛔ **没有用 `table_xinfo`**：
-  生成列（`GENERATED ALWAYS AS …`）在当前列清单里**不会出现**，导出与迁移会静默漏列，界面也标不出
-  「这是计算列」。补齐要走两步：换成 `table_xinfo` 并按 hidden 位设 `IsGenerated`，同时让导出/迁移的
-  INSERT 列清单跳过生成列（否则会往计算列写值），而不是查 `sqlite_master` 解析 SQL。
+- 取 schema：`PRAGMA table_xinfo` / `index_list` / `foreign_key_list`。
+  **用 `table_xinfo` 而不是 `table_info`**：后者不返回生成列（`GENERATED ALWAYS AS …`），
+  列清单里少了它们，结构页看不到、导出也不知道它们存在——那是静默漏列。现在按 hidden 位取值：
+  `0` 普通列、`1` 虚拟表隐藏列（跳过）、`2` / `3` 生成列（收下并标 `IsGenerated`）。
+  **能读不能写**：导出与迁移的 INSERT 列清单跳过生成列（写进去引擎会拒绝），
+  界面把这类格子标成 `generated` 且不可编辑。
 - 备份：`VACUUM INTO 'file'` 是最安全的方式（在线、一致）；直接复制文件在 WAL 模式下会不一致。
 - 无用户与权限：`read-only` 只能在连接层用 `?mode=ro` 实现。
 
