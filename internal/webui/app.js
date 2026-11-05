@@ -558,7 +558,7 @@ async function showSessions() {
     if (canKill) {
       const b = document.createElement('button');
       b.textContent = '终止';
-      b.onclick = () => killSession(it.id);
+      b.onclick = () => killSession(it);
       td.appendChild(b);
     }
     tr.appendChild(td);
@@ -570,10 +570,31 @@ async function showSessions() {
   setStatus('会话 · ' + items.length);
 }
 
+// escapeText 把文本转义成可以安全塞进 innerHTML 的片段。
+//
+// 会话里正在跑的语句来自数据库：可能含 < > & 或引号，直接拼进对话框会破坏结构，
+// 最坏情况是被当成标签。这里只做转义，不做截断以外的加工。
+function escapeText(s) {
+  return String(s)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+}
+
 // killSession 终止一条会话。这是不可逆的写操作，必须先讲清代价再动手。
-async function killSession(id) {
+//
+// 确认框里要带上**它正在跑什么**（docs/09 验收 6）：只给一个 id，人没法判断自己
+// 掐断的是不是那条跑了两小时的报表查询。
+async function killSession(it) {
+  const id = it.id;
+  const q = (it.query || '').trim();
+  const what = q
+    ? '<p>它正在跑：</p><pre>' + escapeText(q.length > 400 ? q.slice(0, 400) + ' …' : q) + '</pre>'
+    : '<p>这条会话当前空闲（没在跑语句）。</p>';
   const ok = await dialog('终止会话',
-    '<p>结束会话 <b>#' + id + '</b> 后，它正在跑的语句会被立刻掐断，且不可撤销。</p>' +
+    '<p>结束会话 <b>#' + escapeText(id) + '</b> 后，它正在跑的语句会被立刻掐断，且不可撤销。</p>' +
+    what +
     '<p>如果那是别人的会话，先想一下要不要先问一声。</p>', '终止');
   if (!ok) return;
   try {

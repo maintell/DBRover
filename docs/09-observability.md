@@ -266,6 +266,7 @@ CREATE TABLE slow_query_hourly (
 |---|---|---|---|
 | 连接与负载 / 缓存命中 | §3.1 的两张卡 | `driver.MetricsProvider`（可选接口，判据是 `Capabilities().Metrics`）+ `service.Executor.Metrics`。PG 走 `pg_stat_database`（**按 `current_database()` 收窄**——它是集群级的，把所有库加起来会得到一个看不出是哪个库在打磁盘的混合命中率）+ `pg_settings.max_connections`；MySQL 走一次 `SHOW GLOBAL STATUS` 挑三项 + `@@max_connections`。**结论由规则产出**：连接数过八成上限、缓存命中率低于 90% 各触发一条警告 | `TestSummarizeCountersRules`（四种构造数据 + 命中率算法 + 「两边都是 0 时不给命中率」）、`drivertest` 的 `MetricsReported`（真机：上限为正、连接数含自己这条、**缓存计数不倒退**）、`TestUIMetricsPanel` |
 | 采集超时降级 | §2.1 / 验收 8 | 采集带 3 秒超时（`metricsCollectionTimeout`）。超时**不报错**：返回 200 + `degraded` 说明，界面照常画面板并标注。理由：监控拿不到数字不该看起来像库挂了 | `TestCollectMetricsDegradesOnTimeout`（假 provider 阻塞 → 断言不返回错误、标注降级、不编造读数）、`TestCollectMetricsPassesThrough` |
+| 终止会话的确认与审计 | §3.3 / 验收 6 | 确认框带**该会话当时在跑的语句**（超 400 字符截断，并**先转义再拼 HTML**——语句来自数据库，不能当可信文本拼）；终止**记审计**：`action=monitor.kill_session`、`risk=R4`、`friction=F2`、`sql` 是被终止会话当时的语句（已脱敏），失败时 `outcome=error` 且带原因。终止**不走执行门**（它不是 SQL，走的是驱动的专门方法），审计在 API 层自己写，id 复用同一个生成器以免审计里出现两种 id 形态 | `TestUISessionsPanel`（确认框含语句、含转义函数）；真机 MySQL：后台跑 `SELECT SLEEP(90)` → 终止 → `/audit` 出现 `monitor.kill_session` 且 `sql=SELECT SLEEP(90)`；内置浏览器确认框显示同一句 SQL |
 | 面板刷新与停止 | §2.1 / 验收 10 | 打开面板拉一次快照，之后每 5 秒一次；**停止条件写在定时器自己身上**（结果区里没有 `#metrics-panel` 就 `clearInterval`）。这样任何切视图的路径都不必记得清理——漏一处就是「监控把库拖慢」 | `TestUIMetricsPanel`（钉住判断语句与 `clearInterval`） |
 
 ### 9.2 尚未实现

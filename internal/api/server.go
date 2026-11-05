@@ -651,7 +651,42 @@ func (s *Server) handleKillSession(w http.ResponseWriter, r *http.Request) {
 			"会话 id 必须是数字", "", false)
 		return
 	}
-	if err := mp.KillSession(r.Context(), sid); err != nil {
+	// 先把「它正在跑什么」读下来：审计里只有 id 的话，事后没人说得清掐断的是什么
+	// （docs/09 验收 6）。这一步失败不阻断——终止是用户明确要做的操作。
+	stmt := ""
+	if items, serr := mp.Sessions(r.Context()); serr == nil {
+		for _, it := range items {
+			if it.ID == sid {
+				stmt = it.Query
+				break
+			}
+		}
+	}
+
+	started := time.Now()
+	err := mp.KillSession(r.Context(), sid)
+	// 终止会话不走执行门（它不是 SQL，走的是驱动的专门方法），所以审计只能在这里
+	// 自己写。分级与执行门对 KILL 语句的口径一致：R4 / F2；只读连接在上面已经 403。
+	if s.audit != nil {
+		ev := service.AuditEvent{
+			ID:         service.NewEventID(),
+			At:         time.Now(),
+			Actor:      "human",
+			Action:     "monitor.kill_session",
+			Target:     string(e.conn.Engine),
+			Risk:       policy.R4,
+			Friction:   policy.F2,
+			Outcome:    "ok",
+			SQL:        service.RedactSQL(stmt),
+			DurationMS: time.Since(started).Milliseconds(),
+		}
+		if err != nil {
+			ev.Outcome = "error"
+			ev.Reason = err.Error()
+		}
+		s.audit.Record(ev)
+	}
+	if err != nil {
 		writeError(w, http.StatusBadGateway, "DB_EXEC_FAILED", "connection", err.Error(), "", false)
 		return
 	}

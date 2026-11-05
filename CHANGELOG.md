@@ -174,6 +174,8 @@
 
 - **性能面板第一片：连接与负载 + 缓存命中**（FR-MON-01 的一部分）：之前四个能力位全 false、监控区只有会话列表。现在 `driver.MetricsProvider`（可选接口，判据是 `Capabilities().Metrics`）：PG 走 `pg_stat_database`（**按 `current_database()` 收窄**——它是集群级的，把各库加起来会得到看不出是哪个库在打磁盘的混合命中率）+ `pg_settings.max_connections`；MySQL 走一次 `SHOW GLOBAL STATUS` 挑三项 + `@@max_connections`（一次取全部而不是连发三条：少两次往返，也避免三条之间数字不同步）。**结论由规则产出**而不是固定文案：连接数过八成上限、缓存命中率低于 90% 各触发一条警告，界面只负责展示服务端给的 `status` / `verdict` / `details`。**采集带 3 秒超时，超时不报错**——返回 200 + `degraded`，因为监控拿不到数字不该看起来像库挂了。面板打开才轮询（5 秒一次），且停止条件写在定时器自己身上（结果区里没有该面板就 `clearInterval`），任何切视图的路径都不必记得清理。真机：`drivertest` 新增 `MetricsReported`（上限为正、连接数含自己这条、**缓存计数只增不减**——把两个计数器接反或取错库时命中率会算成一个看起来合理却完全错误的值，只有单调性守得住），SQLite 能力位保持 false 并由 `TestMetricsCapabilityIsHonest` 钉住。未做：慢查询 Top N 与 QPS，它们要先把「累计值 vs 窗口值」的差分采样做出来（`docs/09 §6.2` 点名这是最容易做错的地方），见 `docs/09 §9.2`。
 
+- **终止会话的确认与审计**（docs/09 验收 6）：之前确认框只有一句「会掐断它的语句」，连对方在跑什么都不知道；而且 `handleKillSession` **完全绕开了执行门**，不写任何审计——一个不可逆的写操作在审计里查不到。现在确认框带上**该会话当时在跑的语句**（超 400 字符截断，且先转义再拼 HTML：语句来自数据库，不能当可信文本拼），终止后记一条 `monitor.kill_session` 审计，`sql` 就是那条语句（已脱敏），失败也记（`outcome=error` + 原因）。终止不走执行门是因为它不是 SQL、走的是驱动的专门方法，所以审计在 API 层自己写，id 复用同一个生成器以免审计里出现两种 id 形态。真机 MySQL：后台跑 `SELECT SLEEP(90)` → 终止 → `/audit` 里查到 `monitor.kill_session` 且 `sql=SELECT SLEEP(90)`；内置浏览器确认框显示同一句 SQL。
+
 ### 安全
 
 - **大整数不再静默丢精度**：`BIGINT` 超过 2^53 时，界面保持字符串、服务端按列类型还原；客户端若把它写成 JSON 数字，直接 `400 NUMBER_PRECISION_LOSS` 并提示改用字符串，而不是把丢了低位的值写进库。此前界面 `coerce()` 用 `Number()` 转换整数列，编辑 `9223372036854775807` 会变成 `...5808`。

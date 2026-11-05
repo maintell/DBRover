@@ -17,6 +17,12 @@ type AuditReader interface {
 	Recent() []AuditEvent
 }
 
+// NewEventID 生成一个审计事件 id。
+//
+// 导出是因为有个别写操作不走执行门（终止会话走的是驱动的专门方法），但同样要记
+// 审计。两条路径必须用同一种 id 形态，否则审计里会出现两种 id，事后无法按 id 对账。
+func NewEventID() string { return newID() }
+
 // SliceAudit 是纯内存实现，用于测试与不需要持久化的场景。
 type SliceAudit struct {
 	mu     sync.Mutex

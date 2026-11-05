@@ -32,9 +32,13 @@ func TestUISessionsPanel(t *testing.T) {
 		"$('btn-sessions').hidden = !caps.session_mgmt",
 		"$('btn-sessions').onclick = () => showSessions()",
 		"async function showSessions()",
-		"async function killSession(id)",
+		"async function killSession(it)",
 		// 终止是不可逆写操作：必须弹确认，而且只读连接不给入口。
 		"const ok = await dialog('终止会话'",
+		// 确认框必须带上「它正在跑什么」，并把语句转义后再拼进 HTML（docs/09 验收 6）。
+		"it.query || ''",
+		"function escapeText(s)",
+		"escapeText(q.length > 400 ? q.slice(0, 400) + ' …' : q)",
 		"!!caps.kill_session && state.current.access_mode !== 'read-only'",
 	} {
 		if !strings.Contains(src, want) {
