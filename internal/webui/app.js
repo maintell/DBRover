@@ -3263,57 +3263,33 @@ function stopMetricsRefresh() {
 async function showMetrics(auto) {
   if (!state.current) return;
   if (!auto) setStatus('读指标…');
-  let out;
-  try {
-    out = await api(path(API.metrics, { id: state.current.id }));
-  } catch (e) {
+  const cid = state.current.id;
+  const caps = (state.current && state.current.capabilities) || {};
+  // 六块数据各读各的，**并发发**：串行发等于把「最慢的那个 × 6」当成首屏时间，
+  // 而 docs/09 验收 1 要求面板 2 秒内出结论。远端库上每个端点都可能要 1 秒。
+  // 谁失败谁降级——只有指标本身是必须的。
+  const settled = await Promise.allSettled([
+    api(path(API.metrics, { id: cid })),
+    caps.slow_query_stats ? api(path(API.slowQueries, { id: cid })) : Promise.resolve(null),
+    caps.capacity ? api(path(API.tableSizes, { id: cid })) : Promise.resolve(null),
+    caps.lock_graph ? api(path(API.locks, { id: cid })) : Promise.resolve(null),
+    api(path(API.history, { id: cid }) + '?metric=qps&minutes=60'),
+    api(path(API.alerts, { id: cid })),
+  ]);
+  const pick = (r) => (r.status === 'fulfilled' ? r.value : null);
+  if (settled[0].status !== 'fulfilled') {
     stopMetricsRefresh();
-    showNotice('读指标失败：' + e.message + (e.hint ? '（' + e.hint + '）' : ''), 'error');
+    const e = settled[0].reason || {};
+    showNotice('读指标失败：' + (e.message || e) + (e.hint ? '（' + e.hint + '）' : ''), 'error');
     setStatus('失败');
     return;
   }
-  // 慢查询是可选能力：它失败不该把指标卡也拖下水。
-  let slow = null;
-  const caps = (state.current && state.current.capabilities) || {};
-  if (caps.slow_query_stats) {
-    try {
-      slow = await api(path(API.slowQueries, { id: state.current.id }));
-    } catch (e) {
-      slow = null;
-    }
-  }
-  // 表体量同理：单独能力、单独降级，失败不影响上面两张卡。
-  let sizes = null;
-  if (caps.capacity) {
-    try {
-      sizes = await api(path(API.tableSizes, { id: state.current.id }));
-    } catch (e) {
-      sizes = null;
-    }
-  }
-  // 锁等待同理：空数组是健康状态，不是查不到。
-  let locks = null;
-  if (caps.lock_graph) {
-    try {
-      locks = await api(path(API.locks, { id: state.current.id }));
-    } catch (e) {
-      locks = null;
-    }
-  }
-  // 趋势（FR-MON-05）：没开留存时服务端会说 available=false，照它说的显示。
-  let hist = null;
-  try {
-    hist = await api(path(API.history, { id: state.current.id }) + '?metric=qps&minutes=60');
-  } catch (e) {
-    hist = null;
-  }
-  // 告警（FR-MON-08）：只在应用运行时生效，空列表也要说清楚这点。
-  let alerts = null;
-  try {
-    alerts = await api(path(API.alerts, { id: state.current.id }));
-  } catch (e) {
-    alerts = null;
-  }
+  const out = settled[0].value;
+  const slow = pick(settled[1]);
+  const sizes = pick(settled[2]);
+  const locks = pick(settled[3]);
+  const hist = pick(settled[4]);
+  const alerts = pick(settled[5]);
   renderMetrics(out, slow, sizes, locks, hist, alerts);
   if (auto) return;
   setStatus('指标已更新');

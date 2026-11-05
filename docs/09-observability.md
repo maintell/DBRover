@@ -266,6 +266,7 @@ CREATE TABLE slow_query_hourly (
 |---|---|---|---|
 | 连接与负载 / 缓存命中 | §3.1 的两张卡 | `driver.MetricsProvider`（可选接口，判据是 `Capabilities().Metrics`）+ `service.Executor.Metrics`。PG 走 `pg_stat_database`（**按 `current_database()` 收窄**——它是集群级的，把所有库加起来会得到一个看不出是哪个库在打磁盘的混合命中率）+ `pg_settings.max_connections`；MySQL 走一次 `SHOW GLOBAL STATUS` 挑三项 + `@@max_connections`。**结论由规则产出**：连接数过八成上限、缓存命中率低于 90% 各触发一条警告 | `TestSummarizeCountersRules`（四种构造数据 + 命中率算法 + 「两边都是 0 时不给命中率」）、`drivertest` 的 `MetricsReported`（真机：上限为正、连接数含自己这条、**缓存计数不倒退**）、`TestUIMetricsPanel` |
 | 采集超时降级 | §2.1 / 验收 8 | 采集带 3 秒超时（`metricsCollectionTimeout`）。超时**不报错**：返回 200 + `degraded` 说明，界面照常画面板并标注。理由：监控拿不到数字不该看起来像库挂了 | `TestCollectMetricsDegradesOnTimeout`（假 provider 阻塞 → 断言不返回错误、标注降级、不编造读数）、`TestCollectMetricsPassesThrough` |
+| 面板首屏的取数方式 | §3.1 / 验收 1 | 六块数据（指标 / 慢查询 / 表体量 / 锁 / 趋势 / 告警）**并发发**：串行等于把「最慢的那个 × 6」当成首屏时间，而验收要求 2 秒内出结论——远端库上每个端点都可能要 1 秒。`Promise.allSettled` + 逐块降级，只有指标本身是必须的 | `TestUIMetricsPanel`（钉住 `Promise.allSettled` 与逐块取值）；真机 MySQL：六个端点串行合计 37–50ms（本机），改造前后六块都完整渲染 |
 | 巡检报告导出 | §5 / 验收 12 | `?format=markdown` 返回 `text/markdown` 的表格：级别写中文（贴进工单能直接读），结论里的竖线转义、换行替换成空格——一条带 `|` 的语句足以把整张表拆坏。界面「导出 Markdown」按钮在新窗口打开它 | `TestHealthMarkdownEscapesAndLabels`（竖线、换行、中文级别）；真机 PG：`Content-Type: text/markdown; charset=utf-8` 且表格五行齐全 |
 | 空闲事务高亮 | §3.3 / 验收 5 | 会话列表里 `idle in transaction` 且已持续 >60 秒的行标红，并挂一条 title 说明「它什么都不干却抱着锁」。**只有 PG 会给这个状态**（MySQL 的 processlist 只有一个 `Sleep`，看不出来），所以有数据就标、没有就不标，不做假 | `TestUISessionsPanel`（条件与文案）；真机 PG 17：`BEGIN; SELECT 1;` 后挂着不动 → 1m33s 时该行确实标红（截图确认） |
 | 本地告警（两条规则） | §7 / FR-MON-08 | `alertState` 记住「连续几次」与「上次触发时间」，规则 1 连接占用**连续 3 次** >80%（抑制 30 分钟）、规则 2 **阻塞链深度 >3**（抑制 5 分钟，深度由边算最长路，环路用访问集合挡住）。状态**只在内存**、只在评估时前进：关掉应用就不再盯着，响应里带 `note` 讲明这点 | `TestAlertRules`（第 3 次才触发、抑制窗口内不重复、过了窗口再响、中间掉下来会清零）、`TestChainDepth`（单边 / 两级链 / 一对多 / 纯环不死循环）；**真机 MySQL 5.7**：把测试容器的 `max_connections` 压到 1 让占用率变 100% → 第一次 `/monitor/alerts` 返回 `连接占用 / 连接占用连续 3 次采样超过 80%（本次 100%）`，**随后两次都返回 0 条**（30 分钟抑制生效）；内置浏览器两种状态都看过——无告警时显示「告警（0）本次没有触发告警。告警只在应用运行时生效…」 |
@@ -288,4 +289,4 @@ CREATE TABLE slow_query_hourly (
 | 告警的另两条规则与外部推送 | §7 / FR-MON-08 | 已做「连接占用连续 3 次 >80%」与「阻塞链深度 >3」；**>5 分钟长事务**与**慢查询总耗时占比 >50%** 未做，也没有外部推送（v1 明确不做） | 长事务要 MySQL 侧的事务起始时间（`innodb_trx.trx_started`，现在没查）；占比要先有引擎侧的语句总耗时 |
 | 慢查询的小时聚合 | §4 的 `slow_query_hourly` | 表已设计但没写：面板给的是**窗口增量**，没有按小时落盘 | 与本片的 `metric_sample` 同源，加一张表 + 一个聚合任务即可，等有「看一周慢查询」的真实需求再做 |
 
-**验收现状**：12 项里第 2（结论由规则产出）、8（超时降级不报错）已由真实用例覆盖；第 1、10 只有界面门禁，缺「2s 内出首屏」的计时用例与「关闭后无新查询」的集成断言。
+**验收现状**：12 项里 2、3、4、5、6、8、11、12 已由真实用例或真机验证覆盖；第 1 的预算现在由「六块数据并发取」保证（实测六端点合计 37–50ms，本机），但**没有精确的 click→render 计时工具**，仍缺一条自动化计时断言；第 7 只有等待关系与链深（没有树形与 MDL 层）；第 10 的停止条件写在定时器自己身上，只有界面门禁，缺「关闭后无新查询」的集成断言；第 9 卡在 Oracle 实例。

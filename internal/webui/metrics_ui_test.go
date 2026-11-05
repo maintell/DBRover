@@ -21,6 +21,9 @@ func TestUIMetricsPanel(t *testing.T) {
 	for _, want := range []string{
 		"metrics: '/api/v1/connections/:id/monitor/metrics'",
 		"function showMetrics(",
+		// 六块数据并发发（验收 1 是 2 秒出首屏，串行等于「最慢的 × 6」）。
+		"Promise.allSettled(",
+		"const pick = (r) => (r.status === 'fulfilled' ? r.value : null)",
 		"function renderMetrics(",
 		// 定时器自己判断面板还在不在，不在就停。
 		"if (!$('metrics-panel') || !state.current)",
