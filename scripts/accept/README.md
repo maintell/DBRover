@@ -34,6 +34,7 @@ docker run -d --name dbrover-pg  -e POSTGRES_PASSWORD=testpass     -e POSTGRES_D
 | `bulk-20k-sqlite.ps1` | 分批批量修改：2 万行 20 批、NDJSON 进度逐条到达、`curl --max-time` 中途断开只保留已提交的批、预案仍有效可重新提交补齐 | 不需要 |
 | `run-local.ps1` | 一次跑完所有**不需要真机**的脚本（下面标「不需要」的那几条），失败时打印该脚本最后 15 行输出；任何一条失败即退出码 1 | 不需要 |
 | `backup-schema-only.ps1` | 结构备份（docs/08 §2.1）：`-type schema` 真的不含数据（体积比 full 小、段里没有 INSERT）、恢复后两张表与独立索引都在且行数为 0、`-type data` 被拒并说明未实现、恢复不带 `-env` 时报的是「连接只读」而不是「文件不存在」 | 不需要 |
+| `security-smoke.ps1` | 安全红线（AGENTS.md §7、docs/10）：回环优先（非回环地址被拒）、缺/错 token 401、跨站 Origin 403、未知 `/api` 路径 404、连接口令不回显、read-only 连接写操作 403、审计脱敏保留语句骨架、审计链自证 + **篡改后 `broken_at` 指到行号** | 不需要 |
 | `monitor-degrade.ps1` | 监控降级（docs/09 §2.1）：不支持的端点返回 400 + `CAPABILITY_UNSUPPORTED` 且点名引擎；巡检 4 项全为 `unknown`、整体不冒充 `ok`；告警与开了 `-metrics` 的历史端点照常可用 | 不需要 |
 | `export-formats.ps1` | 导出五格式（docs/06 §5）：CSV 中文与大整数保真、Markdown 表头与 `NULL`/`''` 区分、NDJSON 大整数为字符串且生成列带值、XLSX 是 zip 容器、**SQL 导出真的能回放**（INSERT 跳过生成列，回放后目标端算出 2 / 4）。值里带逗号与双引号 | 不需要 |
 | `stop-on-error.ps1` | 脚本语义（docs/05 §2.1）：默认遇错即停（前两条结果各自带回、第三条不跑）、`stop_on_error=false` 时三条都跑且失败那条只标自己；顺带钉住 `/query` 只接单条只读语句（多语句 400 `EXEC_INVALID`）与单条能开游标取页 | 不需要 |
@@ -58,7 +59,8 @@ PASS  stop-on-error.ps1           1.2s
 PASS  backup-schema-only.ps1      1.8s
 PASS  export-formats.ps1          2.1s
 PASS  monitor-degrade.ps1         1.4s
-全部通过（5 个脚本，覆盖分批批量、脚本语义、结构备份、导出五格式与 SQL 回放、监控降级）
+PASS  security-smoke.ps1          1.8s
+全部通过（6 个脚本，覆盖分批批量、脚本语义、结构备份、导出五格式与 SQL 回放、监控降级、安全红线）
 ```
 
 它**不替代**真机脚本，也不进 `scripts/check.ps1`：后者是发版前的静态与单测门禁，
