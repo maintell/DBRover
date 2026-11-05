@@ -42,6 +42,7 @@ const API = {
   tableSizes: '/api/v1/connections/:id/monitor/tables',
   locks: '/api/v1/connections/:id/monitor/locks',
   history: '/api/v1/connections/:id/monitor/history',
+  healthCheck: '/api/v1/connections/:id/monitor/health-check',
   sessions: '/api/v1/connections/:id/monitor/sessions',
   killSession: '/api/v1/connections/:id/monitor/sessions/:sid/kill',
   rows: '/api/v1/connections/:id/tables/:name/rows',
@@ -353,6 +354,8 @@ async function loadIdentity(id) {
     if ($('btn-sessions')) $('btn-sessions').hidden = !caps.session_mgmt;
     // 性能面板同理：没有服务端全局计数器的引擎上不摆（SQLite）。
     if ($('btn-metrics')) $('btn-metrics').hidden = !caps.metrics;
+    // 体检：只要有一项能力就能跑，缺的那几项会如实记 unknown。
+    if ($('btn-health')) $('btn-health').hidden = !(caps.metrics || caps.lock_graph || caps.slow_query_stats || caps.capacity);
     const ident = h.identity || {};
     const host = ident.hostname || '?';
     const fp = (ident.fingerprint || '').slice(0, 8);
@@ -3602,6 +3605,58 @@ function formatMS(v) {
 }
 
 $('btn-metrics').onclick = () => showMetrics(false);
+
+// showHealth 跑一次巡检并把报告画到结果区（FR-MON-07）。
+//
+// 结论全部来自服务端规则；界面只负责把 ok / warn / crit / unknown 摆清楚。
+async function showHealth() {
+  if (!state.current) return;
+  setStatus('巡检…');
+  let rep;
+  try {
+    rep = await api(path(API.healthCheck, { id: state.current.id }));
+  } catch (e) {
+    showNotice('巡检失败：' + e.message + (e.hint ? '（' + e.hint + '）' : ''), 'error');
+    setStatus('失败');
+    return;
+  }
+  const wrap = document.createElement('div');
+  wrap.id = 'health-panel';
+  wrap.className = 'panel';
+  const head = document.createElement('div');
+  head.className = 'head';
+  head.textContent = '体检（' + levelLabel(rep.level) + '）';
+  wrap.appendChild(head);
+
+  const t = document.createElement('table');
+  const thead = document.createElement('thead');
+  const htr = document.createElement('tr');
+  for (const label of ['项目', '结论', '级别']) {
+    const th = document.createElement('th');
+    th.textContent = label;
+    htr.appendChild(th);
+  }
+  thead.appendChild(htr);
+  t.appendChild(thead);
+  const tb = document.createElement('tbody');
+  for (const it of (rep.items || [])) {
+    const tr = document.createElement('tr');
+    tr.appendChild(cell(it.name));
+    tr.appendChild(cell(it.detail));
+    tr.appendChild(cell(levelLabel(it.level)));
+    tb.appendChild(tr);
+  }
+  t.appendChild(tb);
+  wrap.appendChild(t);
+  $('results').replaceChildren(wrap);
+  setStatus('巡检完成');
+}
+
+function levelLabel(level) {
+  return { ok: '正常', warn: '注意', crit: '有问题', unknown: '未知' }[level] || level;
+}
+
+$('btn-health').onclick = () => showHealth();
 // 对象搜索：输入停 250ms 再查，避免每敲一个字符打一次库。
 let objSearchTimer = null;
 if ($('obj-search')) {

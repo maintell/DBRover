@@ -216,6 +216,19 @@
         }
       }
     },
+    "/api/v1/connections/{id}/monitor/health-check": {
+      "get": {
+        "summary": "巡检：一键健康检查",
+        "description": "FR-MON-07。四项：连接占用（>80% warn / >90% crit）、锁等待（>0 warn / >3 条 crit）、慢查询（窗口内有即 warn，首次采样给 unknown）、表体量（最大表 >1GB warn）。**单项采集失败只让那一项记 unknown 并写明原因**，不影响整份报告——巡检最怕「一项挂了整页白」。报告整体级别取各项里最严重的。",
+        "parameters": [
+          { "name": "id", "in": "path", "required": true, "schema": { "type": "string" } }
+        ],
+        "responses": {
+          "200": { "description": "ok（items 里每项带 level：ok/warn/crit/unknown）" },
+          "404": { "description": "连接不存在" }
+        }
+      }
+    },
     "/api/v1/connections/{id}/monitor/history": {
       "get": {
         "summary": "指标历史点（本地留存）",

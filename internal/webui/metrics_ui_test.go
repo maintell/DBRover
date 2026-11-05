@@ -48,6 +48,10 @@ func TestUIMetricsPanel(t *testing.T) {
 		"history: '/api/v1/connections/:id/monitor/history'",
 		"function historySection(hist)",
 		"没有开启指标留存。",
+		// 巡检（FR-MON-07）：结论来自服务端规则，界面只负责摆清级别。
+		"healthCheck: '/api/v1/connections/:id/monitor/health-check'",
+		"function showHealth()",
+		"unknown: '未知'",
 		// 链而不是平表：从持有者往下展开（FR-MON-03 要的是「谁卡住了谁」）。
 		"'持有 #' + id",
 		// 按会话计数：同一个会话可能被多个持有者挡着，按边计数会和行数对不上。
