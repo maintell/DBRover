@@ -2660,6 +2660,10 @@ document.addEventListener('contextmenu', (ev) => {
   // 行级操作：只给可写连接（只读连接上摆出来，点下去只会在提交时被拒），
   // 而且这一行必须有主键——menu 的入口检查已经保证了 dataset.key 存在。
   const writable = state.current && state.current.access_mode !== 'read-only';
+  // JSON 列给专用编辑器：正文一格放不下，而且需要格式化与校验（docs/06 §1.4）。
+  if (writable && (td.dataset.kind || '') === 'json') {
+    actions.push({ label: 'JSON 编辑器', run: () => openJsonEditor(td) });
+  }
   if (writable) {
     actions.push({ label: '删除本行', id: 'row-del', run: () => deleteRow(tr) });
     actions.push({ label: '复制本行', id: 'row-copy', run: () => copyRow(tr) });
@@ -2709,6 +2713,74 @@ function setCellExact(td, value) {
   dropPending(col, tr.dataset.key);
   state.pending.push({ key, col, oldValue, newValue: value });
   updatePendingBar();
+}
+
+
+// setCellText 把单元格设成任意文本并入待提交列表（JSON 编辑器用）。
+//
+// 与 setCellExact 分开：那个专门处理 NULL 与空串的显示（'NULL' / "''"），
+// 这个处理「一段真正的文本」，不能复用同一套显示逻辑。
+function setCellText(td, text) {
+  const tr = td.closest('tr');
+  if (!tr || !tr.dataset.key) return;
+  const col = td.dataset.col;
+  const kind = td.dataset.kind || '';
+  const wasNull = td.dataset.orignull === '1';
+  const oldValue = wasNull ? null : coerce(kind, td.dataset.orig || '');
+  if (sameValue(oldValue, text)) return;
+
+  td.textContent = text;
+  td.dataset.orignull = '0';
+  td.classList.add('dirty');
+  // 这次改动的 before/after 已经算好，别让紧随其后的失焦再记一遍。
+  td.dataset.skip = '1';
+
+  const key = JSON.parse(tr.dataset.key);
+  dropPending(col, tr.dataset.key);
+  state.pending.push({ key, col, oldValue, newValue: text });
+  updatePendingBar();
+}
+
+// openJsonEditor 是 JSON 列的专用编辑器（docs/06 §1.4）：等宽字体、可格式化、会校验。
+//
+// 校验不通过时**不关对话框**：把原文留在框里重开一次，而不是丢掉用户刚写的东西。
+// 丢掉输入是最让人恼火的一种失败。
+async function openJsonEditor(td) {
+  let text = td.dataset.orignull === '1' ? '' : (td.textContent || '');
+  // 能解析就先美化一层：手写压缩过的 JSON 在多行视图里才好改。
+  try {
+    text = JSON.stringify(JSON.parse(text), null, 2);
+  } catch (e) {
+    // 解析不了就原样给，校验交给下面的循环。
+  }
+  for (;;) {
+    const answer = dialog('编辑 JSON',
+      '<p>整段替换这个单元格的值。保存前会校验；不合法会留在框里让你改。</p>' +
+      '<textarea id="json-text" spellcheck="false" style="width:100%;height:240px;font-family:ui-monospace,Consolas,monospace"></textarea>',
+      '保存');
+    $('json-text').value = text;
+    const fmt = document.createElement('button');
+    fmt.textContent = '格式化';
+    fmt.style.marginTop = '6px';
+    fmt.onclick = () => {
+      try {
+        $('json-text').value = JSON.stringify(JSON.parse($('json-text').value), null, 2);
+      } catch (e) {
+        showNotice('JSON 不合法：' + e.message, 'error');
+      }
+    };
+    $('dlg-body').appendChild(fmt);
+    if (!(await answer)) return;
+    text = $('json-text').value;
+    try {
+      JSON.parse(text);
+    } catch (e) {
+      showNotice('JSON 不合法：' + e.message + '（内容还在，重新打开继续改）', 'error');
+      continue;
+    }
+    setCellText(td, text);
+    return;
+  }
 }
 
 // 关闭页面前拦一下：浏览器只允许通用文案，不能自定义内容。
