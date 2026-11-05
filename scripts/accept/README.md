@@ -21,6 +21,7 @@ docker run -d --name dbrover-pg  -e POSTGRES_PASSWORD=testpass     -e POSTGRES_D
 | 脚本 | 验什么 | 需要真机 |
 |---|---|---|
 | `bulk-20k-sqlite.ps1` | 分批批量修改：2 万行 20 批、NDJSON 进度逐条到达、`curl --max-time` 中途断开只保留已提交的批、预案仍有效可重新提交补齐 | 不需要 |
+| `stop-on-error.ps1` | 脚本语义（docs/05 §2.1）：默认遇错即停（前两条结果各自带回、第三条不跑）、`stop_on_error=false` 时三条都跑且失败那条只标自己；顺带钉住 `/query` 只接单条只读语句（多语句 400 `EXEC_INVALID`）与单条能开游标取页 | 不需要 |
 | `bulk-engines.ps1 -Engine mysql -Port 13306 -User root` | 同上但 3000 行 3 批，重点是**逐批都是「改成相同值」**时 `RowsAffected` 仍等于本批主键数（MySQL 的 `clientFoundRows`）；另含复合主键表 1500 行（批大小自动降到 200） | MySQL 或 PostgreSQL |
 | `precision.ps1 -Engine mysql -Port 13306 -User root` | `BIGINT` 上下界与 `NUMERIC(38,10)` 极值在「独立 SQL → 表浏览接口 → 原样写回 → 改成新精度值」全链路逐字符一致；反向验证 JSON 数字形态的大整数被 `400 NUMBER_PRECISION_LOSS` 拒绝 | MySQL 或 PostgreSQL |
 | `compare-cross.ps1` | 结构比对三段：① 跨引擎同构表**零差异**（主键索引不误报、`BTREE`/`btree` 等价、整数显示宽度已归一）；② 跨引擎单侧视图分类正确、原文带出、跨引擎的 `CREATE VIEW` 不自动进升级脚本；③ 同引擎（MySQL 两个库）同构视图**零误报**——`DEFINER` / `ALGORITHM` 头部不计入差异 | MySQL + PostgreSQL |
@@ -66,6 +67,16 @@ docker run -d --name dbrover-my -e MYSQL_ROOT_PASSWORD=testpass -e MYSQL_DATABAS
 ## 引擎名
 
 `-Engine` 接受 `mysql` / `postgres`；写 `pg` 会被脚本规范化成 `postgres`（服务端只认规范值，早先直接用 `pg` 会得到 `DB_CONNECT_FAILED: 暂不支持的引擎`）。这条是实际跑脚本时踩出来的，别改成只认 `pg`。
+
+## 本机可跑的两条（2026-11-05，HEAD 192f7c8）
+
+真机通道这一轮不可用（本机无 docker，debug-ubuntu 的 SSH 连不上），所以只跑了不需要外部数据库的两条；
+**5 个真机脚本 + 全量真机 `go test` 待通道恢复后补跑**，不要把它们当成已验过。
+
+| 脚本 | 引擎 | 结果 |
+|---|---|---|
+| `bulk-20k-sqlite.ps1` | SQLite | 通过：20000 行 / 20 条进度 / 中止保留 6000 行 / 重提补齐（幂等） |
+| `stop-on-error.ps1` | SQLite | 通过：默认 2 条结果（第 2 条失败、第 3 条未跑）→ 继续 3 条结果 → `/query` 多语句 `EXEC_INVALID` → 单条可开游标取页 |
 
 ## 最近一次全跑（2026-11-05，HEAD bebe831）
 
