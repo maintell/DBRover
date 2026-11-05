@@ -4,6 +4,8 @@
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-11-06
+
 ### 新增 · 桌面形态、服务端设置与交互重做（ADR-0017）
 
 - **两种形态并存**：`dbrover-desktop`（Wails v2 / WebView2 原生窗口，Windows）与 `dbrover serve -open`（浏览器）共用同一份 `api.Server`、`internal/webui`、执行门与审计，零分叉。桌面壳是 `cmd/dbrover-desktop` 的**独立 module**（Wails 依赖只在这里），根 `go.mod` 不变，`CGO_ENABLED=0` 五平台交叉编译与 `go test ./...` 不受影响。
