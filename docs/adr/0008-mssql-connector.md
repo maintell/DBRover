@@ -78,9 +78,25 @@ MSSQL 没有会话级只读。本驱动做两件事，并且**在 `Health.Warnin
 
 ## 当前状态（2026-11-04）
 
-**驱动未实现，代码未落地**——本 ADR 只把决策定下来，避免实现时反复讨论。原因是拿不到可验证的实例，而不是设计未定：
+**驱动未实现，代码未落地**——本 ADR 只把决策定下来，避免实现时反复讨论。原因是拿不到可验证的实例，而不是设计未定。
 
-- `mcr.microsoft.com` 的 registry API 可达（`/v2/` 返回 200），但 blob 下载走 `southeastasia.data.mcr.microsoft.com`，实测约 85 KB/s，随后被 `connection reset by peer` 掐断；镜像约 1.5 GB，按这个链路需要数小时且会反复中断。
-- Docker Hub（`registry-1.docker.io`）在这台机器上直接连接被拒，`gvenzl/oracle-free` 同样拿不到。
+**2026-11-05 在 debug-ubuntu 上用 SSH 工具复测，把卡点精确定位并排除了几个旧假设**：
 
-**验收口径不放松**：`docs/AGENTS` 要求连接器类改动有真实实例验证记录，所以不写「没跑过任何一条语句」的 MSSQL 驱动。等拿到能拉镜像的机器（或 CDN 恢复）再按本 ADR 实现，并通过 `drivertest` 全套。
+- **不是磁盘**：docker 的 `data-root` 是 `/data/docker`，`df -h /data` 有 **713G 空闲（22% 占用）**。
+  此前 `df` 看到「89% 占用 / 5.6G 剩余」是查了系统盘 `/`，与镜像存储无关。
+- **不是 registry 不可达**：`mcr.microsoft.com/v2/` 返回 200；
+  `mssql/server:2022-latest` 的 manifest 返回 200、760 字节、0.33s；`ghcr.io/v2/` 返回 401（正常鉴权响应）。
+  **控制面（manifest）快，数据面（blob）慢**，`curl -I` / `/v2/` 通不代表能拉镜像。
+- **真正的卡点是 blob CDN 限速**：用真实 layer digest 测 `mcr` blob，15 秒只下了
+  **258048 字节 ≈ 17 KB/s**，且 HTTP 状态行都未完成；`docker pull` 三个 layer 全部卡在
+  `Pulling fs layer`，60 秒超时（EXIT=124）。镜像约 1.5 GB，按此链路需数小时且反复中断，
+  与 2026-11-04 记录的「约 85 KB/s + connection reset」是同类现象（不同测量点，速率不同）。
+- **Docker Hub 仍不通**：`registry-1.docker.io` 的 manifest 请求 `i/o timeout`，`hello-world` pull 超时；
+  MySQL 8 / `gvenzl/oracle-free` 因此同样拿不到。
+- 顺带排除「SSH / docker 不可用」：`debug-ubuntu` 的 `ssh-tools` 连接已配好，MySQL 5.7 / PG 17
+  镜像本地已缓存，全量真机验收与 `-race` 都已用它跑通（见 `scripts/accept/README.md`）。
+
+**验收口径不放松**：`docs/AGENTS` 要求连接器类改动有真实实例验证记录，所以不写「没跑过任何一条语句」的 MSSQL 驱动。
+需要的不是「另一台机器」（这台机器磁盘与 SSH 都够），而是**能拉取大 blob 的镜像源**——
+例如配置可用的 registry mirror / 代理，或直接导入预先下载好的镜像 tar。拿到之后按本 ADR 实现，
+并通过 `drivertest` 全套。

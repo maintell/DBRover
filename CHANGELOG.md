@@ -260,6 +260,17 @@
 
 ### 修复
 
+- **复查 ADR-0008 的「拉不到镜像」卡点，把结论精确化**（只读排查，不动代码）：
+  2026-11-05 在 debug-ubuntu 上用 SSH 工具复测，排除了三个旧假设——① 不是磁盘：docker
+  `data-root` 在 `/data/docker`，`df -h /data` 有 713G 空闲（此前看到 89% 占用是查了系统盘 `/`）；
+  ② 不是 registry 不可达：`mcr.microsoft.com/v2/` 与 `mssql/server:2022-latest` 的 manifest 都
+  返回 200、760 字节、0.33s，`ghcr.io/v2/` 返回 401（正常鉴权）——**控制面快、数据面慢**；
+  ③ 真正卡点是 blob CDN 限速：真实 layer digest 测速 15 秒仅 258048 字节 ≈ 17 KB/s 且连接
+  不完成，`docker pull` 三个 layer 全卡在 `Pulling fs layer`、60 秒超时（EXIT=124）。
+  Docker Hub 的 manifest 仍 `i/o timeout`。所以需要的不是「另一台机器」，而是能拉大 blob 的
+  镜像源（mirror / 代理 / 预下载 tar）。ADR-0008 §当前状态、docs/13 的 M1 与风险登记册第 1 条
+  同步改准，避免后人重复排查磁盘 / SSH / mcr 可达性这些已被推翻的假设。MSSQL/Oracle/MySQL 8
+  驱动仍按 AGENTS.md 的要求保持未实现（没有真机实例验证记录就不写驱动）。
 - **关闭监控面板后仍在打库**（高，docs/09 验收 10）：真机 MySQL 5.7 + 内置浏览器网络证据抓到——
   切走视图后 `#metrics-panel` 已立即不在 DOM，但 `monitor/metrics` 仍每 5 秒多发两整批 6 端点请求
   （序列 62/68，约 10 秒）。根因是停止只靠 `setInterval` 回调下一次 tick 的自检，而在飞请求与

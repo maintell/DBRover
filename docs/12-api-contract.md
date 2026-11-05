@@ -116,7 +116,7 @@ Content-Type: application/x-ndjson
 | `execute` 未独立 | 写操作走 `/exec`；`/exec` 同时兼容一次性只读查询 | 收敛为 `/execute` 只做写、`/query` 只做读 |
 | 列元数据随响应返回 | `/query` 直接返回 `columns`，不走 WS 事件 | 改为 WS 推送 `result.columns` |
 | 游标按连接隔离在进程内 | 进程重启即失效，无跨实例共享 | 服务化时引入共享存储 |
-| 连接支持 SQLite / MySQL / PostgreSQL（Redis 走 KV 那套接口） | 三引擎真机验收通过；MSSQL / Oracle 未实现（镜像拉不下来，见 ADR-0008） | 拿到能拉镜像的机器后按 `docs/04` 补齐 |
+| 连接支持 SQLite / MySQL / PostgreSQL（Redis 走 KV 那套接口） | 三引擎真机验收通过；MSSQL / Oracle 未实现（镜像的 **blob CDN 限速**：mcr 控制面可达、真实 layer 仅 ~17 KB/s 且连接不完成，Docker Hub manifest `i/o timeout`；磁盘与 SSH 都不是瓶颈，见 ADR-0008） | 配置能拉大 blob 的镜像源（mirror / 代理 / 预下载 tar）后按 `docs/04` 补齐 |
 | 契约已落文件但未接代码生成 | 契约在 `internal/api/openapi.json`，由测试保证与路由表一致 | 接 `oapi-codegen` 生成 server 类型与 TS client |
 
 **契约的可信度靠门禁保证，不靠自觉**：

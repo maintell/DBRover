@@ -25,7 +25,7 @@
 | 里程碑 | 状态 | 说明 |
 |---|---|---|
 | M0 文档基线 | ✅ 完成 | 14 份设计文档 + 16 份 ADR（0001 技术栈 / 0002 Agent 边界 / 0003 Plan-Apply / 0004 环境模型 / 0005 跨引擎差异 / 0006 依赖检查 / 0007 非关系型接口 / 0008 SQL Server 接入 / 0009 备份续跑粒度 / 0010 备份加密 / 0011 迁移搬数据 / 0012 迁移约束与默认值 / 0013 迁移外键 / 0014 迁移注释 / 0015 连接器目标标识与恢复确认 / 0016 指标留存用单文件 SQLite）。**这份清单由 `internal/ci` 守住**：列出的编号必须存在，新增 ADR 必须登记进来 |
-| M1 最小闭环 | 🚧 进行中 | SQLite / MySQL / PostgreSQL 三引擎端到端已通；API、临时前端、CLI 已可用；**SQL Server 未开工，卡在镜像而不是磁盘**：`mcr.microsoft.com` 的 API 可达，但 blob 走 `southeastasia.data.mcr.microsoft.com`，实测约 85 KB/s 且被 `connection reset` 掐断；Docker Hub 直接拒连。决策与实现口径见 ADR-0008，拿到能拉镜像的机器即可开工 |
+| M1 最小闭环 | 🚧 进行中 | SQLite / MySQL / PostgreSQL 三引擎端到端已通；API、临时前端、CLI 已可用；**SQL Server 未开工，卡在 blob CDN 而不是磁盘或 registry**：2026-11-05 在 debug-ubuntu 上复测排除三个旧假设——`/data` 有 713G 空闲、`mcr.microsoft.com/v2/` 与 mssql manifest 都返回 200（0.33s）、SSH/docker 均可用；真正卡点是 blob 下载 **15 秒仅 258KB ≈ 17 KB/s** 且连接不完成，`docker pull` 60 秒超时。Docker Hub 的 manifest 仍 `i/o timeout`。需要的不是另一台机器，而是**能拉大 blob 的镜像源**（mirror / 代理 / 预下载 tar），见 ADR-0008 |
 | M2 写入与变更安全 | ✅ 基本完成 | 变更集、乐观并发、Plan/Apply、行内编辑、筛选排序、结构设计器、批量修改（含分批与中止）、一键撤销、导出、结构比对、依赖检查 —— 见下表 |
 | M3 AI Agent | 🚧 切片一、二完成 | `internal/agent`：Provider 抽象 + OpenAI 兼容客户端（DeepSeek / 通义 / Moonshot / vLLM / Ollama 走同一套协议，用 `base_url` + `model` 区分）、14 个工具、权限三模式与环境上限、执行循环（步数 / 时长 / 循环检测 / 失败上限）、审批门（预案只由服务端保管，Agent 无法自批）。已接 HTTP（`/agent/status`、`/agent/conversations`、`/messages`（含 `?stream=1` NDJSON）、`/approvals`、`/export`）与界面（步骤时间线、可展开 SQL、审批卡片、会话导出），内置浏览器实测通过。上下文检索已做三路（名称 + 注释 + 结构邻近，最多 40 个对象 / 5 张表列定义），长会话压缩按「配了窗口就按估算 token 的 85%、没配退回字符预算」触发，只压工具结果。评测集（`internal/agent/eval`，14 条录制回放，SQLite/MySQL/PG 三引擎真机全过，CI 门禁）、Windows 凭据库与 `dbrover secret` 都已做。**未做**：向量召回（P1，需先定嵌入模型与索引方案）、macOS/Linux 凭据库、审计外部锚点。不再被「接哪个模型服务」卡住——那是配置项，不是设计决策 |
 | M4 引擎补齐 | 🚧 进行中 | **Redis 第一版已通**（只读浏览 + 只读命令模式，真机 Redis 8.0.5 验证）；Mongo / ES / MSSQL / Oracle 未实现 |
@@ -69,7 +69,7 @@ M1/M2 已完成并有测试覆盖的部分：
 
 **已知的下一步（按性价比排序）**
 
-1. SQL Server / Oracle / MySQL 8 连接器：**全部卡在拉不到镜像**（`mcr.microsoft.com` 的 blob 约 85 KB/s 且被 `connection reset`，Docker Hub 直连拒；见 [ADR-0008](adr/0008-mssql-connector.md)），拿到能拉镜像的机器即可开工。难点分别是 MSSQL 的 `sys.*` 自拼 DDL、Oracle 的 `DBMS_METADATA` 与空串语义。
+1. SQL Server / Oracle / MySQL 8 连接器：**卡在镜像源的数据面（blob）拉不动**——2026-11-05 在 debug-ubuntu 复测：`/data` 有 713G 空闲、mcr 的 `/v2/` 与 mssql manifest 都返回 200（0.33s）、SSH/docker 均可用；但真实 layer blob 15 秒仅 258KB ≈ 17 KB/s 且连接不完成，`docker pull` 60 秒超时，Docker Hub 的 manifest `i/o timeout`（见 [ADR-0008](adr/0008-mssql-connector.md)）。**需要的是能拉大 blob 的镜像源**（registry mirror / 代理 / 预下载镜像 tar），不是另一台机器。难点分别是 MSSQL 的 `sys.*` 自拼 DDL、Oracle 的 `DBMS_METADATA` 与空串语义。
 2. `docs/07` 验收 12 手写 SQL 模式：DDL **反解回表单**需要完整解析器，是剩余项里最大的一块。
 3. 引擎特有项（`EngineExtra`）表单：需要各引擎先补充元数据，块头也不小。
 4. 磁盘余量探测：只有 SQLite 能诚实实现（本地文件所在卷），MySQL / PG 拿不到「所在卷余量」，硬做只能是假的。
