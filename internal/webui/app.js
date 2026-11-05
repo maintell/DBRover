@@ -2839,42 +2839,78 @@ window.addEventListener('beforeunload', (ev) => {
   ev.returnValue = '';
 });
 
+// renderExec 把一次执行的结果按语句分块画出来（docs/05 §3.2）。
+//
+// 每条语句一个块：块之间是独立容器，谁也不清空谁。这里曾经传
+// renderTable(..., append=false) 直接往结果区画，而 append 的语义是「往同一张表
+// 追加行」，传 false 会 replaceChildren——多语句脚本只剩最后一条的结果。
+//
+// 标题只在多条语句时出现：一条语句的「第 1 条 · SELECT …」是纯噪音，
+// 而它想解决的「这是哪条语句的结果」在单条时根本不成问题。
 function renderExec(out) {
   $('results').replaceChildren();
   const list = out.results || [];
+  const multi = list.length > 1;
   for (let i = 0; i < list.length; i++) {
     const r = list[i];
+    const box = document.createElement('div');
+    box.className = 'result-block';
+    if (multi) box.appendChild(resultHead(r, i));
+
     if (r.err) {
-      // 失败提示必须**追加**在已画出的结果之后，不能走 showNotice（它会
-      // replaceChildren，把前面成功的语句抹掉）——docs/05 验收 4 要求
-      // 「先画已完成的结果再提示」。序号是 1 起的：用户数的是「第几条」。
-      //
-      // 不 return：勾了「遇错继续」时后面的语句真的跑过、结果就在 list 里，
-      // 提前收工会让它们凭空消失（用户以为没跑）。只有失败的那条是最后一条时，
-      // 才说明「后面的语句没有执行」——那时本来就一条都没有。
+      // 失败块也走同一个容器：序号由标题给出，正文只说失败本身。
+      // 「后面的语句没有执行」只在失败恰好是最后一条时才成立——勾了
+      // 「遇错继续」时后面的语句真的跑过，那句话就是假的。
       const d = document.createElement('div');
       d.className = 'notice error';
-      d.textContent = '第 ' + ((r.index || 0) + 1) + ' 条失败：' + r.err +
-        (i === list.length - 1 ? '（后面的语句没有执行）' : '');
-      $('results').appendChild(d);
-      continue;
-    }
-    if (r.columns && r.columns.length) {
-      // 每条语句一个块：renderTable 的 append 参数是「往同一张表追加行」（分页用），
-      // 传 false 会 replaceChildren 清空整个结果区——多语句脚本里前面几条的结果
-      // 就被最后一条悄悄顶掉了。块之间用独立容器隔开，谁也不动谁。
-      const box = document.createElement('div');
-      box.className = 'result-block';
-      $('results').appendChild(box);
-      // 原始 SQL 的结果集不给编辑：列可能来自别的表，拼出来的 UPDATE 会打错表。
-      renderTable(box, r.columns, r.rows || [], false, false);
+      d.textContent = '失败：' + r.err + (i === list.length - 1 ? '（后面的语句没有执行）' : '');
+      box.appendChild(d);
+    } else if (r.columns && r.columns.length) {
+      // 表格必须画在**独立的一层**里：renderTable 内部会对自己收到的容器做
+      // replaceChildren，直接把 box 传进去会把刚加的标题一起清掉（症状是标题
+      // 永远不出现，而且不报错）。
+      const view = document.createElement('div');
+      renderTable(view, r.columns, r.rows || [], false, false);
+      box.appendChild(view);
     } else {
       const d = document.createElement('div');
       d.className = 'notice';
       d.textContent = '影响 ' + r.affected + ' 行';
-      $('results').appendChild(d);
+      box.appendChild(d);
     }
+    $('results').appendChild(box);
   }
+}
+
+// resultHead 画「第 N 条 · 语句前 60 字符」，点一下跳回编辑器里的那条语句。
+function resultHead(r, i) {
+  const h = document.createElement('button');
+  h.type = 'button';
+  h.className = 'block-head';
+  h.textContent = '第 ' + (i + 1) + ' 条 · ' + headOfSQL(r.sql);
+  h.onclick = () => jumpToStatement(r.sql);
+  return h;
+}
+
+// headOfSQL 把语句压成一行并截到 60 字符：换行会让标题变成三四行，把结果区顶下去。
+function headOfSQL(sql) {
+  const s = String(sql || '').replace(/\s+/g, ' ').trim();
+  return s.length > 60 ? s.slice(0, 60) + '…' : s;
+}
+
+// jumpToStatement 把光标移到编辑器里对应的那条语句并选中。
+//
+// 用 indexOf 而不是自己算偏移：语句文本就是服务端切分出来的原文（逐字一致），
+// 前端再实现一套切分只会和方言规则（dollar-quote、DELIMITER、体内分号）分叉。
+// 找不到就什么都不做——宁可跳不过去，也不要把光标扔到别处。
+function jumpToStatement(sql) {
+  const el = $('sql');
+  const needle = String(sql || '').trim();
+  if (!el || !needle) return;
+  const at = el.value.indexOf(needle);
+  if (at < 0) return;
+  el.focus();
+  el.setSelectionRange(at, at + needle.length);
 }
 
 // ---------- 执行 ----------

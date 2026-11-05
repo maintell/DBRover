@@ -119,11 +119,16 @@
 - 每条语句一个结果集区块，标题显示语句前 60 字符 + 序号。
   **现状**：多语句时每条结果各占一个块（`div.result-block`），互不覆盖；失败块用红字标出
   「第 N 条失败」（序号 1 起），只有失败恰好是最后一条时才补「后面的语句没有执行」。
+  **标题**：多条语句时每块顶部是「第 N 条 · 语句前 60 字符」（换行压成一行，超长截断），
+  点击标题把光标选中编辑器里对应的那条语句——**单条语句不画标题**，那只是噪音。
+  跳转用 `indexOf` 定位服务端切出来的原始语句文本，不在前端重做方言切分。
   这条以前不成立：`renderTable` 的 `append` 参数语义是「往同一张表追加行」，多语句场景传
   `false` 会把整个结果区 `replaceChildren` 掉，于是**只剩最后一条语句的结果**——内置浏览器
   实测（勾选「遇错继续」跑三条语句，只看到第三条）才发现。
-  **仍未做**：区块标题（语句前 60 字符 + 序号）与「点击标题跳回编辑器」；目前靠失败行的
-  「第 N 条」与结果顺序区分。
+  第二次踩的是同一个坑的内侧：标题加进块之后，把块直接传给 `renderTable` 又会被它
+  `replaceChildren` 清掉（症状是标题永远不出现且不报错），所以表格必须画在**独立的一层**
+  容器里。两条都由内置浏览器实测确认：三条语句 → 三块带标题；点「第 1 条」标题再按执行，
+  结果只有 `SELECT 1 AS a`。
 - 点击结果区块标题可跳回编辑器对应语句。
 - 失败语句显示：错误码、引擎原生错误（脱敏）、出错位置（行列）、可执行建议。
 
@@ -293,6 +298,7 @@
 | 12 | 跨库引用（PG）在执行前被拦截并说明原因 | 单测 | ✅ 方言层 `Dialect.CrossDatabase` 认 `库.模式.表` 三段名（字符串与注释里的点不算、数字里的点不算、两段名正常放行、四段名整体报出来），执行门在**碰连接之前**拦下，返回 `400 CROSS_DATABASE_UNSUPPORTED` + 「另开连接 / postgres_fdw / dblink」的改法，审计记一条 denied。只对 PostgreSQL 生效：MySQL 的 `库.表`、MSSQL 的 `库.模式.表`、Oracle 的 `库.模式.表`（dblink）都是正常写法，不拦。用例：`TestCrossDatabase`（17 条表驱动，含变异验证）、`TestCrossDatabaseReferenceIsBlocked`、`TestCrossDatabaseOnlyOnPostgres`、`TestClassifyBlock`（400 不被误映射成 403/428） |
 | 13 | `stop_on_error=false` 时失败语句之后仍继续执行，每条结果独立 | 集成 | ✅ 工具栏「遇错继续」勾选框 → `stop_on_error=false`；服务端默认遇错即停，失败仍返回错误码但错误体带已完成的结果。用例：`TestContinueOnErrorKeepsGoing`（只跑 2 条 vs 3 条都跑） |
 | 14 | 超过 2^53 的整数读出来是精确的十进制字符串 | 真机（drivertest） | ✅ 三个驱动的读路径统一走 `driver.StringifyLargeInts`，2^53 以内保持数字（否则排序与聚合全变文本）。用例：drivertest 的 `LargeIntsAsStrings` 子用例（真库往返 + 「小整数不许被字符串化」的反向断言，SQLite 每次 CI 都跑，MySQL/PG 由环境变量开启）、`TestStringifyLargeInts`、`TestStringifyLargeIntsWalksWholeRow` |
+| 15 | 多语句结果按语句分块，标题可点回编辑器对应语句 | 手动 + 内置浏览器 | ✅ 每块「第 N 条 · 语句前 60 字符」，点击把光标选中该语句（单条语句不画标题）。实测：三条语句三块带标题；点「第 1 条」再按「执行」，结果只有第一条。`TestRenderExecPerStatementBlock` 钉住「每条语句独立容器 + 不传 `append`」 |
 
 ---
 

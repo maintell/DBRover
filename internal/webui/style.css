@@ -207,6 +207,22 @@ tr:hover td { background: #1e222c; }
 .notice.error { border-color: #7c2f2b; color: #ffb3ae; }
 .notice.warn { border-color: #7a6320; color: #ffd98a; }
 
+/* 每条语句一个结果块（docs/05 §3.2）。标题是按钮：点它跳回编辑器对应语句。 */
+.result-block { margin-bottom: 14px; }
+.result-block:last-child { margin-bottom: 0; }
+.block-head {
+  display: block;
+  width: 100%;
+  text-align: left;
+  background: none;
+  border: 0;
+  color: var(--muted);
+  font-size: 12px;
+  padding: 4px 0 2px;
+  cursor: pointer;
+}
+.block-head:hover { color: var(--fg); }
+
 .overlay {
   position: fixed;
   inset: 0;
