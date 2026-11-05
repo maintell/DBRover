@@ -102,15 +102,36 @@ type Check struct {
 
 // TableDetail 是表/视图的完整描述。
 type TableDetail struct {
-	Ref         ObjectRef      `json:"ref"`
-	Columns     []Column       `json:"columns"`
-	Indexes     []Index        `json:"indexes"`
-	ForeignKeys []ForeignKey   `json:"foreign_keys"`
-	Checks      []Check        `json:"checks"`
-	Comment     string         `json:"comment,omitempty"`
-	RowEstimate int64          `json:"row_estimate"`
-	SizeBytes   int64          `json:"size_bytes"`
-	Extra       map[string]any `json:"extra,omitempty"`
+	Ref         ObjectRef    `json:"ref"`
+	Columns     []Column     `json:"columns"`
+	Indexes     []Index      `json:"indexes"`
+	ForeignKeys []ForeignKey `json:"foreign_keys"`
+	Checks      []Check      `json:"checks"`
+	// Partitions 是分区信息（FR-META-03）。空表示没有分区，或这个引擎没有分区概念。
+	//
+	// 单列一条而不是塞进 Extra：分区是运维要看的东西，界面要能稳定地画出来；
+	// 塞进 map[string]any 之后类型与字段名全靠约定，迟早对不上。
+	Partitions  []Partition `json:"partitions,omitempty"`
+	Comment     string      `json:"comment,omitempty"`
+	RowEstimate int64       `json:"row_estimate"`
+	SizeBytes   int64       `json:"size_bytes"`
+}
+
+// Partition 是一个分区（或分区表的一个子表）。
+//
+// PG 与 MySQL 的表述方式不同，这里取并集、各自能填多少填多少：
+//   - PG：父表用 PARTITION BY 声明方法，子表各自带 FOR VALUES 边界；
+//   - MySQL：同一张表内的每个分区带 METHOD 与 VALUES LESS THAN 边界。
+type Partition struct {
+	// Name 是子表名（PG）或分区名（MySQL）。
+	Name string `json:"name"`
+	// Method 是分区方法（RANGE / LIST / HASH）；PG 只在父表那一行给。
+	Method string `json:"method,omitempty"`
+	// Expression 是分区键表达式（PG 的 (n)、MySQL 的 n）。
+	Expression string `json:"expression,omitempty"`
+	// Bound 是这一行的边界原文（PG 的 FOR VALUES FROM (0) TO (10)、
+	// MySQL 的 VALUES LESS THAN (10)）。
+	Bound string `json:"bound,omitempty"`
 }
 
 // PrimaryKeyColumns 返回主键列名，按 Ordinal 排序。

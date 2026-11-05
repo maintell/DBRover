@@ -148,6 +148,12 @@ func factory(t *testing.T, tgt testTarget) drivertest.Config {
 			return err
 		},
 		SlowQuery: "SELECT SLEEP(3)",
+		Partitions: func(ctx context.Context, s driver.Session) (string, []string, error) {
+			_, err := s.Execute(ctx,
+				"CREATE TABLE dbv_part (id int, n int) PARTITION BY RANGE (n) "+
+					"(PARTITION p0 VALUES LESS THAN (10), PARTITION p1 VALUES LESS THAN (20))", nil)
+			return "dbv_part", []string{"p0", "p1"}, err
+		},
 		Comment: func(ctx context.Context, s driver.Session, table, text string) error {
 			_, err := s.Execute(ctx, "ALTER TABLE "+table+" COMMENT = '"+text+"'", nil)
 			return err

@@ -301,6 +301,9 @@ func (c *Connector) DescribeTable(ctx context.Context, ref model.ObjectRef) (*mo
 	if err := c.loadForeignKeys(ctx, h, schema, ref.Name, td); err != nil {
 		return nil, err
 	}
+	_ = c.loadChecks(ctx, h, schema, ref.Name, td)
+	// 分区信息取不到不该让整个结构页打不开：它只是详情的一部分。
+	_ = c.loadPartitions(ctx, h, schema, ref.Name, td)
 
 	// 表注释与体量一起取：同一个 pg_class 行，多带一列而已。
 	_ = h.QueryRowContext(ctx,
@@ -311,6 +314,80 @@ func (c *Connector) DescribeTable(ctx context.Context, ref model.ObjectRef) (*mo
 		Scan(&td.RowEstimate, &td.SizeBytes, &td.Comment)
 
 	return td, nil
+}
+
+// loadChecks 读检查约束（FR-META-03 的「约束」）。
+//
+// 之前这里从来没填过 Checks——结构页的「检查约束」永远 0 条，而「加约束」是能用的：
+// 能加不能看。
+func (c *Connector) loadChecks(ctx context.Context, h *sql.DB, schema, table string, td *model.TableDetail) error {
+	rows, err := h.QueryContext(ctx, `
+		SELECT con.conname, pg_get_constraintdef(con.oid)
+		  FROM pg_constraint con
+		  JOIN pg_class c ON c.oid = con.conrelid
+		  JOIN pg_namespace n ON n.oid = c.relnamespace
+		 WHERE n.nspname = $1 AND c.relname = $2 AND con.contype = 'c'
+		 ORDER BY con.conname`, schema, table)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = rows.Close() }()
+	for rows.Next() {
+		var ck model.Check
+		if err := rows.Scan(&ck.Name, &ck.Expr); err != nil {
+			return err
+		}
+		// pg_get_constraintdef 给的是 CHECK ((n >= 0))：去掉前缀，剩下的就是表达式原文。
+		ck.Expr = strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(ck.Expr), "CHECK "))
+		td.Checks = append(td.Checks, ck)
+	}
+	return rows.Err()
+}
+
+// loadPartitions 取分区信息（FR-META-03）。
+//
+// PG 有两种形态，这里一起覆盖：分区父表给 PARTITION BY 的方法与键表达式，
+// 子表各自给 FOR VALUES 边界。用 pg_get_partkeydef 而不是先判 relkind：
+// 分区**子表**的 relkind 是 'r'（普通表），只看 relkind 会把它当成没分区。
+func (c *Connector) loadPartitions(ctx context.Context, h *sql.DB, schema, name string, td *model.TableDetail) error {
+	var keyDef sql.NullString
+	err := h.QueryRowContext(ctx,
+		`SELECT pg_get_partkeydef(c.oid)
+		   FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+		  WHERE n.nspname = $1 AND c.relname = $2`, schema, name).Scan(&keyDef)
+	if err != nil && err != sql.ErrNoRows {
+		return err
+	}
+	if keyDef.Valid && strings.TrimSpace(keyDef.String) != "" {
+		// 形如 "RANGE (n)"：第一个空格前是方法，后面是键表达式。
+		method, expr := keyDef.String, ""
+		if i := strings.Index(keyDef.String, " "); i > 0 {
+			method, expr = keyDef.String[:i], strings.TrimSpace(keyDef.String[i+1:])
+		}
+		td.Partitions = append(td.Partitions, model.Partition{
+			Name: name, Method: method, Expression: expr,
+		})
+	}
+	rows, err := h.QueryContext(ctx, `
+		SELECT ch.relname, COALESCE(pg_get_expr(ch.relpartbound, ch.oid), '')
+		  FROM pg_inherits i
+		  JOIN pg_class ch ON ch.oid = i.inhrelid
+		  JOIN pg_class pa ON pa.oid = i.inhparent
+		  JOIN pg_namespace n ON n.oid = pa.relnamespace
+		 WHERE n.nspname = $1 AND pa.relname = $2
+		 ORDER BY ch.relname`, schema, name)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = rows.Close() }()
+	for rows.Next() {
+		var p model.Partition
+		if err := rows.Scan(&p.Name, &p.Bound); err != nil {
+			return err
+		}
+		td.Partitions = append(td.Partitions, p)
+	}
+	return rows.Err()
 }
 
 func (c *Connector) loadColumns(ctx context.Context, h *sql.DB, schema, table string, td *model.TableDetail) error {

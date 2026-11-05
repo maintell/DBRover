@@ -176,6 +176,22 @@ func factory(t *testing.T, tgt testTarget) drivertest.Config {
 			return err
 		},
 		SlowQuery: "SELECT pg_sleep(3)",
+		Check: func(ctx context.Context, s driver.Session, table, name, expr string) error {
+			_, err := s.Execute(ctx, "ALTER TABLE "+table+" ADD CONSTRAINT "+name+" CHECK ("+expr+")", nil)
+			return err
+		},
+		Partitions: func(ctx context.Context, s driver.Session) (string, []string, error) {
+			for _, q := range []string{
+				"CREATE TABLE dbv_part (id int, n int) PARTITION BY RANGE (n)",
+				"CREATE TABLE dbv_part_p0 PARTITION OF dbv_part FOR VALUES FROM (0) TO (10)",
+				"CREATE TABLE dbv_part_p1 PARTITION OF dbv_part FOR VALUES FROM (10) TO (20)",
+			} {
+				if _, err := s.Execute(ctx, q, nil); err != nil {
+					return "", nil, err
+				}
+			}
+			return "dbv_part", []string{"dbv_part", "dbv_part_p0", "dbv_part_p1"}, nil
+		},
 		Comment: func(ctx context.Context, s driver.Session, table, text string) error {
 			_, err := s.Execute(ctx, "COMMENT ON TABLE "+table+" IS '"+text+"'", nil)
 			return err

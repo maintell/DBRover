@@ -1153,6 +1153,14 @@ func (s *Server) handleTableSchema(w http.ResponseWriter, r *http.Request) {
 		"columns":      detail.Columns,
 		"indexes":      detail.Indexes,
 		"foreign_keys": detail.ForeignKeys,
+		// 这个响应是自建 DTO：TableDetail 新增字段不会自动带过来，漏一次就是
+		// 「后端有、界面没有」，而且不会报任何错。下面几项都属于 docs/01
+		// FR-META-03 的「对象详情」——checks 之前就一直漏着，结构页从来没列过
+		// 已有的检查约束。
+		"checks":       detail.Checks,
+		"partitions":   detail.Partitions,
+		"comment":      detail.Comment,
+		"size_bytes":   detail.SizeBytes,
 		"row_estimate": detail.RowEstimate,
 		"primary_key":  detail.PrimaryKeyColumns(),
 		"ddl":          ddlText,

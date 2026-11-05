@@ -1812,6 +1812,39 @@ function renderSchema(out) {
   table.appendChild(tbody);
   wrap.appendChild(table);
 
+  // 分区（只读）：只有真有分区才画。它回答「数据怎么分的、边界在哪」——
+  // 分区表的索引与约束分布跟普通表不同，看结构时这两件事得一起看。
+  const parts = out.partitions || [];
+  if (parts.length) {
+    const ph = document.createElement('div');
+    ph.className = 'head';
+    ph.textContent = '分区（' + parts.length + '）';
+    wrap.appendChild(ph);
+
+    const pt = document.createElement('table');
+    const pHead = document.createElement('thead');
+    const phtr = document.createElement('tr');
+    for (const label of ['名称', '方法', '表达式', '边界']) {
+      const th = document.createElement('th');
+      th.textContent = label;
+      phtr.appendChild(th);
+    }
+    pHead.appendChild(phtr);
+    pt.appendChild(pHead);
+
+    const ptb = document.createElement('tbody');
+    for (const p of parts) {
+      const tr = document.createElement('tr');
+      tr.appendChild(cell(p.name || ''));
+      tr.appendChild(cell(p.method || ''));
+      tr.appendChild(cell(p.expression || ''));
+      tr.appendChild(cell(p.bound || ''));
+      ptb.appendChild(tr);
+    }
+    pt.appendChild(ptb);
+    wrap.appendChild(pt);
+  }
+
   // 索引区
   const ixHead = document.createElement('div');
   ixHead.className = 'head';
@@ -1827,14 +1860,43 @@ function renderSchema(out) {
     '<button id="ix-add" class="primary">建索引</button>';
   wrap.appendChild(ixForm);
 
-  // 检查约束：只在真会强制它的引擎上出现（PG）。MySQL 5.7 会解析 CHECK 但静默
-  // 忽略、SQLite 只能在建表时写——摆一个按了不生效的按钮比不摆更糟。
-  if (state.current && state.current.capabilities && state.current.capabilities.add_check) {
-    const ckHead = document.createElement('div');
-    ckHead.className = 'head';
-    ckHead.textContent = '检查约束';
-    wrap.appendChild(ckHead);
+  // 检查约束：**列表总是显示**——它是对象详情的一部分（FR-META-03 里的「约束」）。
+  // 之前这里只有「加约束」的表单，已有的约束一条都没列过：能加不能看。
+  const checks = out.checks || [];
+  const ckHead = document.createElement('div');
+  ckHead.className = 'head';
+  ckHead.textContent = '检查约束（' + checks.length + '）';
+  wrap.appendChild(ckHead);
+  if (checks.length) {
+    const ckt = document.createElement('table');
+    const ckThead = document.createElement('thead');
+    const ckHtr = document.createElement('tr');
+    for (const label of ['名称', '表达式']) {
+      const th = document.createElement('th');
+      th.textContent = label;
+      ckHtr.appendChild(th);
+    }
+    ckThead.appendChild(ckHtr);
+    ckt.appendChild(ckThead);
+    const cktb = document.createElement('tbody');
+    for (const ck of checks) {
+      const tr = document.createElement('tr');
+      tr.appendChild(cell(ck.name || ''));
+      tr.appendChild(cell(ck.expr || ''));
+      cktb.appendChild(tr);
+    }
+    ckt.appendChild(cktb);
+    wrap.appendChild(ckt);
+  } else {
+    const ckEmpty = document.createElement('div');
+    ckEmpty.className = 'notice';
+    ckEmpty.textContent = '这个表还没有检查约束。';
+    wrap.appendChild(ckEmpty);
+  }
 
+  // 「加约束」的表单只在真会强制它的引擎上摆（PG）。MySQL 5.7 会解析 CHECK
+  // 但静默忽略、SQLite 只能在建表时写——摆一个按了不生效的按钮比不摆更糟。
+  if (state.current && state.current.capabilities && state.current.capabilities.add_check) {
     const ckForm = document.createElement('div');
     ckForm.className = 'toolbar';
     ckForm.innerHTML =

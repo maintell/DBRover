@@ -64,6 +64,14 @@ type Config struct {
 	// SlowQuery 是一条会跑上几秒的查询（"SELECT pg_sleep(3)" / "SELECT SLEEP(3)"），
 	// 供 SessionsReported 造一条「正在跑」的会话。空表示这个引擎没有会话概念。
 	SlowQuery string
+
+	// Partitions 建一张带分区的表，返回表名与必须出现在分区清单里的名字。
+	// nil 表示这个引擎没有分区（SQLite），此时 PartitionsReported 跳过。
+	Partitions func(ctx context.Context, s driver.Session) (table string, expect []string, err error)
+
+	// Check 给已有表加一条命名检查约束。nil 表示这个引擎加不了（SQLite 只能建表时写、
+	// MySQL 5.7 不强制），此时 ChecksReported 跳过。
+	Check func(ctx context.Context, s driver.Session, table, name, expr string) error
 }
 
 func (c Config) binaryType() string {
@@ -102,6 +110,10 @@ func Run(t *testing.T, cfg Config) {
 	t.Run("RoutineListing", func(t *testing.T) { testRoutineListing(t, cfg) })
 	// 会话列表与终止：声明了 SessionMgmt 就必须真列出、真能终止。
 	t.Run("SessionsReported", func(t *testing.T) { testSessionsReported(t, cfg) })
+	// 分区信息：真建一张分区表再读详情，顺便确认普通表不会被报出分区。
+	t.Run("PartitionsReported", func(t *testing.T) { testPartitionsReported(t, cfg) })
+	// 检查约束：加一条再读回来（能加不能看，等于没有）。
+	t.Run("ChecksReported", func(t *testing.T) { testChecksReported(t, cfg) })
 	// 检索契约写的是「名称 + 注释」，注释这一半必须有真库验证。
 	t.Run("SearchMatchesComments", func(t *testing.T) { testSearchComments(t, cfg) })
 	// 索引有效性：声明了就必须真给（PG 的 indisvalid）。

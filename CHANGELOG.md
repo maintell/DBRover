@@ -168,6 +168,8 @@
 
 - **会话列表与终止**（FR-MON-02，P0）：之前整个监控区是空的——没有 `MonitorProvider` 接口、没有端点、四个能力位全 false。现在：`driver.MonitorProvider`（可选接口，`SessionMgmt` 是唯一判据），PG 走 `pg_stat_activity`、MySQL 走 `information_schema.processlist`，都排除自己这条；终止分别用 `pg_terminate_backend` 与 `KILL`。**三个安全取舍**：① 终止是写操作，**只读连接 403**；② `KILL` 不能参数化，会话 id 必须是纯数字，非数字直接 400（形态校验是拼语句前唯一的防线）；③ 界面终止前必须弹确认，写清「对方正在跑的语句会被立刻掐断、不可撤销」。真机：套件新增 `SessionsReported`（在另一条物理连接上跑慢查询 → 从列表里找到它 → 终止 → 断言那条查询真的报错 → 非数字 id 被拒），PG 17 与 MySQL 5.7 都过；内置浏览器在 PG 上走了一遍「点会话 → 看到 active/时长/语句 → 终止 → 确认 → 列表归 0」。界面按钮按 `session_mgmt` 显示，SQLite 上没有这个概念就不出现。
 
+- **对象详情补上分区**（FR-META-03 的最后一项）：`TableDetail.Partitions`（名称/方法/表达式/边界）。PG 用 `pg_get_partkeydef` 取方法与键表达式、用 `pg_inherits` + `pg_get_expr(relpartbound)` 取子表边界；MySQL 走 `information_schema.PARTITIONS`——**必须按 `PARTITION_NAME IS NOT NULL` 过滤**，它对未分区的表也会返回一行，不过滤会把每张普通表报成「有一个分区」。结构页只在真有分区时画出那张表。真机：PG 17 与 MySQL 5.7 上建分区表 → 列出父表与子分区 → 至少一行带边界 → 普通表无分区（`drivertest` 的 `PartitionsReported` 两个方向都查）；取分区失败不影响结构页其余部分。
+
 ### 安全
 
 - **大整数不再静默丢精度**：`BIGINT` 超过 2^53 时，界面保持字符串、服务端按列类型还原；客户端若把它写成 JSON 数字，直接 `400 NUMBER_PRECISION_LOSS` 并提示改用字符串，而不是把丢了低位的值写进库。此前界面 `coerce()` 用 `Number()` 转换整数列，编辑 `9223372036854775807` 会变成 `...5808`。

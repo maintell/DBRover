@@ -418,6 +418,97 @@ func testRoutineListing(t *testing.T, cfg Config) {
 	routineRef(t, c, name, true)
 }
 
+// testChecksReported 验证检查约束能读回来（FR-META-03 的「约束」）。
+//
+// 这条补的是一个真实缺口：PG 的 DescribeTable 以前根本不填 Checks——「加约束」能用，
+// 但已有的约束一条都列不出来。只测「加约束成功」发现不了它。
+func testChecksReported(t *testing.T, cfg Config) {
+	if cfg.Check == nil {
+		t.Skip("这个引擎加不了命名检查约束")
+	}
+	ctx := context.Background()
+	c := open(t, cfg, false)
+	s := session(t, c)
+	defer func() { _ = s.Close() }()
+
+	mustExec(t, s, "CREATE TABLE dbv_ck (id INT NOT NULL PRIMARY KEY, n INT)")
+	if err := cfg.Check(ctx, s, "dbv_ck", "ck_n", "n >= 0"); err != nil {
+		t.Fatalf("加约束: %v", err)
+	}
+	td, err := c.Meta().DescribeTable(ctx, model.ObjectRef{Kind: model.KindTable, Name: "dbv_ck"})
+	if err != nil {
+		t.Fatalf("DescribeTable: %v", err)
+	}
+	found := false
+	for _, ck := range td.Checks {
+		if ck.Name == "ck_n" {
+			found = true
+			if !strings.Contains(ck.Expr, "n >= 0") {
+				t.Errorf("约束表达式不对：%q", ck.Expr)
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("刚加的约束没被读回来：%+v", td.Checks)
+	}
+}
+
+// testPartitionsReported 验证分区信息（FR-META-03）。
+//
+// 两个方向都查：分区表必须列出分区（含边界），**普通表不能有分区**——
+// MySQL 的 information_schema.PARTITIONS 对未分区的表也会返回一行（分区名为 NULL），
+// 少了那个过滤，每张普通表都会被报成「有一个分区」。
+func testPartitionsReported(t *testing.T, cfg Config) {
+	if cfg.Partitions == nil {
+		t.Skip("这个引擎没有分区概念（或没有提供建分区表的钩子）")
+	}
+	ctx := context.Background()
+	c := open(t, cfg, false)
+	s := session(t, c)
+	defer func() { _ = s.Close() }()
+
+	table, expect, err := cfg.Partitions(ctx, s)
+	if err != nil {
+		t.Fatalf("建分区表: %v", err)
+	}
+	td, err := c.Meta().DescribeTable(ctx, model.ObjectRef{Kind: model.KindTable, Name: table})
+	if err != nil {
+		t.Fatalf("DescribeTable(%s): %v", table, err)
+	}
+	if len(td.Partitions) == 0 {
+		t.Fatalf("分区表 %s 没有分区信息", table)
+	}
+	have := map[string]bool{}
+	for _, p := range td.Partitions {
+		have[p.Name] = true
+	}
+	for _, want := range expect {
+		if !have[want] {
+			t.Errorf("分区清单里缺少 %s：%+v", want, td.Partitions)
+		}
+	}
+	// 至少有一行带边界原文，否则「分区」只是个名字，运维看不出范围。
+	withBound := false
+	for _, p := range td.Partitions {
+		if strings.TrimSpace(p.Bound) != "" {
+			withBound = true
+		}
+	}
+	if !withBound {
+		t.Errorf("没有一个分区带边界：%+v", td.Partitions)
+	}
+
+	// 反向：普通表不能有分区。
+	mustExec(t, s, "CREATE TABLE dbv_plain (id INT)")
+	plain, err := c.Meta().DescribeTable(ctx, model.ObjectRef{Kind: model.KindTable, Name: "dbv_plain"})
+	if err != nil {
+		t.Fatalf("DescribeTable(dbv_plain): %v", err)
+	}
+	if len(plain.Partitions) != 0 {
+		t.Errorf("普通表不该有分区：%+v", plain.Partitions)
+	}
+}
+
 // testSessionsReported 验证会话列表与终止（FR-MON-02）。
 //
 // 做法是造一条「正在跑」的会话（在另一条物理连接上跑一条慢查询），再从会话列表

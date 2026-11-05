@@ -351,6 +351,8 @@ func (c *Connector) DescribeTable(ctx context.Context, ref model.ObjectRef) (*mo
 	if err := c.loadForeignKeys(ctx, h, db, ref.Name, td); err != nil {
 		return nil, err
 	}
+	// 分区取不到不该让整个结构页打不开：它只是详情的一部分。
+	_ = c.loadPartitions(ctx, h, db, ref.Name, td)
 	// 表注释也在这张表里。漏了它整条链路都看不见：表详情不显示、迁移搬不过去、
 	// 比对拿不到一侧的值——而列注释一直是有的，看起来就像「MySQL 没有表注释」。
 	_ = h.QueryRowContext(ctx,
@@ -360,6 +362,31 @@ func (c *Connector) DescribeTable(ctx context.Context, ref model.ObjectRef) (*mo
 		db, ref.Name).Scan(&td.RowEstimate, &td.SizeBytes, &td.Comment)
 
 	return td, nil
+}
+
+// loadPartitions 取分区信息（FR-META-03）。
+//
+// information_schema.PARTITIONS 对未分区的表也会返回一行（PARTITION_NAME 为 NULL），
+// 所以必须按 PARTITION_NAME IS NOT NULL 过滤，否则每张普通表都会被报成「有一个分区」。
+func (c *Connector) loadPartitions(ctx context.Context, h *sql.DB, db, table string, td *model.TableDetail) error {
+	rows, err := h.QueryContext(ctx, `
+		SELECT PARTITION_NAME, COALESCE(PARTITION_METHOD, ''),
+		       COALESCE(PARTITION_EXPRESSION, ''), COALESCE(PARTITION_DESCRIPTION, '')
+		  FROM information_schema.PARTITIONS
+		 WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ? AND PARTITION_NAME IS NOT NULL
+		 ORDER BY PARTITION_ORDINAL_POSITION`, db, table)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = rows.Close() }()
+	for rows.Next() {
+		var p model.Partition
+		if err := rows.Scan(&p.Name, &p.Method, &p.Expression, &p.Bound); err != nil {
+			return err
+		}
+		td.Partitions = append(td.Partitions, p)
+	}
+	return rows.Err()
 }
 
 func (c *Connector) loadColumns(ctx context.Context, h *sql.DB, db, table string, td *model.TableDetail) error {
