@@ -88,7 +88,7 @@ func usage() {
   dbrover health -db <file> [-env ...] [-ro|-rw]
   dbrover tables -db <file> [-env ...] [-ro|-rw]
   dbrover exec   -db <file> (-sql "..." | -file <path>) [-env ...] [-ro|-rw] [-approve]
-  dbrover serve  [-addr 127.0.0.1:7788] [-token <token>] [-allow-remote] [-open] [-audit <path>] [-audit-anchor <path>]
+  dbrover serve  [-addr 127.0.0.1:7788] [-token <token>] [-allow-remote] [-open] [-audit <path>] [-audit-anchor <path>] [-metrics <path>]
   dbrover tunnel -via user@hop1:22[,user@hop2:22] -to host:port (-password-stdin | -key <path>)
   dbrover secret (set|clear|status) [-service dbrover/agent] [-account api-key]  # 口令从 stdin 读
   dbrover backup (create|inspect) [-db <file> ...] [-out <文件.dbr>] [-resume] [-compress] [-passphrase-stdin]
@@ -402,6 +402,7 @@ func cmdServe(args []string) error {
 	openUI := fs.Bool("open", false, "启动后自动用默认浏览器打开界面（桌面用法的轻量形态）")
 	auditPath := fs.String("audit", "", "审计日志文件（JSONL 追加写；留空则只保留内存）")
 	anchorPath := fs.String("audit-anchor", "", "审计锚点文件（把链头封存到独立文件，防整段重写；密钥存系统凭据库）")
+	metricsPath := fs.String("metrics", "", "指标留存文件（SQLite；留空则不留存趋势。面板打开时才采样，保留 7 天）")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -428,6 +429,17 @@ func cmdServe(args []string) error {
 
 	s := api.New(*token, openConnector, audit)
 	defer s.Close()
+	// 指标留存是可选能力（ADR-0016）：不指定文件就不留存，历史端点会如实说
+	// available=false，而不是假装有数据。
+	if *metricsPath != "" {
+		st, err := service.OpenMetricStore(*metricsPath)
+		if err != nil {
+			return fmt.Errorf("打开指标留存: %w", err)
+		}
+		defer func() { _ = st.Close() }()
+		s.UseMetricStore(st)
+		fmt.Fprintf(os.Stderr, "指标留存: %s（面板打开时采样，保留 7 天）\n", *metricsPath)
+	}
 	s.SetAgentConfig(agentConfigFromEnv())
 
 	fmt.Fprintf(os.Stderr, "dbrover 监听 http://%s\n", *addr)

@@ -40,6 +40,8 @@ type Server struct {
 	token  string
 	opener Opener
 	audit  service.AuditSink
+	// metrics 是本地指标留存（ADR-0016）；nil 表示没开（-metrics 未指定）。
+	metrics *service.MetricStore
 
 	mu    sync.RWMutex
 	conns map[string]*entry
@@ -177,6 +179,7 @@ func (s *Server) routes() []route {
 		{http.MethodGet, "/api/v1/connections/{id}/monitor/slow-queries", false, s.handleSlowQueries},
 		{http.MethodGet, "/api/v1/connections/{id}/monitor/tables", false, s.handleTableSizes},
 		{http.MethodGet, "/api/v1/connections/{id}/monitor/locks", false, s.handleLockWaits},
+		{http.MethodGet, "/api/v1/connections/{id}/monitor/history", false, s.handleHistory},
 		{http.MethodGet, "/api/v1/connections/{id}/monitor/sessions", false, s.handleSessions},
 		{http.MethodPost, "/api/v1/connections/{id}/monitor/sessions/{sid}/kill", false, s.handleKillSession},
 		{http.MethodGet, "/api/v1/connections/{id}/tables/{name}/rows", false, s.handleTableRows},

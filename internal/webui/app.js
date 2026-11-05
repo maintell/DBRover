@@ -41,6 +41,7 @@ const API = {
   slowQueries: '/api/v1/connections/:id/monitor/slow-queries',
   tableSizes: '/api/v1/connections/:id/monitor/tables',
   locks: '/api/v1/connections/:id/monitor/locks',
+  history: '/api/v1/connections/:id/monitor/history',
   sessions: '/api/v1/connections/:id/monitor/sessions',
   killSession: '/api/v1/connections/:id/monitor/sessions/:sid/kill',
   rows: '/api/v1/connections/:id/tables/:name/rows',
@@ -3287,7 +3288,14 @@ async function showMetrics(auto) {
       locks = null;
     }
   }
-  renderMetrics(out, slow, sizes, locks);
+  // 趋势（FR-MON-05）：没开留存时服务端会说 available=false，照它说的显示。
+  let hist = null;
+  try {
+    hist = await api(path(API.history, { id: state.current.id }) + '?metric=qps&minutes=60');
+  } catch (e) {
+    hist = null;
+  }
+  renderMetrics(out, slow, sizes, locks, hist);
   if (auto) return;
   setStatus('指标已更新');
   stopMetricsRefresh();
@@ -3301,7 +3309,7 @@ async function showMetrics(auto) {
 }
 
 // renderMetrics 把两张卡画成表格：结论一律来自服务端规则，这里不做二次判断。
-function renderMetrics(out, slow, sizes, locks) {
+function renderMetrics(out, slow, sizes, locks, hist) {
   const wrap = document.createElement('div');
   wrap.id = 'metrics-panel';
   wrap.className = 'panel';
@@ -3354,6 +3362,7 @@ function renderMetrics(out, slow, sizes, locks) {
   if (slow) wrap.appendChild(slowSection(slow));
   if (sizes) wrap.appendChild(sizeSection(sizes));
   if (locks) wrap.appendChild(lockSection(locks));
+  if (hist) wrap.appendChild(historySection(hist));
   $('results').replaceChildren(wrap);
 }
 
@@ -3432,6 +3441,47 @@ function slowSection(slow) {
 //
 // 空列表是**健康状态**，要明确写出来：只画一张空表，看的人分不清是「没有阻塞」
 // 还是「这个功能没接上」。
+// historySection 画近一小时的 QPS 趋势摘要（FR-MON-05）。
+//
+// 只给「最低 / 平均 / 最高 + 点数」，不画图：这几个数回答的是「最近稳不稳」，
+// 画一条没有坐标轴的折线反而更难读。没开留存时如实说没开，不画一条平线糊弄。
+function historySection(hist) {
+  const box = document.createElement('div');
+  const head = document.createElement('div');
+  head.className = 'head';
+  head.textContent = '趋势（近 ' + ((hist && hist.minutes) || 60) + ' 分钟的 QPS）';
+  box.appendChild(head);
+
+  if (!hist || hist.available === false) {
+    const n = document.createElement('div');
+    n.className = 'notice';
+    n.textContent = (hist && hist.hint) || '没有开启指标留存。';
+    box.appendChild(n);
+    return box;
+  }
+  const pts = hist.points || [];
+  if (!pts.length) {
+    const n = document.createElement('div');
+    n.className = 'notice';
+    n.textContent = '这段时间还没有采样（面板打开时才采样，按分钟归并）。';
+    box.appendChild(n);
+    return box;
+  }
+  let min = pts[0].value;
+  let max = pts[0].value;
+  let sum = 0;
+  for (const p of pts) {
+    if (p.value < min) min = p.value;
+    if (p.value > max) max = p.value;
+    sum += p.value;
+  }
+  const row = document.createElement('div');
+  row.className = 'notice';
+  row.textContent = '最低 ' + min.toFixed(1) + ' / 平均 ' + (sum / pts.length).toFixed(1) +
+    ' / 最高 ' + max.toFixed(1) + ' 语句每秒（' + pts.length + ' 个采样点）';
+  box.appendChild(row);
+  return box;
+}
 function lockSection(locks) {
   const box = document.createElement('div');
   const head = document.createElement('div');

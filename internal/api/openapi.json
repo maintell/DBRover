@@ -216,6 +216,22 @@
         }
       }
     },
+    "/api/v1/connections/{id}/monitor/history": {
+      "get": {
+        "summary": "指标历史点（本地留存）",
+        "description": "FR-MON-05。ADR-0016：单文件 SQLite，按分钟归并，**只在面板打开时采样**，保留 7 天。未指定 `-metrics` 时返回 200 + available=false（不是错误，是没开）。metric 支持 qps / conn_active / cache_hit。",
+        "parameters": [
+          { "name": "id", "in": "path", "required": true, "schema": { "type": "string" } },
+          { "name": "metric", "in": "query", "schema": { "type": "string", "default": "qps" } },
+          { "name": "minutes", "in": "query", "schema": { "type": "integer", "default": 60, "maximum": 10080 } }
+        ],
+        "responses": {
+          "200": { "description": "ok（available=false 表示没开启留存）" },
+          "400": { "description": "minutes 非法" },
+          "404": { "description": "连接不存在" }
+        }
+      }
+    },
     "/api/v1/connections/{id}/monitor/locks": {
       "get": {
         "summary": "锁等待：谁在等谁",
