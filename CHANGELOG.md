@@ -6,6 +6,12 @@
 
 ### 新增
 
+- **真机 `-race` 全绿**（AGENTS.md 发版门禁里最后一块）：`CGO_ENABLED=1 go test -race ./...` 带
+  `DBRover_TEST_MYSQL` / `DBRover_TEST_PG` 指向真机实例（MySQL 5.7.38 + PG 17.11 一次性容器），
+  14 个包全绿、无数据竞争，`internal/service` 370s / `agent/eval` 109s / `api` 73s /
+  `driver/pg` 65s / `driver/mysql` 54s。`scripts/check.ps1` 的 race **不带**这两个环境变量
+  （真机集成用例会被跳过），要覆盖它们必须显式带上；已在验收 README 写明。容器用后清理，
+  他人容器未动。至此静态 / 单测 / race / 本机 6 条端到端 / 真机 14 包 + 11 脚本 全部绿。
 - **全量真机回归终于跑通（本会话一直缺的那块）**：debug-ubuntu 上起一次性 MySQL 5.7.38 / PG 17.11 容器，
   `go test ./... -count=1`（14 个包全绿，`internal/service` 227s / `agent/eval` 91s / `driver/pg` 62s /
   `api` 50s / `driver/mysql` 46s）+ 11 次真机验收脚本全绿（`precision` / `bulk-engines` / `fk-add` /

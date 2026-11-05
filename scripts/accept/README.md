@@ -74,6 +74,11 @@ PASS  security-smoke.ps1          1.8s
 - 跑完记得删测试容器：`docker rm -f dbrover-my dbrover-pg`
 - 这一轮的实际耗时（bdbdc1a，本机）：`bulk-20k-sqlite` 约 10s，其余每条 1–6s；12 次全跑不到 1 分钟。慢的是容器启动，不是脚本。
 - **73b8714 的竞态检查**：`CGO_ENABLED=1 go test -race ./...`（PG 17 + MySQL 5.7 真机）全绿，`internal/service` 358s。新增的并发状态（慢查询采样器 / QPS 采样器 / 告警状态 / 指标留存互斥）在真实并发路径下没有报告数据竞争。注意 `-race` **必须** `CGO_ENABLED=1`（测试专用；发布构建仍是 `CGO_ENABLED=0`）。
+- **最新一次真机竞态检查（9768962，2026-11-05）**：`CGO_ENABLED=1 go test -race ./...` 带两个真机环境变量
+  （MySQL 5.7.38 @13306 + PG 17.11 @15432，均为一次性容器）**14 个包全绿，无数据竞争**：
+  `internal/service` 370s / `agent/eval` 109s / `api` 73s / `driver/pg` 65s / `driver/mysql` 54s /
+  `agent` 50s / `driver/sqlite` 32s，其余均绿。`scripts/check.ps1` 里的 `-race` **不带**这两个环境变量，
+  真机集成用例会被跳过；要覆盖它们必须这样显式带上。容器用后 `docker rm -f` 清掉，他人容器未动。
 - **最新一次全量真机回归（34a2a73，2026-11-05）**：`go test ./...`（MySQL 5.7.38 @13306 + PostgreSQL 17.11 @15432，
   均为 debug-ubuntu 上的一次性容器）**14 个包全绿**：`internal/service` 227s、`internal/agent/eval` 91s、
   `driver/pg` 62s、`api` 50s、`driver/mysql` 46s、`agent` 26s、`driver/sqlite` 23s，其余均绿。
