@@ -16,6 +16,17 @@ docker run -d --name dbrover-my  -e MYSQL_ROOT_PASSWORD=testpass -e MYSQL_DATABA
 docker run -d --name dbrover-pg  -e POSTGRES_PASSWORD=testpass     -e POSTGRES_DB=acc     -p 15432:5432 postgres:17
 ```
 
+> **判断导出 / 驱动行为之前，先确认 `bin\dbrover.exe` 比改动新。**
+> `go build ./...` 与 `scripts/check.ps1` 都**不会**写这个二进制（前者只检查编译，
+> 后者用的是临时输出）。已经踩过一次：改完 SQLite 的 `table_xinfo` 之后用旧产物跑导出，
+> NDJSON 里没有生成列，一度被误判成代码缺陷——重新构建后立刻通过。
+> 一行确认：
+>
+> ```powershell
+> (Get-Item bin\dbrover.exe).LastWriteTime
+> git log -1 --format=%cd
+> ```
+
 ## 脚本
 
 | 脚本 | 验什么 | 需要真机 |
