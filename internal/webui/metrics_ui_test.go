@@ -40,6 +40,10 @@ func TestUIMetricsPanel(t *testing.T) {
 		"function sizeSection(sizes)",
 		"function formatBytes(v)",
 		"function formatUptime(s)",
+		// 锁等待（FR-MON-03）：空列表要写成「没有等待」，别让人分不清是不是没接上。
+		"locks: '/api/v1/connections/:id/monitor/locks'",
+		"function lockSection(locks)",
+		"当前没有锁等待。",
 		// 新实例上「0 天 0 小时」等于没说：按最大量级给两个单位。
 		"return m + ' 分钟'",
 	} {

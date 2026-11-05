@@ -40,6 +40,7 @@ const API = {
   metrics: '/api/v1/connections/:id/monitor/metrics',
   slowQueries: '/api/v1/connections/:id/monitor/slow-queries',
   tableSizes: '/api/v1/connections/:id/monitor/tables',
+  locks: '/api/v1/connections/:id/monitor/locks',
   sessions: '/api/v1/connections/:id/monitor/sessions',
   killSession: '/api/v1/connections/:id/monitor/sessions/:sid/kill',
   rows: '/api/v1/connections/:id/tables/:name/rows',
@@ -3277,7 +3278,16 @@ async function showMetrics(auto) {
       sizes = null;
     }
   }
-  renderMetrics(out, slow, sizes);
+  // 锁等待同理：空数组是健康状态，不是查不到。
+  let locks = null;
+  if (caps.lock_graph) {
+    try {
+      locks = await api(path(API.locks, { id: state.current.id }));
+    } catch (e) {
+      locks = null;
+    }
+  }
+  renderMetrics(out, slow, sizes, locks);
   if (auto) return;
   setStatus('指标已更新');
   stopMetricsRefresh();
@@ -3291,7 +3301,7 @@ async function showMetrics(auto) {
 }
 
 // renderMetrics 把两张卡画成表格：结论一律来自服务端规则，这里不做二次判断。
-function renderMetrics(out, slow, sizes) {
+function renderMetrics(out, slow, sizes, locks) {
   const wrap = document.createElement('div');
   wrap.id = 'metrics-panel';
   wrap.className = 'panel';
@@ -3343,6 +3353,7 @@ function renderMetrics(out, slow, sizes) {
   wrap.appendChild(table);
   if (slow) wrap.appendChild(slowSection(slow));
   if (sizes) wrap.appendChild(sizeSection(sizes));
+  if (locks) wrap.appendChild(lockSection(locks));
   $('results').replaceChildren(wrap);
 }
 
@@ -3420,6 +3431,48 @@ function slowSection(slow) {
 // sizeSection 画表体量 Top N（FR-MON-06）。
 //
 // 只给体量不给增长：增长要有本地时序留存，那是另一件事（docs/09 §9.2）。
+// lockSection 画锁等待（FR-MON-03）。
+//
+// 空列表是**健康状态**，要明确写出来：只画一张空表，看的人分不清是「没有阻塞」
+// 还是「这个功能没接上」。
+function lockSection(locks) {
+  const box = document.createElement('div');
+  const head = document.createElement('div');
+  head.className = 'head';
+  const items = (locks && locks.items) || [];
+  head.textContent = '锁等待（' + items.length + '）';
+  box.appendChild(head);
+  if (!items.length) {
+    const n = document.createElement('div');
+    n.className = 'notice';
+    n.textContent = '当前没有锁等待。';
+    box.appendChild(n);
+    return box;
+  }
+
+  const t = document.createElement('table');
+  const thead = document.createElement('thead');
+  const htr = document.createElement('tr');
+  for (const label of ['等待者', '被谁挡住', '已等(秒)', '等待中的语句']) {
+    const th = document.createElement('th');
+    th.textContent = label;
+    htr.appendChild(th);
+  }
+  thead.appendChild(htr);
+  t.appendChild(thead);
+  const tb = document.createElement('tbody');
+  for (const it of items) {
+    const tr = document.createElement('tr');
+    tr.appendChild(cell(it.waiting_id));
+    tr.appendChild(cell(it.blocking_id));
+    tr.appendChild(cell(it.wait_seconds >= 0 ? String(it.wait_seconds) : '—'));
+    tr.appendChild(cell(it.waiting_sql || ''));
+    tb.appendChild(tr);
+  }
+  t.appendChild(tb);
+  box.appendChild(t);
+  return box;
+}
 function sizeSection(sizes) {
   const box = document.createElement('div');
   const head = document.createElement('div');

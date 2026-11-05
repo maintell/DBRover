@@ -216,6 +216,20 @@
         }
       }
     },
+    "/api/v1/connections/{id}/monitor/locks": {
+      "get": {
+        "summary": "锁等待：谁在等谁",
+        "description": "FR-MON-03 的等待关系部分。返回**边**（waiting → blocking）而不是树：树可以由边算出来，反过来让每个驱动各自拼树必然出现三种形状。PG 用 pg_blocking_pids（PG 自己算的「谁挡住了我」，含软阻塞与并行 worker 的处理）；MySQL 用 innodb_lock_waits + innodb_trx。**metadata lock 那一层没做**：要 MySQL 8 的 performance_schema.metadata_locks，5.7 拿不到。没有等待时返回空数组——那是健康状态，不是查不到。",
+        "parameters": [
+          { "name": "id", "in": "path", "required": true, "schema": { "type": "string" } }
+        ],
+        "responses": {
+          "200": { "description": "ok（items 为空表示当前没有锁等待）" },
+          "400": { "description": "这个引擎没有锁等待视图" },
+          "404": { "description": "连接不存在" }
+        }
+      }
+    },
     "/api/v1/connections/{id}/monitor/tables": {
       "get": {
         "summary": "表体量 Top N",

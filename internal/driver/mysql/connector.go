@@ -140,8 +140,9 @@ func (c *Connector) Capabilities() model.Capabilities {
 		// 连接数与缓存命中走 SHOW GLOBAL STATUS + @@max_connections。
 		Metrics: true,
 		// 表体量走 information_schema.TABLES。
-		Capacity:         true,
-		LockGraph:        false,
+		Capacity: true,
+		// 锁等待走 information_schema 的 innodb_lock_waits / innodb_trx。
+		LockGraph:        true,
 		Backup:           false,
 		BulkLoad:         false,
 		KeysetPagination: true,

@@ -191,3 +191,25 @@ func TestCapacityCapabilityIsHonest(t *testing.T) {
 		}
 	}
 }
+
+// TestLockGraphCapabilityIsHonest 钉住「锁等待视图」的真值。
+//
+// PG 走 pg_blocking_pids，MySQL 走 innodb_lock_waits + innodb_trx；SQLite 是进程内
+// 单文件、没有跨会话的锁等待可看。metadata lock 那一层两引擎都没做（要 MySQL 8 的
+// performance_schema.metadata_locks），如实写在 docs/09 §9.2。
+func TestLockGraphCapabilityIsHonest(t *testing.T) {
+	want := map[model.Engine]bool{
+		model.EngineSQLite:   false,
+		model.EngineMySQL:    true,
+		model.EnginePostgres: true,
+	}
+	for _, c := range []driver.Connector{sqlite.New(), mysql.New(), pg.New()} {
+		exp, ok := want[c.Engine()]
+		if !ok {
+			t.Fatalf("新增引擎 %s 没写进这张表：锁等待能力要有明确预期", c.Engine())
+		}
+		if got := c.Capabilities().LockGraph; got != exp {
+			t.Errorf("%s: Capabilities.LockGraph = %v，期望 %v", c.Engine(), got, exp)
+		}
+	}
+}

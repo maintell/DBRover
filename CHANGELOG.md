@@ -182,6 +182,8 @@
 
 - **表体量 Top N**（FR-MON-06 的体量部分）：`driver.CapacityProvider`（判据 `Capabilities().Capacity`）。PG 用 `pg_table_size` / `pg_indexes_size` / `pg_total_relation_size`——都是 **O(1) 的目录计算，不扫表**；MySQL 用 `information_schema.TABLES` 并排除系统库（它们总排在前几名，会把业务表挤掉）。数据与索引分开给，否则「为什么这张表这么大」还得再点进去看一次。**增长没做**：那需要本地时序留存（FR-MON-05），先把每次采样的体量存下来才谈得上「一周涨了多少」。界面接在指标面板里，能力位为假时不显示。
 
+- **锁等待：谁在等谁**（FR-MON-03 的等待关系部分）：`driver.LockGraphProvider`（判据 `Capabilities().LockGraph`）。返回**边**（waiting → blocking）而不是树——树可以由边算出来，反过来让每个驱动各自拼树必然出现三种形状。PG 用 `pg_blocking_pids`（PG 自己算好的「谁挡住了我」，软阻塞与并行 worker 都在里面，比拿 `pg_locks` 自己拼准确）；MySQL 用 `innodb_lock_waits` + `innodb_trx`，**等待时长取 `trx_wait_started`** —— 用事务开始时间会把「等了 2 秒」说成「等了 40 分钟」。空列表就是健康状态，界面明写「当前没有锁等待」。**未做**：树形视图、metadata lock 层（要 MySQL 8）。
+
 ### 安全
 
 - **大整数不再静默丢精度**：`BIGINT` 超过 2^53 时，界面保持字符串、服务端按列类型还原；客户端若把它写成 JSON 数字，直接 `400 NUMBER_PRECISION_LOSS` 并提示改用字符串，而不是把丢了低位的值写进库。此前界面 `coerce()` 用 `Number()` 转换整数列，编辑 `9223372036854775807` 会变成 `...5808`。

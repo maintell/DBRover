@@ -161,8 +161,9 @@ func (c *Connector) Capabilities() model.Capabilities {
 		// 连接数与缓存命中走 pg_stat_database + pg_settings。
 		Metrics: true,
 		// 表体量走 pg_total_relation_size / pg_indexes_size（目录计算，不扫表）。
-		Capacity:         true,
-		LockGraph:        false,
+		Capacity: true,
+		// 锁等待走 pg_blocking_pids（PG 自己算好的「谁挡住了我」）。
+		LockGraph:        true,
 		Backup:           false,
 		BulkLoad:         false,
 		KeysetPagination: true,

@@ -276,7 +276,8 @@ CREATE TABLE slow_query_hourly (
 | 缺口 | 契约位置 | 影响 | 处置 |
 |---|---|---|---|
 | 慢查询 Top N（窗口增量） | §3.2 / 验收 3、4 | `driver.SlowQueryProvider`（判据 `Capabilities().SlowQueryStats`）+ `service.Executor.SlowQueries`。**差分在服务层**：`Executor` 每条连接一份 `slowSampler`，保存上一次的累计值，本次相减得到窗口增量；计数器被清过（`pg_stat_statements_reset` / `TRUNCATE performance_schema`）时差成负数，按新增处理而不是显示负数。**首次采样只能给累计值并标 `first_sample`**。排序用**窗口内**总耗时重排。降级：扩展/表不存在 → `available=false` + `hint`（PG 给出 preload + 重启 + `CREATE EXTENSION` 三步；MySQL 给出 performance_schema 的检查点）；超时 → `degraded` | `TestDiffSlowQueriesIsWindowDelta`（两次采样：累计 → 增量、窗口里没跑过的不出现、按窗口总耗时重排、平均耗时）、`TestDiffSlowQueriesSurvivesCounterReset`（清零后不显示负数）；真机验证见下 |
-| 锁与阻塞链 | §3.4 / FR-MON-03 | 没有阻塞视图；`LockGraph` 仍为 false | 需要构造真实锁的集成用例（与 `docs/07` 验收 11 的 MDL 卡点同源） |
+| 锁等待（谁在等谁） | §3.4 / FR-MON-03（等待关系部分） | `driver.LockGraphProvider`（判据 `Capabilities().LockGraph`）。返回**边**而不是树。PG 用 `pg_blocking_pids`——PG 自己算好的「谁挡住了我」，比拿 `pg_locks` 自己拼准确（软阻塞与并行 worker 都在里面）；MySQL 用 `innodb_lock_waits` + `innodb_trx`，**等待时长取 `trx_wait_started`**（用事务开始时间会把「等了 2 秒」说成「等了 40 分钟」）。界面把空列表写成「当前没有锁等待」——只画空表，人分不清是没阻塞还是没接上 | `TestLockGraphCapabilityIsHonest`、`TestUIMetricsPanel`；真机 MySQL 见上 |
+| 阻塞链的树形视图与 metadata lock | §3.4 / FR-MON-03 | 只有边、界面上只有平表；**metadata lock 那一层没有** | 树可以由边算出来（按 `blocking_id` 串），留到界面重做时一起；MDL 要 MySQL 8 的 `performance_schema.metadata_locks`，与 `docs/07` 验收 11 是同一个卡点 |
 | 容量增长（时间维度） | §3.5 / FR-MON-06 | 体量 Top N 已做（见 §9.1），**增长曲线没有** | 需要本地时序留存（FR-MON-05）：先把每次采样的体量存下来，才谈得上「一周涨了多少」 |
 | 时序留存 / 巡检 / 告警 | §4 / §5 / §7 | FR-MON-05 / 07 / 08 全未做 | 单独立项：本地时序文件 + 7 天清理、Runbook 执行器、阈值告警与抑制 |
 
