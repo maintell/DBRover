@@ -77,6 +77,7 @@ Wails v2 的 `assetserver.Options` 允许 `Assets: nil, Handler: h`：官方源�
 - 该依赖**只在 `cmd/dbrover-desktop` 的独立 module 里**：根 `go.mod` 不增加任何依赖，`CGO_ENABLED=0 go build ./...` 与五平台 CLI 交叉编译不受影响。
 - 嵌套 module 自带 `go.mod`（`go 1.26.0`）与 `replace github.com/maintell/DBRover => ../..`；Go 会把它排除在根 `./...` 之外。
 - Wails 的 macOS / Linux 构建需要 CGO（gtk/webkit），与本仓库免 CGO 矩阵冲突：**本轮只发 Windows 桌面包**，其余平台桌面壳需另开 ADR 与发版线。
+- **构建必须带 `-tags production`**（Windows）：Wails v2 的 `internal/app/app_default_windows.go` 约束是 `!dev && !production && !bindings && windows`——三者一个都不带时，链接进来的 `CreateApp` 是「弹 `Wails applications will not build without the correct build tags` 错误框就退出」的 stub，`go build` 仍返回 0、CI 仍绿，用户拿到的是假 exe。带 `production` 才链接 `app_production.go` 的真实 `CreateApp`，并由 `internal/frontend/runtime/runtime_prod_desktop.go` 的 `//go:embed runtime_prod_desktop.js` 把 runtime JS 一起编进去（`Assets: nil, Handler: h` 的用法不需要 bindings tag）。`release.yml` 的 desktop job 与 `cmd/dbrover-desktop/README.md` 的构建命令都带此 tag，由 `internal/ci` 的 `TestDesktopBuildUsesProductionTag` 双向守住（含变异验证）。v0.1.0 曾因漏 tag 产出该 stub，已修复。
 
 ### 8. 界面
 

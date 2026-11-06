@@ -93,7 +93,11 @@ jobs:
           Push-Location cmd/dbrover-desktop
           # -H=windowsgui：双击启动不弹控制台窗口。Wails 在 Windows 走 go-webview2
           # （纯 Go syscall），CGO_ENABLED=0 即可，WebView2Loader 由 go-webview2 内嵌。
-          go build -trimpath -ldflags "-s -w -H=windowsgui" -o ../../out/dbrover-desktop.exe .
+          # Wails v2 编译期要求：不带 production tag 时 Windows 会链接进
+          # internal/app/app_default_windows.go 的 stub（弹「will not build without
+          # the correct build tags」错误框就退出），go build 照样返回 0、CI 照样绿。
+          # 带 -tags production 才链接 app_production.go 的真实 CreateApp，并内嵌 runtime JS。
+          go build -tags production -trimpath -ldflags "-s -w -H=windowsgui" -o ../../out/dbrover-desktop.exe .
           Pop-Location
           $zip = "dbrover-desktop_$($env:GITHUB_REF_NAME)_windows_amd64.zip"
           Compress-Archive -Path out/dbrover-desktop.exe -DestinationPath $zip

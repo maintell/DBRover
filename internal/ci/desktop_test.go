@@ -3,6 +3,7 @@ package ci
 import (
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -108,5 +109,50 @@ func TestDesktopBootstrapWiring(t *testing.T) {
 		if !strings.Contains(string(ui2), want) {
 			t.Errorf("ui2.js 缺少交互接线 %q", want)
 		}
+	}
+}
+
+// TestDesktopBuildUsesProductionTag 守住 Wails v2 的编译期构建标签。
+//
+// Wails v2.10.2 的 internal/app/app_default_windows.go 约束是
+// 「!dev && !production && !bindings && windows」：不带任何 tag 时，Windows 上
+// 链接进来的 CreateApp 是「弹一个 build tags 错误框就退出」的 stub，go build
+// 照样返回 0、CI 照样绿，用户拿到的却是个假 exe。带 -tags production 才会
+// 链接 app_production.go 的真实 CreateApp，并把内嵌的 runtime JS 一起带上。
+//
+// 这条门禁把「CI 构建命令」与「本地构建说明」两处都钉住：漏了 tag、或只改
+// 一处忘了另一处，都会红。判据用正则带边界，避免 -tags production-extra 之类
+// 的子串假绿。
+func TestDesktopBuildUsesProductionTag(t *testing.T) {
+	root := repoRoot(t)
+	read := func(rel ...string) string {
+		b, err := os.ReadFile(filepath.Join(append([]string{root}, rel...)...))
+		if err != nil {
+			t.Fatalf("读 %v: %v", rel, err)
+		}
+		return string(b)
+	}
+
+	release := read(".github", "workflows", "release.yml")
+	readme := read("cmd", "dbrover-desktop", "README.md")
+	for name, doc := range map[string]string{"release.yml": release, "desktop README": readme} {
+		if len(doc) < 200 {
+			t.Errorf("%s 只读到 %d 字节，扫描恐怕失效", name, len(doc))
+		}
+	}
+
+	// 桌面 exe 的构建命令必须带 -tags production（tag 后跟边界，不接受更长单词）。
+	wantTag := regexp.MustCompile(`-tags\s+production\b`)
+	for name, doc := range map[string]string{"release.yml": release, "desktop README": readme} {
+		if !wantTag.MatchString(doc) {
+			t.Errorf("%s 的桌面 go build 没有 -tags production，产物会是弹错误框的 stub", name)
+		}
+	}
+
+	// release.yml 里桌面 job 的 go build 行必须自己带 tag：只看文件里某处出现过
+	// -tags production 会假绿（比如写在注释或其他 job 里）。
+	desktopBuild := regexp.MustCompile(`(?m)^\s*go build [^\n]*-tags\s+production\b[^\n]*dbrover-desktop\.exe`)
+	if !desktopBuild.MatchString(release) {
+		t.Error("release.yml 里产出 dbrover-desktop.exe 的那条 go build 没有 -tags production")
 	}
 }

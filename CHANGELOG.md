@@ -4,6 +4,10 @@
 
 ## [Unreleased]
 
+### 修复 · 桌面 Windows 构建标签（v0.1.0 桌面包不可用）
+
+- **桌面 exe 曾是「弹错误框就退出」的 stub**：`release.yml` 的 desktop job 与 `cmd/dbrover-desktop/README.md` 都用裸 `go build`（无 build tag）。Wails v2.10.2 的 `internal/app/app_default_windows.go` 约束 `!dev && !production && !bindings && windows`，不带任一 tag 时 Windows 链接进来的是弹「Wails applications will not build without the correct build tags」错误框就退出的 stub——`go build` 返回 0、CI 全绿，但用户双击 v0.1.0 的 `dbrover-desktop.exe` 只看到那个框。两处构建命令补 `-tags production`（链接真实 `CreateApp` + 内嵌 runtime JS），新增 `internal/ci` 的 `TestDesktopBuildUsesProductionTag` 双向守住；取证用两个实测产物对比：裸构建 17.62MB 含错误串、无 `wails.localhost`/runtime，带 tag 24.26MB 反之。ADR-0017 §7 与 docs/02 §4.5 回填该契约。
+
 ## [0.1.0] - 2026-11-06
 
 ### 新增 · 桌面形态、服务端设置与交互重做（ADR-0017）

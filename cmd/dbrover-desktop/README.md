@@ -16,8 +16,14 @@ DBRover 的桌面形态（Wails v2 + Windows WebView2）。与 `dbrover serve` �
 cd cmd/dbrover-desktop
 $env:CGO_ENABLED = '0'
 go mod tidy
-go build -trimpath -ldflags "-s -w -H=windowsgui" -o ../../out/dbrover-desktop.exe .
+go build -tags production -trimpath -ldflags "-s -w -H=windowsgui" -o ../../out/dbrover-desktop.exe .
 ```
+
+> `-tags production` 不能省：Wails v2 在 Windows 上对「没带 dev/production/bindings 任一 build tag」
+> 的构建会链接进一个弹「Wails applications will not build without the correct build tags」错误框
+> 就退出的 stub（`internal/app/app_default_windows.go`），而 `go build` 仍返回 0。带 `production`
+> 才会链接真实的 `CreateApp` 并把内嵌 runtime JS 一起编进去。CI 与本地说明由
+> `internal/ci` 的 `TestDesktopBuildUsesProductionTag` 双向钉住。
 
 产物由 `.github/workflows/release.yml` 在 `v*` tag 时产出，不在本地发版。
 
