@@ -8,7 +8,8 @@
 </head>
 <body data-theme="dark">
 <div id="app">
-  <header class="topbar">
+  <!-- ContextHeader：只留全局上下文与工具类，功能按钮全部下沉到 ActivityRail -->
+  <header class="topbar context-header">
     <span class="brand"><span class="brand-mark">DB</span> DBRover</span>
     <span id="mode" class="badge" title="运行形态">服务</span>
     <span class="sep"></span>
@@ -17,67 +18,94 @@
     <span id="identity" class="badge" title="服务器身份指纹，用于识别是否连错库">—</span>
     <span id="profile" class="badge">—</span>
     <span class="grow"></span>
+    <span id="settings-indicator" class="dot" hidden title="模型服务已配置"></span>
     <div class="tool-group">
       <button id="btn-connections" title="连接管理：切换、测试、删除">连接</button>
       <button id="btn-new-conn" title="新建连接">新连接</button>
-      <button id="btn-reload" title="重新加载表清单">刷新</button>
-    </div>
-    <div class="tool-group">
-      <button id="btn-agent" title="用 AI 助手排查（需要配置模型服务）">AI</button>
-      <button id="btn-compare" title="比对两个连接的结构">比对</button>
-      <button id="btn-health" title="一键健康检查：连接、锁、慢查询、表体量" hidden>体检</button>
-      <button id="btn-metrics" title="连接与负载、缓存命中（每 5 秒刷新）" hidden>指标</button>
-      <button id="btn-sessions" title="查看并终止数据库会话" hidden>会话</button>
-    </div>
-    <div class="tool-group" id="schema-tools">
-      <button id="btn-new-table" title="新建表">新建表</button>
-      <button id="btn-new-view" title="新建视图">新建视图</button>
-      <button id="btn-new-seq" title="新建序列" hidden>新建序列</button>
-      <button id="btn-new-type" title="新建枚举类型" hidden>新建类型</button>
-      <button id="btn-new-routine" title="新建存储过程 / 函数" hidden>新建例程</button>
     </div>
     <span class="sep"></span>
-    <span id="settings-indicator" class="dot" hidden title="模型服务已配置"></span>
     <button id="btn-settings" title="设置：外观、编辑器、模型服务">设置</button>
     <button id="btn-forget" title="清除本页保存的令牌">退出</button>
   </header>
 
-  <nav id="tab-bar" class="tabbar" aria-label="SQL 标签"></nav>
+  <!-- ActivityRail：一级功能带（≤5），数据域为默认主角；组内的动作按钮逐字保留原 id -->
+  <div class="activity-body">
+    <nav class="activity-rail" aria-label="主要功能">
+      <button class="rail-item" data-domain="data" aria-label="数据" aria-current="page">数据</button>
+      <button class="rail-item" data-domain="structure" aria-label="结构">结构</button>
+      <button class="rail-item" data-domain="monitor" aria-label="监控">监控</button>
+      <button class="rail-item" data-domain="agent" aria-label="AI">AI</button>
+      <button class="rail-item" data-domain="ops" aria-label="运维任务">运维</button>
+    </nav>
 
-  <main>
-    <aside class="sidebar">
-      <div class="side-head">
-        <span>对象</span>
+    <div class="domain-view">
+      <div class="domain-head">
+        <span id="domain-title" class="domain-title">数据</span>
+        <button id="btn-reload" title="重新加载表清单">刷新</button>
         <span class="grow"></span>
-        <span id="table-count"></span>
       </div>
-      <input id="obj-search" class="obj-search" placeholder="搜索对象" autocomplete="off" spellcheck="false">
-      <div id="tables" class="object-tree"></div>
-    </aside>
-
-    <section class="work">
-      <div class="editor-wrap">
-        <textarea id="sql" spellcheck="false" placeholder="SELECT * FROM ...">SELECT 1 AS ok</textarea>
-        <div class="toolbar editor-toolbar">
-          <button id="btn-run" class="primary">执行 (Ctrl+Enter)</button>
-          <button id="btn-run-all" title="执行整个脚本：所有语句按顺序跑（Ctrl+Shift+Enter）">执行全部</button>
-          <button id="btn-explain" title="只看执行计划，不执行这条语句">计划</button>
-          <button id="btn-cancel" hidden title="终止这条连接上正在执行的语句">取消</button>
-          <label class="inline" title="多条语句时，前面某条失败后继续跑后面的；结果按语句分开显示">
-            <input type="checkbox" id="run-continue"> 遇错继续
-          </label>
-          <span id="risk" class="badge r0" hidden></span>
-          <span id="friction" class="badge" hidden></span>
-          <span class="grow"></span>
-          <span id="cursor-pos" class="cursor-pos" title="光标位置">1:1</span>
-          <span id="status"></span>
+      <!-- 二级动作组：默认只有 data 组可见，其余按域切换（不删任何 id / 精确字符串） -->
+      <div class="secondary-nav" id="secondary-nav">
+        <div class="tool-group domain-actions" data-domain="data"></div>
+        <div class="tool-group domain-actions" data-domain="structure" hidden>
+          <button id="btn-new-table" title="新建表">新建表</button>
+          <button id="btn-new-view" title="新建视图">新建视图</button>
+          <button id="btn-new-seq" title="新建序列" hidden>新建序列</button>
+          <button id="btn-new-type" title="新建枚举类型" hidden>新建类型</button>
+          <button id="btn-new-routine" title="新建存储过程 / 函数" hidden>新建例程</button>
+          <button id="btn-compare" title="比对两个连接的结构">比对</button>
+        </div>
+        <div class="tool-group domain-actions" data-domain="monitor" hidden>
+          <button id="btn-metrics" title="连接与负载、缓存命中（每 5 秒刷新）" hidden>指标</button>
+          <button id="btn-sessions" title="查看并终止数据库会话" hidden>会话</button>
+          <button id="btn-health" title="一键健康检查：连接、锁、慢查询、表体量" hidden>体检</button>
+        </div>
+        <div class="tool-group domain-actions" data-domain="agent" hidden>
+          <button id="btn-agent" title="用 AI 助手排查（需要配置模型服务）">AI</button>
+        </div>
+        <div class="tool-group domain-actions" data-domain="ops" hidden>
+          <span class="ops-empty">备份 / 恢复 / 迁移：命令行与 API 可用，界面入口未接入</span>
         </div>
       </div>
-      <div id="pending-bar" class="notice" hidden></div>
-      <div id="table-toolbar" class="toolbar filters" hidden></div>
-      <div id="results" class="results"></div>
-    </section>
-  </main>
+
+      <nav id="tab-bar" class="tabbar" aria-label="SQL 标签"></nav>
+
+      <main>
+        <aside class="sidebar">
+          <div class="side-head">
+            <span>对象</span>
+            <span class="grow"></span>
+            <span id="table-count"></span>
+          </div>
+          <input id="obj-search" class="obj-search" placeholder="搜索对象" autocomplete="off" spellcheck="false">
+          <div id="tables" class="object-tree"></div>
+        </aside>
+
+        <section class="work">
+          <div class="editor-wrap">
+            <textarea id="sql" spellcheck="false" placeholder="SELECT * FROM ...">SELECT 1 AS ok</textarea>
+            <div class="toolbar editor-toolbar">
+              <button id="btn-run" class="primary">执行 (Ctrl+Enter)</button>
+              <button id="btn-run-all" title="执行整个脚本：所有语句按顺序跑（Ctrl+Shift+Enter）">执行全部</button>
+              <button id="btn-explain" title="只看执行计划，不执行这条语句">计划</button>
+              <button id="btn-cancel" hidden title="终止这条连接上正在执行的语句">取消</button>
+              <label class="inline" title="多条语句时，前面某条失败后继续跑后面的；结果按语句分开显示">
+                <input type="checkbox" id="run-continue"> 遇错继续
+              </label>
+              <span id="risk" class="badge r0" hidden></span>
+              <span id="friction" class="badge" hidden></span>
+              <span class="grow"></span>
+              <span id="cursor-pos" class="cursor-pos" title="光标位置">1:1</span>
+              <span id="status"></span>
+            </div>
+          </div>
+          <div id="pending-bar" class="notice" hidden></div>
+          <div id="table-toolbar" class="toolbar filters" hidden></div>
+          <div id="results" class="results"></div>
+        </section>
+      </main>
+    </div>
+  </div>
 </div>
 
 <!-- 令牌门 -->

@@ -299,6 +299,40 @@ function updateCursor() {
   out.textContent = lines.length + ':' + (lines[lines.length - 1].length + 1);
 }
 
+
+// ---------- 按功能重排：域切换（只切动作条，不重建工作区） ----------
+// 数据域是默认主角；结构 / 监控 / AI / 运维各有自己的二级动作组。切换只做三件事：
+// ① 切换 .domain-actions 的 [hidden]；② 更新 #domain-title 与 rail 的 aria-current。
+// 刻意不碰 #sql / #results / #tab-bar / main / aside 的节点身份：所有功能本就把结果
+// 渲染进同一个 #results，而 ui2 的 renderExec 活 DOM 包装依赖这些节点不被重建。
+var domainLabels = { data: '数据', structure: '结构', monitor: '监控', agent: 'AI', ops: '运维' };
+
+function switchDomain(target) {
+  if (!domainLabels[target]) return;
+  var groups = document.querySelectorAll('.domain-actions');
+  for (var i = 0; i < groups.length; i++) {
+    groups[i].hidden = groups[i].getAttribute('data-domain') !== target;
+  }
+  var title = u2('domain-title');
+  if (title) title.textContent = domainLabels[target];
+  var items = document.querySelectorAll('.rail-item');
+  for (var j = 0; j < items.length; j++) {
+    if (items[j].getAttribute('data-domain') === target) items[j].setAttribute('aria-current', 'page');
+    else items[j].removeAttribute('aria-current');
+  }
+  ui2.domain = target;
+}
+
+function wireDomains() {
+  var items = document.querySelectorAll('.rail-item');
+  for (var i = 0; i < items.length; i++) {
+    (function (el) {
+      el.onclick = function () { switchDomain(el.getAttribute('data-domain')); };
+    })(items[i]);
+  }
+  switchDomain('data');
+}
+
 // ---------- 接线 ----------
 function wireUI2() {
   detectMode();
@@ -333,6 +367,7 @@ function wireUI2() {
       e.preventDefault(); saveSettings();
     }
   });
+  wireDomains();
   loadSettings();
 }
 

@@ -148,6 +148,8 @@
 
 桌面壳（`cmd/dbrover-desktop`，独立 Go module）与 `dbrover serve` 共用同一份 `api.Server` 与 `internal/webui`。Windows 桌面构建必须带 `-tags production`——Wails v2 不带该 tag 时会链接进「弹 build tags 错误框就退出」的 stub（`go build` 仍返回 0），详见 ADR-0017 §7。桌面形态把 `s.Handler()` 交给 Wails 的 `assetserver.Options{Handler: ...}`（`Assets` 留空），WebView2 的请求在**进程内**派发，**不监听任何 TCP 端口**；令牌由进程内的 `/bootstrap.js` 注入窗口，不打印、不落盘。关窗即关闭连接、审计与留存并退出。
 
+界面按功能分三层 IA（`ContextHeader` 上下文头 + `ActivityRail` 5 个一级功能带 + `DomainView` 内容区），数据域为默认主角；重排只搬容器、不重建 `#sql`/`#results` 节点身份，所有域内容复用同一结果容器（设计见 `product-design/07-information-architecture.md`、迁移映射见 `product-design/18-migration-map.md`）。
+
 关键点：因为核心是 HTTP Handler、界面是纯 SPA，**壳是可替换的**。如果 Wails 在 macOS/Linux 的 CGO 打包出问题，换成 Tauri 或「托盘程序 + 系统浏览器」都只影响壳层，不影响内核与界面。本轮按 ADR-0017 只发 Windows 桌面包（其余平台仍用 `dbrover serve -open`）。
 
 ---

@@ -555,3 +555,98 @@ kbd {
   #schema-tools { display: none; }
   aside { width: 200px; }
 }
+
+/* ==========================================================================
+   v3 · 按功能重排（追加式）：ContextHeader + ActivityRail + DomainView
+   顶栏去按钮化，一级功能带 ≤5，数据域为默认主角。全部为新增选择器，
+   不覆盖 v2 及原始层任何已验收规则（--danger / .card p.danger 原样保留）。
+   ========================================================================== */
+
+:root {
+  --rail-w: 64px;
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --z-rail: 5;
+  --focus: var(--accent);
+}
+
+/* 顶栏只承载上下文，不再溢出；overflow-x 保留但通常不会触发 */
+.context-header { flex-wrap: nowrap; }
+
+/* 功能带 + 内容区：占据顶栏以下的全部高度 */
+.activity-body {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+}
+
+.activity-rail {
+  width: var(--rail-w);
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: var(--space-1);
+  padding: var(--space-2) 6px;
+  background: var(--panel);
+  border-right: 1px solid var(--line);
+  z-index: var(--z-rail);
+}
+.rail-item {
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--muted);
+  font-size: 12px;
+  padding: 10px 2px;
+  min-height: 44px;
+  border-radius: 6px;
+  white-space: nowrap;
+}
+.rail-item:hover { color: var(--fg); border-color: var(--line); }
+.rail-item[aria-current="page"] {
+  background: var(--panel-2);
+  color: var(--accent);
+  border-color: var(--line);
+  font-weight: 600;
+  box-shadow: inset 3px 0 0 var(--accent);
+}
+:focus-visible { outline: 2px solid var(--focus); outline-offset: 1px; }
+
+/* DomainView：内部仍是原来的 main(aside + .work)，节点身份不变 */
+.domain-view {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+.domain-head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: 6px 12px;
+  background: var(--panel);
+  border-bottom: 1px solid var(--line);
+}
+.domain-title { font-size: 13px; font-weight: 600; color: var(--fg); }
+.domain-head .grow { flex: 1; }
+
+/* 二级动作组：默认只有 data 组显示，其余由 switchDomain 切换 [hidden] */
+.secondary-nav {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: 5px 12px;
+  background: var(--panel);
+  border-bottom: 1px solid var(--line);
+  min-height: 34px;
+}
+.secondary-nav .domain-actions[hidden] { display: none; }
+.ops-empty { color: var(--muted); font-size: 12px; }
+
+@media (max-width: 900px) {
+  .activity-rail { width: 48px; }
+  .rail-item { font-size: 11px; padding: 8px 0; }
+}

@@ -4,6 +4,12 @@
 
 ## [Unreleased]
 
+### 变更 · 界面按功能重排（分功能 IA、聚焦主要功能）
+
+- **三层信息架构取代平铺顶栏**：由 `Software Product & UX Orchestrator` 重设计（设计基线见 `product-design/`），落地为 `ContextHeader`（品牌/当前连接/环境/身份/设置/退出）+ `ActivityRail`（数据/结构/监控/AI/运维 5 个一级功能带）+ `DomainView`（对象树 + SQL 编辑器 + 结果区）。顶栏按钮从约 15 个降到 6 个，**数据域为默认主角**：连接 → 对象树 → 写/跑 SQL → 看结果/改数据打开即得、零导航点击；新建序列/类型/例程、体检/会话/指标、比对等按域渐进披露，不再与主角抢视线。
+- **零破坏实现**：只重排容器与父子关系，`index.html` 保留全部 id、两段精确 `title+hidden` 按钮字符串；`app.js` 零改动（按钮靠 `$('id')` 全局绑定，与父容器无关）；`ui2.js` 仅追加 `switchDomain`（切二级动作组 `[hidden]` + 域标题 + `aria-current`，**不重建 `#sql`/`#results` 节点身份、不重绑 onclick**，保 per-tab 活 DOM 结果包装）；`style.css` 纯追加 v3 外壳层，`--danger`/`.card p.danger` 原样保留。两种形态仍加载同一份 `//go:embed` 资源，零分叉。
+- **验收**：18 条 UI 断言、`internal/ci`、`scripts/check.ps1`（gofmt/vet/build/test/-race，TmpDir 指 F: 盘避 C: 盘 0.64GB 不足）、6 条端到端脚本全绿；内置浏览器真机点验三层 IA 渲染、5 域切换、结构域动作组按能力位显隐、SQLite 主流程 `SELECT 1 AS ok` 出结果、console 零 error。设计文档 `product-design/17-ux-review-report.md` 从「未验证」回填为已验证。
+
 ## [0.1.1] - 2026-11-06
 
 ### 修复 · 桌面 Windows 构建标签（v0.1.0 桌面包不可用）

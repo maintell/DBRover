@@ -126,10 +126,10 @@ DBRover 面向同时维护多种数据库的工程师：一个人可能上午在
 | `cmd/dbrover-desktop` | 桌面壳（独立 module，Wails v2 + WebView2）：原生窗口、关窗退出、失败回退 |
 | `internal/agent` | Provider 抽象（OpenAI 兼容）、14 个工具、权限三模式与环境上限、执行循环（步数/时长/循环/失败上限）、审批门（预案只由服务端保管）、三路上下文召回、长会话压缩、评测集 |
 | `internal/infra/tunnel` | SSH 隧道与跳板链：多跳、密码/私钥/agent 认证、主机密钥 TOFU |
-| `internal/webui` | **临时界面**：免构建的内嵌 Web UI（连接、对象树、SQL、结果网格、字段编辑、筛选排序、结构变更与比对、批量修改、导出、审批弹窗、Agent 面板） |
+| `internal/webui` | **临时界面**：免构建的内嵌 Web UI，按功能分三层信息架构——`ContextHeader`（连接/环境/设置/退出）+ `ActivityRail`（数据/结构/监控/AI/运维 5 个一级功能带，数据为默认主角）+ `DomainView`（对象树、SQL、结果网格、字段编辑、筛选排序、结构变更与比对、批量修改、导出、审批弹窗、Agent 面板）；各域动作渐进披露，全部内容复用同一 `#results`，设计见 [`product-design/`](product-design/00-product-overview.md) |
 | `cmd/dbrover` | CLI：`version` / `health` / `tables` / `exec` / `serve`（`-open`、`-audit-anchor`）/ `tunnel` / `secret` / **`backup create|inspect`**（`-type full|schema`） / **`restore`** / **`migrate plan|run`**（`-probe` 按实际值判长度） |
 
-> `internal/webui` 是免构建的内嵌界面：桌面与团队模式**加载同一份** `index.html` / `app.js` / `ui2.js` / `style.css`。长期目标仍是 [ADR-0001](docs/adr/0001-tech-stack.md) 的 React + TypeScript + Vite 栈，本轮按 ADR-0017 在免构建版本上补齐设置、连接管理、多标签编辑器与视觉系统。
+> `internal/webui` 是免构建的内嵌界面：桌面与团队模式**加载同一份** `index.html` / `app.js` / `ui2.js` / `style.css`。长期目标仍是 [ADR-0001](docs/adr/0001-tech-stack.md) 的 React + TypeScript + Vite 栈，本轮按 ADR-0017 在免构建版本上补齐设置、连接管理、多标签编辑器与视觉系统，并按 [`product-design/`](product-design/07-information-architecture.md) 把顶栏约 15 个平级按钮按功能重排为三层 IA（只重排容器、保留全部 id/动作/能力位/`#results` 节点身份，18 条 UI 断言与两种形态不变）。
 
 > 跨引擎差异的写法约定见 [ADR-0005](docs/adr/0005-engine-differences-as-capabilities.md)：能力有无进 `Capabilities`，语句文本归 `dialect`，其余位置不得判断引擎名。
 >
