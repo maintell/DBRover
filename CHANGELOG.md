@@ -4,6 +4,14 @@
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-11-08
+
+### 修复 · 桌面 exe 在缺 WebView2 的机器上不能独立运行
+
+- **根因**：Wails v2 Windows 桌面应用依赖 WebView2 Runtime（官方文档明确 Win11 默认装、其他机器未必）。此前 `release.yml` 用裸 `go build -tags production`，未设置 `-webview2` 策略 → 走默认 `download`（`internal/wv2installer/download.go`）：目标机器没装或版本 <94 时弹英文框「The WebView2 runtime is required. Press Ok to download and install.」要求联网下载，取消或无外网就起不来。本机装了 153 能正常起窗口，故本机能复现「窗口正常」但换机器失败。
+- **修法**：构建加 `wv2runtime.embed` tag（等价 `wails build -webview2 embed`），把 Wails 自带的官方 `MicrosoftEdgeWebview2Setup.exe` 经 `//go:embed` 编进 exe，缺运行时时本地直接安装、不依赖网络。`release.yml` 与桌面 README 两处构建命令同步，新增 `internal/ci` 的 `TestDesktopEmbedsWebView2Bootstrapper` 双向守住（含变异验证）。
+- **取证**：本地编译对比 `plain`(24.27MB, `InstallUsingEmbeddedBootstrapper=False`) vs `embedded`(25.98MB, `=True`)，两者 `wails.localhost=True`（仍是真实应用、非 stub）。ADR-0017 §7 与桌面 README 回填该契约。
+
 ## [0.2.0] - 2026-11-07
 
 ### 变更 · 界面按功能重排（分功能 IA、聚焦主要功能）

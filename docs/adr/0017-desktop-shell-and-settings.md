@@ -77,6 +77,7 @@ Wails v2 的 `assetserver.Options` 允许 `Assets: nil, Handler: h`：官方源�
 - 该依赖**只在 `cmd/dbrover-desktop` 的独立 module 里**：根 `go.mod` 不增加任何依赖，`CGO_ENABLED=0 go build ./...` 与五平台 CLI 交叉编译不受影响。
 - 嵌套 module 自带 `go.mod`（`go 1.26.0`）与 `replace github.com/maintell/DBRover => ../..`；Go 会把它排除在根 `./...` 之外。
 - Wails 的 macOS / Linux 构建需要 CGO（gtk/webkit），与本仓库免 CGO 矩阵冲突：**本轮只发 Windows 桌面包**，其余平台桌面壳需另开 ADR 与发版线。
+- **构建必须带 `-tags production,wv2runtime.embed`**（Windows）：除 `production`（真实 `CreateApp`）外，`wv2runtime.embed`（等价 `wails build -webview2 embed`）把官方 WebView2 bootstrapper 编进 exe。Wails v2 Windows 应用依赖 WebView2 Runtime（Win11 默认预装、其他机器未必）；不带该 tag 时 `wv2installer.Process` 走默认 download 策略，缺/旧运行时会弹英文框要求联网下载，取消或无外网即起不来——v0.2.0 及以前正是这样。带 embed 后 `//go:embed MicrosoftEdgeWebview2Setup.exe` 内嵌安装器，本地直接装、不依赖网络，由 `internal/ci` 的 `TestDesktopEmbedsWebView2Bootstrapper` 守住。
 - **构建必须带 `-tags production`**（Windows）：Wails v2 的 `internal/app/app_default_windows.go` 约束是 `!dev && !production && !bindings && windows`——三者一个都不带时，链接进来的 `CreateApp` 是「弹 `Wails applications will not build without the correct build tags` 错误框就退出」的 stub，`go build` 仍返回 0、CI 仍绿，用户拿到的是假 exe。带 `production` 才链接 `app_production.go` 的真实 `CreateApp`，并由 `internal/frontend/runtime/runtime_prod_desktop.go` 的 `//go:embed runtime_prod_desktop.js` 把 runtime JS 一起编进去（`Assets: nil, Handler: h` 的用法不需要 bindings tag）。`release.yml` 的 desktop job 与 `cmd/dbrover-desktop/README.md` 的构建命令都带此 tag，由 `internal/ci` 的 `TestDesktopBuildUsesProductionTag` 双向守住（含变异验证）。v0.1.0 曾因漏 tag 产出该 stub，已修复。
 
 ### 8. 界面

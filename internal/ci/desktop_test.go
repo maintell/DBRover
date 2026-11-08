@@ -156,3 +156,35 @@ func TestDesktopBuildUsesProductionTag(t *testing.T) {
 		t.Error("release.yml 里产出 dbrover-desktop.exe 的那条 go build 没有 -tags production")
 	}
 }
+
+// TestDesktopEmbedsWebView2Bootstrapper 守住「桌面 exe 能独立运行」：目标机器没预装
+// 或版本过旧的 WebView2 Runtime 时，默认策略（download.go）会弹英文框要求联网下载，
+// 用户取消/无外网就起不来。Wails 官方 -webview2 embed 对应 build tag wv2runtime.embed，
+// 把官方 MicrosoftEdgeWebview2Setup.exe 编进 exe，缺运行时时本地直接安装、不依赖网络。
+// 裸 go build 不带该 tag 就退回 download 策略，CI 照样绿但桌面包不自包含。
+func TestDesktopEmbedsWebView2Bootstrapper(t *testing.T) {
+	root := repoRoot(t)
+	read := func(rel ...string) string {
+		b, err := os.ReadFile(filepath.Join(append([]string{root}, rel...)...))
+		if err != nil {
+			t.Fatalf("读 %v: %v", rel, err)
+		}
+		return string(b)
+	}
+	release := read(".github", "workflows", "release.yml")
+	readme := read("cmd", "dbrover-desktop", "README.md")
+	for name, doc := range map[string]string{"release.yml": release, "desktop README": readme} {
+		if len(doc) < 200 {
+			t.Errorf("%s 只读到 %d 字节，扫描恐怕失效", name, len(doc))
+		}
+		// 构建命令必须同时带 production 与 wv2runtime.embed（带边界，避免子串假绿）。
+		prodTag := regexp.MustCompile(`-tags\s+[^\n]*\bproduction\b`)
+		embedTag := regexp.MustCompile(`-tags\s+[^\n]*\bwv2runtime\.embed\b`)
+		if !prodTag.MatchString(doc) {
+			t.Errorf("%s 的桌面 go build 缺 production tag", name)
+		}
+		if !embedTag.MatchString(doc) {
+			t.Errorf("%s 的桌面 go build 缺 wv2runtime.embed tag（缺 WebView2 的机器会弹框要求联网下载，不能独立运行）", name)
+		}
+	}
+}
