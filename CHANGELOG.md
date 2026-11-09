@@ -4,6 +4,15 @@
 
 ## [Unreleased]
 
+## [0.2.2] - 2026-11-09
+
+### 修复 · MySQL 8.0 上「锁等待 / 阻塞链」整块坏掉（聚焦 MySQL 实测驱动）
+
+- **根因**：`internal/driver/mysql/lockgraph.go` 只查 `information_schema.innodb_lock_waits`，而 MySQL 8.0 已把 InnoDB 锁等待迁到 `performance_schema.data_lock_waits`，前者在 8.0 上直接报 `Unknown table 'INNODB_LOCK_WAITS' in information_schema`。此前所有真机验收都在 MySQL 5.7 容器上跑，从没暴露；公司主流 8.0 上「锁等待」面板实际不可用。`docs/04` 的锁等待表一直写的是 `performance_schema.data_lock_waits`，属文档与实现长期不一致。
+- **取证（只读，真实 MySQL 8.0.39 @192.168.2.2:3306/test_sit）**：逐条跑驱动 5 条监控 SQL，`innodb_lock_waits` 报错，其余（慢查询 / 容量 / 会话 / `data_lock_waits` / `metadata_locks`）均可用；确认 8.0 正确写法需 `data_lock_waits` join `performance_schema.threads` 把 `THREAD_ID` 映射回 `PROCESSLIST_ID`，用 `PROCESSLIST_TIME`/`PROCESSLIST_INFO` 取时长与语句。
+- **修法**：`LockWaits` 运行时 `SELECT VERSION()` 探测主版本，经纯函数 `pickLockWaitSQL(major)` 分派——8+ 走 `data_lock_waits`，5.7/MariaDB 走原 `innodb_lock_waits`（不破坏 5.7 已验收行为）；版本探测失败降级到 5.7 路径。`lockgraph_test.go` 覆盖分派/表名/版本串解析（含边界），`lockgraph_real_test.go` 为可选真机回归（未设 `DBRover_TEST_MYSQL` 自动跳过）。TDD 红绿 + 变异验证（阈值改 `>=9` 即红、还原复绿）。
+- **文档回填**：docs/04 锁等待行、docs/09 §9.2、docs/13 验收台账同步。
+
 ## [0.2.1] - 2026-11-08
 
 ### 修复 · 桌面 exe 在缺 WebView2 的机器上不能独立运行

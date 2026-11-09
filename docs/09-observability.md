@@ -293,7 +293,7 @@ CREATE TABLE slow_query_hourly (
 
 | 缺口 | 契约位置 | 影响 | 处置 |
 |---|---|---|---|
-| 阻塞链的树形视图与 metadata lock | §3.4 / FR-MON-03 | 只有边、界面上只有平表；**metadata lock 那一层没有** | 树可以由边算出来（按 `blocking_id` 串），留到界面重做时一起；MDL 要 MySQL 8 的 `performance_schema.metadata_locks`，与 `docs/07` 验收 11 是同一个卡点 |
+| 阻塞链的树形视图与 metadata lock | §3.4 / FR-MON-03 | 只有边、界面上只有平表；**metadata lock 那一层没有** | 树可以由边算出来（按 `blocking_id` 串），留到界面重做时一起；MDL 要 MySQL 8 的 `performance_schema.metadata_locks`，与 `docs/07` 验收 11 是同一个卡点。**锁等待边本身在 MySQL 8 曾整块坏掉**：驱动只查 `information_schema.innodb_lock_waits`（8.0 已移除），已改为按 `SELECT VERSION()` 主版本分派到 `performance_schema.data_lock_waits`（真机 8.0.39 实测，见 docs/04 §锁等待行）。MDL 层仍未做 |
 | 容量增长的可视化 | §3.5 / FR-MON-06 | 增长的**数值**已给出（每次读体量时顺手存进留存，按最早点算差值与跨度）；**没有曲线图**，也没有「按天聚合」 | 曲线要前端画图，等正式前端；聚合要等比降采样，等有「看一周」的真实需求 |
 | 巡检的自定义检查项与 Runbook 编排 | §5 / 验收 12 | 四路采集（连接与缓存 / 锁等待 / 慢查询 / 表体量）与报告导出（`?format=markdown`）都已实现；**没有「自定义检查项」与「按 Runbook 编排」** | 自定义项要先把检查项做成数据（而不是代码分支）；编排要先把 Runbook 定义落成文件 |
 | 告警的另两条规则与外部推送 | §7 / FR-MON-08 | 已做「连接占用连续 3 次 >80%」与「阻塞链深度 >3」；**>5 分钟长事务**与**慢查询总耗时占比 >50%** 未做，也没有外部推送（v1 明确不做） | 长事务：`Metadata.Blockers`（DDL 预检链路）已在 MySQL 侧查 `innodb_trx.trx_started` 并给出持续秒数，但**监控告警 `Alerts` / 巡检 `assess` 没有接这条链路**（它们是另一套采集，不调 `Blockers`），所以要接的是「把已有会话观察接进告警评估」，不是「驱动拿不到数据」；占比要先有引擎侧的语句总耗时 |

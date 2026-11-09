@@ -36,7 +36,7 @@
 |---|---|---|
 | `docs/05` SQL 工作区 | 15 项 | **14 项通过**；唯一未过：10 执行计划（端点、界面与偏差解析都有，但只有 3/5 引擎——MSSQL/Oracle 缺实例，§4.2 的估算偏差与 PG 内层行数明确标未实现）。其中 1、2 光标语句、3 切分、4 多语句失败保留结果、5、6 翻页与深分页（含 100 万行真机压测）、7、8 精度与 NULL、9 取消（三引擎引擎侧都真停，MySQL 走 `KILL QUERY`）、11 指纹、12 跨库引用拦截（PG 三段名）均通过。**本轮新增 3 项**：13 `stop_on_error=false` 继续执行（验收脚本 `stop-on-error.ps1`）、14 大整数 >2^53 以字符串回传（drivertest `LargeIntsAsStrings`）、15 多语句结果分块 + 点标题跳回编辑器（内置浏览器实测 + `TestRenderExecPerStatementBlock`） |
 | `docs/06` 数据编辑器 | 12 项 | **全部通过**（其中「无主键表」按现状改为「直接拒绝浏览 501」，不是「只读可浏览」；文档 §1.2 已标注目标 vs 现状） |
-| `docs/07` 结构设计器 | 12 项 | **10 项通过**（1、3、4、5、6、7、8、9、10、11）；两条如实标注：2 只有 3/5（缺 MSSQL/Oracle 无法做 5 引擎 DDL 回放）、11 的 **MDL 探测未做**（`performance_schema.metadata_locks` 需 MySQL 8，5.7 只有 `innodb_trx` / `innodb_lock_waits`）；12 单向（DDL 反解回表单未做，见 `docs/07 §8.2`） |
+| `docs/07` 结构设计器 | 12 项 | **10 项通过**（1、3、4、5、6、7、8、9、10、11）；两条如实标注：2 只有 3/5（缺 MSSQL/Oracle 无法做 5 引擎 DDL 回放）、11 的 **MDL 探测未做**（`performance_schema.metadata_locks` 需 MySQL 8，5.7 只有 `innodb_trx` / `innodb_lock_waits`）；**本轮实测修复**：真机 MySQL 8.0.39 上 `information_schema.innodb_lock_waits` 已移除，旧驱动「锁等待/阻塞链」整块报错 `Unknown table`，改为按版本分派到 `performance_schema.data_lock_waits`（只读实测 + 单测 + 变异验证，见 docs/04）；12 单向（DDL 反解回表单未做，见 `docs/07 §8.2`） |
 
 | `docs/08` 备份与迁移 | 12 项 | **11 项通过**（1–8、10、11、12）；唯一未过：9 Oracle 空串阻断需要 Oracle 实例（与 0008 同一台卡点：镜像拉不下来）。12 是 `TestMigrateDecimalFidelity`（MySQL `DECIMAL(65,30)` → PG `numeric(65,30)`，摘要一致 + `d::text` 逐字读回）。已知未做写在各条里：容器对象条目不含行数/大小、行级续跑明确不做（[ADR-0009](adr/0009-backup-resume-granularity.md)）、恢复报告没有抽样内容哈希（需容器带导出侧摘要） |
 

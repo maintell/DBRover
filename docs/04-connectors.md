@@ -265,7 +265,7 @@ type PlanNode struct {
 | 会话列表 | `pg_stat_activity` | `SHOW PROCESSLIST` | `sys.dm_exec_sessions`+`requests` | `v$session` | ○ | `CLIENT LIST` | `$currentOp` | `_tasks` |
 | Kill | `pg_terminate_backend` | `KILL` | `KILL` | `ALTER SYSTEM KILL SESSION` | ○ | `CLIENT KILL` | `killOp` | ◐ 取消任务 |
 | 慢查询来源 | `pg_stat_statements`（需扩展） | `performance_schema.events_statements_summary_by_digest` | Query Store（2016+） | `v$sql` + `v$sqlstats`（AWR 需 License） | ○ | `SLOWLOG GET` | Profiler / `$collStats` | 慢日志配置 + `_nodes/stats` |
-| 锁等待 | `pg_locks` + `pg_blocking_pids` | `performance_schema.data_lock_waits` | `sys.dm_tran_locks` + `dm_os_waiting_tasks` | `v$lock` + `v$session.blocking_session` | ○ | ○ | ○ | ○ |
+| 锁等待 | `pg_locks` + `pg_blocking_pids` | **版本自适应**：MySQL 8.0+ 走 `performance_schema.data_lock_waits` + `performance_schema.threads`（`THREAD_ID`→`PROCESSLIST_ID`）；5.7 / MariaDB 走 `information_schema.innodb_lock_waits` + `innodb_trx`。8.0 已移除 `information_schema.innodb_lock_waits`，只查它会报 `Unknown table`——真机 MySQL 8.0.39 实测确认 | `sys.dm_tran_locks` + `dm_os_waiting_tasks` | `v$lock` + `v$session.blocking_session` | ○ | ○ | ○ | ○ |
 | 表体积 | `pg_total_relation_size` | `information_schema.TABLES` | `dm_db_partition_stats` | `dba_segments` | ○（需要 `dbstat` 虚拟表，v1 不做） | `MEMORY USAGE` | `$collStats` | `_cat/indices` |
 | 需额外许可 | — | — | — | **AWR/ASH 需 Diagnostics Pack** | — | — | — | ◐ 部分监控特性 |
 
