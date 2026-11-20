@@ -4,12 +4,19 @@
 
 ## [Unreleased]
 
-### 变更 · 全量重置：只保留文档，实现从零重建
+### 变更 · 文档裁剪到只剩 PRD（2026-11-20）
+
+- **动作**：移除 57 份文档——`docs/00-glossary.md`、`docs/02`–`docs/13`（12 份设计文档）、`docs/adr/`（18 份 ADR）、`docs/superpowers/specs`（1 份）、`product-design/`（25 份）。保留 `docs/01-product-requirements.md` 作为唯一契约，以及 README / AGENTS / CHANGELOG / `.gitignore` / `.gitattributes`。
+- **原因**：上一轮那 60 份文档是跟着实现一起长出来的，彼此交叉引用、又跟代码一同失真；拿它们当重建输入，等于把旧的分歧原样带进新一轮。只留 PRD，就是只留「要做什么」，「怎么做」留给重建时重新决策。
+- **回填**：README 的架构图与文档导航改标「重建目标」与单文档导航；AGENTS.md 按「只有 PRD」重写文档先行、目录结构与门禁口径；PRD 里 4 处指向已删 ADR/docs 的引用改为内联结论。
+- **可回滚**：被删文档与旧实现都在标签 `reset-baseline-0.2.0`（`29adedb`）与提交 `bd2e5c5`，`git show reset-baseline-0.2.0:docs/04-connectors.md` 可单独取回任意一份。
+
+### 变更 · 全量重置：只保留文档，实现从零重建（2026-11-20）
 
 - **原因**：混合编程（人写 + Agent 写、多轮临时方案叠加）导致多条执行路径并存、分层出现反向依赖、文档与实现不能互证，读代码已无法判断哪条是权威路径。判断继续修补的成本高于按文档重建。
-- **动作**：按 [ADR-0018](docs/adr/0018-full-reset-and-rebuild.md) 移除 331 个受控文件——`cmd/`、`internal/`（api/service/driver/policy/agent/host/infra/model/webui/ci）、`scripts/`、`.github/`、`go.mod`、`go.sum`。保留 `docs/`（14 份设计文档 + 18 份 ADR + 1 份 spec）、`product-design/`（25 份）与根级 README / AGENTS / CHANGELOG。
+- **动作**：按 ADR-0018（该 ADR 已随本次裁剪移除，结论保留在本条目）移除 331 个受控文件——`cmd/`、`internal/`（api/service/driver/policy/agent/host/infra/model/webui/ci）、`scripts/`、`.github/`、`go.mod`、`go.sum`。
 - **可回滚**：重置前完整实现固定在标签 `reset-baseline-0.2.0`（提交 `29adedb`），可整库取回或按文件摘取。
-- **影响**：CI 与本地检查脚本随之失效（`push main` 不再触发流水线、`go test ./...` 无包可测、`internal/ci` 的文档一致性门禁消失）；`docs/13 §1.5` 的里程碑状态已标注为「重置前基线」。重建时须把文档一致性校验作为第一批交付物。
+- **影响**：CI 与本地检查脚本随之失效（`push main` 不再触发流水线、`go test ./...` 无包可测、`internal/ci` 的文档一致性门禁消失）。重建时须把文档一致性校验作为第一批交付物。
 
 ## [0.2.2] - 2026-11-09
 
@@ -179,7 +186,7 @@
 - **迁移断点续跑**：每批完成后写检查点（行数、下一批起始键、**累计摘要**），重启从检查点继续；键值带类型标记（`{"k":"i","i":123}`），否则续跑会把字符串喂给数值键。摘要也随检查点恢复，所以续跑后的整表摘要与一次跑完的一致——`TestMigrateResume`（2500 行搬 1000 停 → 续跑 → 2500 行且摘要相等）、`TestMigrateResumeNeedsCheckpoint`（无检查点明确报错，不静默从头）。只有真正搬完才删检查点：演练停在半路时删掉等于把续跑凭据扔了（第一版就写错，被 TestMigrateResume 抓到）。**已知窗口**：检查点在 INSERT 之后写，死在两者之间会重放该批并撞主键冲突，此时明确报错让人对账，不做 upsert。
 - **迁移数据搬运与校验（单表）**：`MigrateTable` 按主键键集分批搬（`(a,b) > (?,?)` 复合键也支持），每批一条多行 INSERT 并走**目标端执行门**（审批/审计/策略照旧）；搬完比对行数与整表摘要，`VerifyMigratedTable` 可随时独立复查。无主键表退化一次性搬运，报告里写清「不可中断续跑 / 未做内容校验」。测试：2500 行 5 批摘要一致、改目标一行必被 `ErrMigrateVerify` 发现、无主键表的两条限制被标注。**过程中发现一处重复实现**：搬运动作与独立复查各写了一份摘要比对，变异验证时改坏其中一处、测试仍全绿——已抽成唯一的 `compareMigrateDigests`，现在短路它会让用例红。**未做**：检查点落盘与断点续跑（验收 6 只到部分）、索引/外键/默认值、CLI 入口。
 - **迁移校验的原语**：`canonicalValue` / `rowDigest` / `tableDigest`（`internal/service/migrate_hash.go`）——把一行的列值编码成**跨驱动一致**的文本再哈希：整数与同值字符串编码相同（驱动返回类型不统一）、NULL 用 `\x00NULL` 哨兵与空串区分（这正是迁移里最常见丢数据方式）、时间统一到 UTC、二进制转十六进制。整表摘要按顺序累加，因此调用方必须按主键排序（换顺序得到不同摘要——这是「顺序不同」不是「数据不同」）。测试：`TestCanonicalValue`、`TestTableDigest`（同样行同摘要、换序必须不同）。键集搬运与检查点仍未做。
-- **迁移数据搬运的口径定下来了**（[ADR-0011](docs/adr/0011-migrate-data-movement.md)，实现待做）：① 续跑按**主键键集**而不是行号/偏移——并发写入下偏移分页会跳行或重复，键集不会；单列 `pk > ?`、复合列 `(a,b) > (?,?)`，无主键表退化为一次性并明确标注不可续跑。② **不做 upsert**：`ON CONFLICT` 与 `ON DUPLICATE KEY` 语义不同，统一会把「覆盖」和「跳过」混在一起；从头重跑遇主键冲突就报错并要求先清空目标表（不替用户删数据）。③ 校验用**行数 + 按主键排序后的全量哈希**（NULL 用固定哨兵，避免 `1` 与 `'1'` 被判成不同）；无主键表只做行数校验并在报告里出声。④ 内存：流式游标 + 每批 1000 行多行 INSERT，上限约为「批大小 × 行宽」。
+- **迁移数据搬运的口径定下来了**（ADR-0011，实现待做）：① 续跑按**主键键集**而不是行号/偏移——并发写入下偏移分页会跳行或重复，键集不会；单列 `pk > ?`、复合列 `(a,b) > (?,?)`，无主键表退化为一次性并明确标注不可续跑。② **不做 upsert**：`ON CONFLICT` 与 `ON DUPLICATE KEY` 语义不同，统一会把「覆盖」和「跳过」混在一起；从头重跑遇主键冲突就报错并要求先清空目标表（不替用户删数据）。③ 校验用**行数 + 按主键排序后的全量哈希**（NULL 用固定哨兵，避免 `1` 与 `'1'` 被判成不同）；无主键表只做行数校验并在报告里出声。④ 内存：流式游标 + 每批 1000 行多行 INSERT，上限约为「批大小 × 行宽」。
 - **迁移建表预案**：`POST /migrate/change` 把预检出的 `CREATE TABLE` 做成结构预案，执行仍走 `/changes/{id}/apply`——审批、审计、竞态保护全部复用，不为迁移另开执行路径。**刻意不接受客户端传来的 DDL**：语句按 `decisions` 由服务端重算并过类型白名单，否则客户端就能绕过预检直接执行任意语句。顺带修正一条规则：**同引擎且目标表还不存在时直接 ok**（源类型在目标端本来就合法），不再逼人逐列决定；同引擎但目标类型不同仍走 review/blocked。测试：`TestMigrateChangeEndpoint`（预检→预案→执行→目标库真有表，含 428 时取审批 token 重试）、`TestMigratePlanEndpoint` 三个场景（目标表缺失→ready；类型不一致→逐列 review；补 decisions→ready）。
 - **迁移预检接上 HTTP**：`POST /api/v1/migrate/plan {source, target, table, target_table?, decisions?}` 读两端结构，返回 `{plan, ready, ddl?}`——`ready=false` 时 `ddl` 不返回但 `plan` 仍在（逐列原因照旧），界面据此逐列提问。只读，不建表不搬数据。测试：`TestMigratePlanEndpoint`（目标表不存在→ready=false 且 plan 非空；目标建好后→ready=true 且 DDL 含引用后的列名）。写测试时踩到 `createConn` 固定用同一个 `api.db`，两个「连接」其实是同一个库，造不出目标表缺失的场景——改用已有的 `createConnAt` 指定另一个文件。
 - **迁移结构生成（单表）**：`BuildMigrationDDL(dstEngine, table, src, plan, decisions)` 把预检结论渲染成目标端 `CREATE TABLE`——ok 列直接用预检类型，**review/blocked 列必须在 `decisions` 里给出目标类型**，缺一个就返回 `ErrMigrateNeedsDecision` 并点名（含 `review`/`blocked` 标注）；列名走方言引用、类型串过 `typePattern` 白名单（带分号的决策会被拒），保留 `NOT NULL`。测试覆盖「缺决策要点名」「决策生效」「非法类型被拒」三条。**仍未做**：数据搬运、校验、索引/外键/默认值、CLI 入口。
@@ -204,7 +211,7 @@
 - **序列能力也改成真值**：PostgreSQL 声明 `Sequences: true`，但 `Objects(KindSequence)` 没有分支，对象树永远空着；改成 `false`，由 `TestSequenceCapabilityIsHonest` 钉住（翻回 true 即红）。`docs/04` 补一段「对象类型覆盖」说明：视图三引擎都有、触发器只有 SQLite、序列与例程还没做。
 - **执行计划的能力声明改成真值**：SQLite / MySQL / PG 三个连接器的 `Capabilities().Explain` 长期写着 `false`（功能其实早就接了），调用方只能靠「点一次看报不报错」来判断。现在三处都是 `true`，`/connections/{id}/health` 增加 `capabilities` 字段，界面按它决定摆不摆「计划」按钮；`POST /explain` 先看能力再进方言，说了不支持就返回 `400 EXPLAIN_UNSUPPORTED`。`TestExplainCapabilityMatchesDialect` 双向钉住「声明 = 方言支持」（改回 false 即红），`TestHealthExposesCapabilities` 守住接口。
 - **删列警示改成红色**：`plan.irreversible` 的提示从琥珀色改为红色（`.card p.danger`），与红色「不可逆」徽标一致——删列丢的是数据，和「需要注意」不是一个量级。`TestIrreversibleWarningIsRed` 钉住类名与配色（改回琥珀色即红），`TestDropColumnIsIrreversibleOnRealEngines` 在 MySQL 5.7 与 PostgreSQL 17 上验证预案标不可逆、`affected_rows` 是非空行数、回滚语句只能把列加回来。
-- **迁移把注释也搬过去**（[ADR-0014](docs/adr/0014-migrate-comments.md)）：PostgreSQL 用 `COMMENT ON TABLE/COLUMN` 把表与列注释原样搬过去；MySQL/MariaDB 只能一条语句改**表**注释（`ALTER TABLE … COMMENT = …`），列注释要带完整列定义（`MODIFY COLUMN`）才能设置，v1 不重算类型、跳过并说明；SQLite 没有注释语法。注释在数据搬完**之后**执行，失败只警告不中断——数据已经搬完并校验过，为一条注释把整次迁移判死不成比例。**顺带修一个会静默改写注释的缺陷**：字面量原先只把单引号双写，而 MySQL 默认 `sql_mode` 不含 `NO_BACKSLASH_ESCAPES`，反斜杠在字符串里是转义符，注释里的 `C:\temp` 会被存成 `C:` 后跟一个制表符；PostgreSQL 反过来不需要动反斜杠（`standard_conforming_strings=on`），多双写一个就多存一个。现在按引擎分开转义，并给 MySQL 加了表注释 2048 字符上限的检查——超了跳过并说明，不发一条注定报 1629 的语句。真机验证：`TestMigrateCommentsOnRealPG`、`TestMigrateCommentsOnRealMySQL` 都在真库上执行后读回比对（中文、单引号、反斜杠原样）；变异验证：把反斜杠转义关掉，两条用例同时变红。
+- **迁移把注释也搬过去**（ADR-0014）：PostgreSQL 用 `COMMENT ON TABLE/COLUMN` 把表与列注释原样搬过去；MySQL/MariaDB 只能一条语句改**表**注释（`ALTER TABLE … COMMENT = …`），列注释要带完整列定义（`MODIFY COLUMN`）才能设置，v1 不重算类型、跳过并说明；SQLite 没有注释语法。注释在数据搬完**之后**执行，失败只警告不中断——数据已经搬完并校验过，为一条注释把整次迁移判死不成比例。**顺带修一个会静默改写注释的缺陷**：字面量原先只把单引号双写，而 MySQL 默认 `sql_mode` 不含 `NO_BACKSLASH_ESCAPES`，反斜杠在字符串里是转义符，注释里的 `C:\temp` 会被存成 `C:` 后跟一个制表符；PostgreSQL 反过来不需要动反斜杠（`standard_conforming_strings=on`），多双写一个就多存一个。现在按引擎分开转义，并给 MySQL 加了表注释 2048 字符上限的检查——超了跳过并说明，不发一条注定报 1629 的语句。真机验证：`TestMigrateCommentsOnRealPG`、`TestMigrateCommentsOnRealMySQL` 都在真库上执行后读回比对（中文、单引号、反斜杠原样）；变异验证：把反斜杠转义关掉，两条用例同时变红。
 - **表注释原来一路都读不到**（顺带修掉）：`DescribeTable` 一直没取表注释——MySQL 的 `information_schema.TABLES.TABLE_COMMENT`、PostgreSQL 的 `obj_description` 都查得到，只是没接进来。后果不只是「详情里少一行说明」：迁移搬不走表注释、结构比对只能比列注释，而列注释明明在，所以看起来完全不像缺陷。现在两个驱动都在同一条查询里多取一列；`drivertest` 新增 `DescribeReportsTableComment`（用各驱动自己的注释钩子写真值 → 详情必须读回同一串），MySQL 5.7 / PG 17 真机通过、SQLite 跳过；变异验证：把 MySQL 那一列改成空常量即红。真机端到端：MySQL 5.7（`utf8mb4`）→ PG 17 迁移后 `obj_description` / `col_description` 读回 `表说明 C:\temp 与 '引号'` 与 `姓名 列说明`，中文数据行（张/李）摘要校验一致（`注释已迁移：2 条`）。
 - **迁移预检能按实际值判长度**（`migrate plan -probe` / `/migrate/plan {probe:true}`）：声明长度收窄一律阻断，但「源 `varchar(64)` 里最长只有 3 个字」这种情况以前只能靠猜——现在可以读一次源表 `MAX(CHAR_LENGTH(col))`，实际放得下就把 `blocked` 翻成 `ok` 并写明「实际最大只有 N 字符，后续新增写入仍需 ≤ M」，实际超了就继续阻断并给出实际值。代价是一次全表扫描，所以是显式开关，不默认开。真机：MySQL → PG 收窄场景不带 `-probe` 被阻断，带上变 `ok 实际 3` 并搬完 3 行（中文原样）；插入一条 40 字的值后又变回阻断。`TestApplyProbedLengths` 钉住四件事——能放行、实际也超不放行、与长度无关的阻断（数组）不许被实际值解开、人工决策给了更窄类型时必须被实际值拦住。
 - **声明长度原来一个驱动都没读出来**（顺带修掉，比上面那条更要紧）：`model.ColumnType` 有 `MaxLen`/`Precision`/`Scale` 三个字段，MySQL/PG/SQLite 三个驱动**一个都没填**。后果是迁移预检里「源长度超过目标上限会截断」那条规则只在把 `Column` 手工造出来的单测里成立，真库上永远不触发——看起来有校验，实际是个摆设。现在三个驱动都按类型填（只给 `varchar/char/binary` 填长度、`decimal/numeric` 填精度与小数位，刻意**不给** MySQL 的 `int(11)` 填：那是显示宽度不是能存多大），解析统一收进 `model.TypeArgs` 一处；`drivertest` 新增 `TypeCarriesDeclaredLength`（`varchar(37)` → 37、`decimal(9,3)` → 9/3），三引擎真机通过，变异验证把 MySQL 那一行改成 0 即红。
@@ -246,7 +253,7 @@
 
 - **结构比对覆盖物化视图**：视图与物化视图分成两份清单比对（差异项带 `kind`），删除用 `DROP MATERIALIZED VIEW`、创建用取到的定义原文；定义有差异时只记 `need_review`（物化视图不能就地改，只能重建，重建会重算并覆盖已物化的结果）。**一侧引擎没有这个概念时（MySQL / SQLite）只记一条 `need_review`、不生成任何脚本**——否则会产出一条在右侧永远执行不了的 `DROP`，看起来却像「升级可以一键完成」。界面在清单里标「（物化视图）」。真机 PG 17 双库验证三态正确、升级脚本关键字正确且不含 `DROP VIEW`；另一条 PG ↔ SQLite 验「不支持的右侧不出脚本」；变异验证：让删除恒用 `DROP VIEW` 即红。
 
-- **恢复覆盖要「把目标名写出来」**（[ADR-0015](docs/adr/0015-connector-target-and-restore-confirmation.md)）：`Connector` 新增 `Target()`（关系库是 catalog、SQLite 是文件路径，不暴露带口令的 `ConnectConfig`），`restore` 的 `-allow-existing` 换成 `-confirm-target`——必须与连接器自报的目标一致，写错会当场拦住并同时给出「你写的」与「实际指向」。**顺带修掉一个假功能**：`-allow-existing` 以前只是放行，而恢复执行的是容器里不带 `IF NOT EXISTS` 的 `CREATE TABLE`，目标表已存在时必然失败（这条路径此前没有任何用例）。现在覆盖 = 确认 → 先删冲突对象（视图先于表）→ 再重建，全程一个事务，报告用 `Replaced` 点名被替换的对象。**不可回滚的引擎（MySQL）拒绝覆盖**：DDL 隐式提交下「删完才失败」会留下半毁的库，不由开关授权。
+- **恢复覆盖要「把目标名写出来」**（ADR-0015）：`Connector` 新增 `Target()`（关系库是 catalog、SQLite 是文件路径，不暴露带口令的 `ConnectConfig`），`restore` 的 `-allow-existing` 换成 `-confirm-target`——必须与连接器自报的目标一致，写错会当场拦住并同时给出「你写的」与「实际指向」。**顺带修掉一个假功能**：`-allow-existing` 以前只是放行，而恢复执行的是容器里不带 `IF NOT EXISTS` 的 `CREATE TABLE`，目标表已存在时必然失败（这条路径此前没有任何用例）。现在覆盖 = 确认 → 先删冲突对象（视图先于表）→ 再重建，全程一个事务，报告用 `Replaced` 点名被替换的对象。**不可回滚的引擎（MySQL）拒绝覆盖**：DDL 隐式提交下「删完才失败」会留下半毁的库，不由开关授权。
 
 - **文档引用门禁**（`internal/ci/docs_test.go`）：文档里写着的 `TestX`、`(NNNN-*.md)` ADR 链接、`scripts/*.ps1` 逐条核对。测试改名、ADR 重编号、脚本换名之后文档不会产生任何编译错误——读者点进去看到 404，才知道那句验收是空的。判据是「同名或以它为前缀」：文档里常写 `TestBulkPlan` 指一整族 `TestBulkPlan*`，那是有效的指路，整族改名时仍然会红。**上线即抓到一次真的腐烂**：`docs/06` 引用的 `TestBulkCompositePrimaryKeyDoesNotBatch` 早已被 `TestBulkCompositePrimaryKeyBatches` 取代（复合主键现在**会**分批，每批 200），而 `bulk_batch_test.go` 里还留着那个已删测试的注释——两处恰好互相矛盾，谁都没在编译或测试里被提醒。三条门禁都带「扫不到东西就红」的下限（引用数、测试函数数），避免正则写坏之后静默通过。
 

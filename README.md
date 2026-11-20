@@ -1,6 +1,6 @@
 # DBRover
 
-> **2026-11-20 状态：仓库已按 [ADR-0018](docs/adr/0018-full-reset-and-rebuild.md) 全量重置，当前只保留文档。** `cmd/`、`internal/`、`scripts/`、CI 均已移除，实现正从 `docs/` 重建——下文「快速开始」「开发与验证」「CLI 参数」描述的是重建目标，现在按它跑不出可执行文件。重置前的完整实现见标签 `reset-baseline-0.2.0`。
+> **2026-11-20 状态：仓库已重置为「只有一份 PRD」。** 实现代码、ADR 与其余设计文档全部移除，唯一契约来源是 [`docs/01-product-requirements.md`](docs/01-product-requirements.md)。下文「架构一览」「快速开始」「开发与验证」「CLI 参数」描述的是**重建目标**，现在按它跑不出可执行文件；重置前的完整实现与全部历史文档见标签 `reset-baseline-0.2.0`（或提交 `bd2e5c5`）。
 
 > 一个以 **AI Agent 为第一公民**的跨引擎数据库工作台。把「连接 → 查看 → 改数据 → 改结构 → 迁移 → 排障」收进一个可审计、可授权、可回滚的工作流里。
 
@@ -50,11 +50,11 @@ DBRover 面向同时维护多种数据库的工程师：一个人可能上午在
 | 跨库迁移 | ● | ● | ● | ● | ● | ◐ | ◐ | ○ |
 | SSH 隧道 | ● | ● | ● | ● | ○ | ● | ● | ● |
 
-> 完整的逐项支持矩阵、降级策略与方言差异见 [`docs/04-connectors.md`](docs/04-connectors.md)。
+> 逐项支持矩阵、降级策略与方言差异属于重建目标；重置前的完整矩阵见标签 `reset-baseline-0.2.0` 的 `docs/04-connectors.md`。
 
 ---
 
-## 3. 架构一览
+## 3. 架构一览（重建目标）
 
 ```
 ┌──────────────────────────────────────────────────────────────────┐
@@ -88,29 +88,19 @@ DBRover 面向同时维护多种数据库的工程师：一个人可能上午在
 
 ## 4. 文档导航
 
+当前只有一份契约：
+
 | 文档 | 内容 | 读者 |
 |---|---|---|
-| [00-glossary](docs/00-glossary.md) | 术语表、概念层级（server/catalog/schema/object） | 全体 |
-| [01-product-requirements](docs/01-product-requirements.md) | 角色、场景、需求池、验收口径、竞品差异 | 产品 / 设计 |
-| [02-architecture](docs/02-architecture.md) | 分层、进程模型、技术选型与理由、扩展点 | 研发 |
-| [03-domain-model](docs/03-domain-model.md) | 领域实体、状态机、元数据模型、存储结构 | 研发 |
-| [04-connectors](docs/04-connectors.md) | 连接器契约、能力矩阵、方言层、降级策略 | 研发 |
-| [05-sql-workspace](docs/05-sql-workspace.md) | 编辑器、补全、执行、结果集、执行计划 | 研发 / 设计 |
-| [06-data-editor](docs/06-data-editor.md) | 数据网格、编辑提交语义、批量修改、生成数据 | 研发 |
-| [07-schema-designer](docs/07-schema-designer.md) | 表/索引/视图/例程设计、DDL 差异比对与安全应用 | 研发 |
-| [08-backup-and-migration](docs/08-backup-and-migration.md) | 备份策略、恢复、跨引擎迁移、校验 | 研发 / 运维 |
-| [09-observability](docs/09-observability.md) | 性能面板、慢 SQL、会话、锁与阻塞 | 研发 / 运维 |
-| [10-connection-and-security](docs/10-connection-and-security.md) | 连接管理、SSH 隧道/跳板、凭据、审计、只读守卫 | 研发 / 安全 |
-| [11-ai-agents](docs/11-ai-agents.md) | Agent 运行时、工具面、审批模型、上下文检索、评测 | 研发 |
-| [12-api-contract](docs/12-api-contract.md) | REST/WS/MCP 契约与错误模型 | 研发 / 集成方 |
-| [13-roadmap](docs/13-roadmap.md) | 里程碑、版本范围、验收门禁 | 全体 |
-| [adr/](docs/adr/) | 架构决策记录 | 研发 |
+| [01-product-requirements](docs/01-product-requirements.md) | 角色、场景、需求池（`FR-*` / `NFR-*`）、验收口径、竞品差异、开放问题 | 全体 |
+
+架构、领域模型、连接器、SQL 工作台、数据编辑、结构设计、备份迁移、可观测性、连接与安全、Agent、API 契约、路线图这 12 份设计文档与 18 份 ADR 已随重置移除。需要参考时从标签 `reset-baseline-0.2.0` 取回（例如 `git show reset-baseline-0.2.0:docs/04-connectors.md`），重建产出新文档后按 AGENTS.md §2 重新登记到这里。
 
 ---
 
 ## 5. 当前状态
 
-> 以下描述的是**重置前**（标签 `reset-baseline-0.2.0`）的能力状态，用来说明这套契约已经被验证到哪一步；当前仓库没有可运行代码，下面提到的 `internal/*`、`scripts/*` 路径都不存在。
+> 以下描述的是**重置前**（标签 `reset-baseline-0.2.0`）的能力状态，用来说明这套契约已经被验证到哪一步。本节提到的 `internal/*`、`scripts/*`、`docs/*`、`docs/adr/*`、`product-design/*` 路径**均已随重置移除**，链接不再有效，需要原文时按 §4 的方法从标签取回。
 
 **阶段：M2 完成，M3 切片一、二完成，备份与迁移已落地**。查询、数据编辑、结构设计、导出、结构比对、备份恢复、跨引擎迁移、Agent 都可用；SQL Server / Oracle 与 NoSQL 引擎未做（卡在镜像与实例）。
 
@@ -130,20 +120,20 @@ DBRover 面向同时维护多种数据库的工程师：一个人可能上午在
 | `cmd/dbrover-desktop` | 桌面壳（独立 module，Wails v2 + WebView2）：原生窗口、关窗退出、失败回退 |
 | `internal/agent` | Provider 抽象（OpenAI 兼容）、14 个工具、权限三模式与环境上限、执行循环（步数/时长/循环/失败上限）、审批门（预案只由服务端保管）、三路上下文召回、长会话压缩、评测集 |
 | `internal/infra/tunnel` | SSH 隧道与跳板链：多跳、密码/私钥/agent 认证、主机密钥 TOFU |
-| `internal/webui` | **临时界面**：免构建的内嵌 Web UI，按功能分三层信息架构——`ContextHeader`（连接/环境/设置/退出）+ `ActivityRail`（数据/结构/监控/AI/运维 5 个一级功能带，数据为默认主角）+ `DomainView`（对象树、SQL、结果网格、字段编辑、筛选排序、结构变更与比对、批量修改、导出、审批弹窗、Agent 面板）；各域动作渐进披露，全部内容复用同一 `#results`，设计见 [`product-design/`](product-design/00-product-overview.md) |
+| `internal/webui` | **临时界面**：免构建的内嵌 Web UI，按功能分三层信息架构——`ContextHeader`（连接/环境/设置/退出）+ `ActivityRail`（数据/结构/监控/AI/运维 5 个一级功能带，数据为默认主角）+ `DomainView`（对象树、SQL、结果网格、字段编辑、筛选排序、结构变更与比对、批量修改、导出、审批弹窗、Agent 面板）；各域动作渐进披露，全部内容复用同一 `#results`，设计见 `product-design/` |
 | `cmd/dbrover` | CLI：`version` / `health` / `tables` / `exec` / `serve`（`-open`、`-audit-anchor`）/ `tunnel` / `secret` / **`backup create|inspect`**（`-type full|schema`） / **`restore`** / **`migrate plan|run`**（`-probe` 按实际值判长度） |
 
-> `internal/webui` 是免构建的内嵌界面：桌面与团队模式**加载同一份** `index.html` / `app.js` / `ui2.js` / `style.css`。长期目标仍是 [ADR-0001](docs/adr/0001-tech-stack.md) 的 React + TypeScript + Vite 栈，本轮按 ADR-0017 在免构建版本上补齐设置、连接管理、多标签编辑器与视觉系统，并按 [`product-design/`](product-design/07-information-architecture.md) 把顶栏约 15 个平级按钮按功能重排为三层 IA（只重排容器、保留全部 id/动作/能力位/`#results` 节点身份，18 条 UI 断言与两种形态不变）。
+> `internal/webui` 是免构建的内嵌界面：桌面与团队模式**加载同一份** `index.html` / `app.js` / `ui2.js` / `style.css`。长期目标仍是 ADR-0001 的 React + TypeScript + Vite 栈，本轮按 ADR-0017 在免构建版本上补齐设置、连接管理、多标签编辑器与视觉系统，并按 `product-design/` 把顶栏约 15 个平级按钮按功能重排为三层 IA（只重排容器、保留全部 id/动作/能力位/`#results` 节点身份，18 条 UI 断言与两种形态不变）。
 
-> 跨引擎差异的写法约定见 [ADR-0005](docs/adr/0005-engine-differences-as-capabilities.md)：能力有无进 `Capabilities`，语句文本归 `dialect`，其余位置不得判断引擎名。
+> 跨引擎差异的写法约定见 ADR-0005：能力有无进 `Capabilities`，语句文本归 `dialect`，其余位置不得判断引擎名。
 >
-> 删除前的依赖查询放在驱动层，精确与近似的边界由驱动自己标注（`Dependent.Exact`），见 [ADR-0006](docs/adr/0006-dependency-check-in-driver.md)。
+> 删除前的依赖查询放在驱动层，精确与近似的边界由驱动自己标注（`Dependent.Exact`），见 ADR-0006。
 >
-> 非关系型引擎（Redis / Mongo / ES）不实现 `Connector`/`Metadata`，另用 `KVConnector` 一族接口，`api` 靠类型断言而不是引擎名选路径，见 [ADR-0007](docs/adr/0007-nosql-connector-model.md)。
+> 非关系型引擎（Redis / Mongo / ES）不实现 `Connector`/`Metadata`，另用 `KVConnector` 一族接口，`api` 靠类型断言而不是引擎名选路径，见 ADR-0007。
 
-**两种形态都已具备**：`dbrover-desktop`（Wails v2 原生窗口，Windows）与 `dbrover serve -open`（浏览器）共用同一份内核与界面，详见 [ADR-0017](docs/adr/0017-desktop-shell-and-settings.md)。React 正式前端仍是长期目标，本轮复用免构建 `internal/webui` 完成设置面板、连接管理、多标签编辑器与整体视觉重做。
+**两种形态都已具备**：`dbrover-desktop`（Wails v2 原生窗口，Windows）与 `dbrover serve -open`（浏览器）共用同一份内核与界面，详见 ADR-0017。React 正式前端仍是长期目标，本轮复用免构建 `internal/webui` 完成设置面板、连接管理、多标签编辑器与整体视觉重做。
 
-**尚未实现**：React 正式前端、SQL Server / Oracle（镜像拉不下来，见 [ADR-0008](docs/adr/0008-mssql-connector.md)）、MongoDB / Elasticsearch、引擎特有项（`EngineExtra`）表单、磁盘余量探测（只有 SQLite 能诚实实现——MySQL/PG 拿不到所在卷余量）、例程依赖检查、手写 SQL 反解回表单、Agent 的向量召回与 `/agent/providers`、测试数据生成。
+**尚未实现**：React 正式前端、SQL Server / Oracle（镜像拉不下来，见 ADR-0008）、MongoDB / Elasticsearch、引擎特有项（`EngineExtra`）表单、磁盘余量探测（只有 SQLite 能诚实实现——MySQL/PG 拿不到所在卷余量）、例程依赖检查、手写 SQL 反解回表单、Agent 的向量召回与 `/agent/providers`、测试数据生成。
 
 
 ## 6. 快速开始
@@ -186,7 +176,7 @@ bin/dbrover.exe migrate plan -engine mysql -host H -user U -db S -table t -to-en
 
 > 桌面与团队模式共用同一份设置：`GET/PATCH /api/v1/settings` 持久化在服务端，
 > 界面「设置」面板可改主题、字号、模型服务与 API Key（只进 OS 凭据库，不回显）。
-> 详见 [docs/12 §2.8.1](docs/12-api-contract.md) 与 [ADR-0017](docs/adr/0017-desktop-shell-and-settings.md)。
+> 详见 docs/12 §2.8.1 与 ADR-0017。
 
 ### 6.1 CLI 参数
 
@@ -252,7 +242,7 @@ pwsh -File scripts/accept/compare-cross.ps1
 
 要求 Go 1.26+（`modernc.org/sqlite` 的最低版本）。`CGO_ENABLED=0`，全部依赖纯 Go。
 
-真机套件在**空实例**上可直接跑：用例会自己建 `dbrover_test`。验收脚本的跑法与排错顺序见 [`scripts/accept/README.md`](scripts/accept/README.md)。
+真机套件在**空实例**上可直接跑：用例会自己建 `dbrover_test`。验收脚本的跑法与排错顺序见 `scripts/accept/README.md`。
 
 约定见 [`AGENTS.md`](AGENTS.md)：文档先行、破坏性变更落 ADR、跨平台产物走 CI。
 
