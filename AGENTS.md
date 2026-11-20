@@ -2,6 +2,8 @@
 
 本文件是**所有协作者（人 / AI Agent）**进入本仓库时的入口。先读完再动手。
 
+> **2026-11-20 状态：仓库按 [ADR-0018](docs/adr/0018-full-reset-and-rebuild.md) 全量重置，当前只有文档。** 下文 §3 目录结构、§5 测试与验证、§6 CI 是**重建目标**而非现状：`go test ./...`、`scripts/check.ps1`、CI 流水线此刻都不存在。重置前的完整实现见标签 `reset-baseline-0.2.0`（`git switch -c pre-reset reset-baseline-0.2.0` 可整库取回）。
+
 ---
 
 ## 1. 项目一句话

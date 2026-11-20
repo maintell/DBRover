@@ -4,6 +4,13 @@
 
 ## [Unreleased]
 
+### 变更 · 全量重置：只保留文档，实现从零重建
+
+- **原因**：混合编程（人写 + Agent 写、多轮临时方案叠加）导致多条执行路径并存、分层出现反向依赖、文档与实现不能互证，读代码已无法判断哪条是权威路径。判断继续修补的成本高于按文档重建。
+- **动作**：按 [ADR-0018](docs/adr/0018-full-reset-and-rebuild.md) 移除 331 个受控文件——`cmd/`、`internal/`（api/service/driver/policy/agent/host/infra/model/webui/ci）、`scripts/`、`.github/`、`go.mod`、`go.sum`。保留 `docs/`（14 份设计文档 + 18 份 ADR + 1 份 spec）、`product-design/`（25 份）与根级 README / AGENTS / CHANGELOG。
+- **可回滚**：重置前完整实现固定在标签 `reset-baseline-0.2.0`（提交 `29adedb`），可整库取回或按文件摘取。
+- **影响**：CI 与本地检查脚本随之失效（`push main` 不再触发流水线、`go test ./...` 无包可测、`internal/ci` 的文档一致性门禁消失）；`docs/13 §1.5` 的里程碑状态已标注为「重置前基线」。重建时须把文档一致性校验作为第一批交付物。
+
 ## [0.2.2] - 2026-11-09
 
 ### 修复 · MySQL 8.0 上「锁等待 / 阻塞链」整块坏掉（聚焦 MySQL 实测驱动）
